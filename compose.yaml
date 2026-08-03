@@ -1,0 +1,69 @@
+# SecChat — Mattermost Team Edition + Postgres for the SecRouter suite.
+# Local mode + bot-account creation are enabled so bootstrap/secchat.sh can provision the
+# SecAgent bot and its token for the pi-mattermost bridge.
+#
+#   cp .env.example .env && edit        # set POSTGRES_PASSWORD (+ SSO if desired)
+#   ./bootstrap/secchat.sh up
+name: secchat
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mmuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-mattermost}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:${MATTERMOST_TAG:-10.5}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: "postgres://${POSTGRES_USER:-mmuser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mattermost}?sslmode=disable&connect_timeout=10"
+      MM_SERVICESETTINGS_SITEURL: ${MM_SITE_URL:-http://localhost:8065}
+      MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_PLUGINSETTINGS_ENABLE: "true"
+      MM_PLUGINSETTINGS_ENABLEUPLOADS: "true"
+      # SSO via SecSSO (GitLab connector → Authentik)
+      MM_GITLABSETTINGS_ENABLE: ${MM_GITLAB_ENABLE:-false}
+      MM_GITLABSETTINGS_ID: ${MM_GITLAB_ID:-}
+      MM_GITLABSETTINGS_SECRET: ${MM_GITLAB_SECRET:-}
+      MM_GITLABSETTINGS_AUTHENDPOINT: ${MM_GITLAB_AUTH_ENDPOINT:-}
+      MM_GITLABSETTINGS_TOKENENDPOINT: ${MM_GITLAB_TOKEN_ENDPOINT:-}
+      MM_GITLABSETTINGS_USERAPIENDPOINT: ${MM_GITLAB_USER_ENDPOINT:-}
+    ports:
+      - "${SECCHAT_HTTP_PORT:-8065}:8065"
+    volumes:
+      - mm-config:/mattermost/config
+      - mm-data:/mattermost/data
+      - mm-logs:/mattermost/logs
+      - mm-plugins:/mattermost/plugins
+      - mm-client-plugins:/mattermost/client/plugins
+      - mm-bleve:/mattermost/bleve-indexes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8065/api/v4/system/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 90s
+
+volumes:
+  postgres:
+  mm-config:
+  mm-data:
+  mm-logs:
+  mm-plugins:
+  mm-client-plugins:
+  mm-bleve:

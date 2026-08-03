@@ -1,0 +1,10 @@
+SecChat
+Copyright 2026 Austin Probe
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+SecChat packages and integrates Mattermost (https://mattermost.com), Team Edition, as the
+suite's team-chat and chat-ops surface — wired to SecSSO for single sign-on and to SecAgent
+through the @whonixnetworks/pi-mattermost bridge. Mattermost is a third-party project under
+its own license; it is not included in this repository — its container images are pulled at
+deploy time.

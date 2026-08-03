@@ -1,0 +1,5 @@
+# secrets & runtime state — NEVER commit
+.env
+*.log
+volumes/
+data/
