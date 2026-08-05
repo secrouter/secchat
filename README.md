@@ -9,7 +9,8 @@ bridge — type `/pi-connect` and drive an agent from chat.
 
 ## What you get
 
-- Mattermost Team Edition + Postgres via Compose (pinned tag).
+- Mattermost Team Edition + Postgres via Compose, built **natively** from Mattermost's official
+  release binary (arm64 + amd64 — native on Apple Silicon, no emulation; see [`Dockerfile`](Dockerfile)).
 - A control helper that stands it up and provisions the **SecAgent bot** + token (`mmctl --local`).
 - The exact **`pi-mattermost` config** to drop on the SecAgent host.
 - SSO through **SecSSO** (Mattermost's GitLab connector → Authentik).
@@ -60,7 +61,7 @@ GitLab connector at it (or use Mattermost's native SAML/OIDC if you run Enterpri
 
 | Variable | Meaning |
 |---|---|
-| `MATTERMOST_TAG` | Mattermost image tag — pin to the current stable release |
+| `MATTERMOST_VERSION` | Mattermost release (full x.y.z) — built natively from the official binary |
 | `POSTGRES_PASSWORD` | Postgres password (required) |
 | `MM_SITE_URL` | site URL clients use; must match the SSO redirect |
 | `SECCHAT_HTTP_PORT` | published port (8065) |
@@ -68,8 +69,11 @@ GitLab connector at it (or use Mattermost's native SAML/OIDC if you run Enterpri
 
 ## Notes
 
-- **Third-party.** Mattermost is not vendored here; its images are pulled at deploy time under
-  its own license (see [NOTICE](NOTICE)).
+- **Native on both arches.** Mattermost's published Docker image is amd64-only, so on Apple
+  Silicon it would run emulated. Instead the [`Dockerfile`](Dockerfile) builds a native image from
+  Mattermost's **official release binary** (published for arm64 *and* amd64) — arm64 on Apple
+  Silicon, amd64 on Fedora, no emulation. Mattermost itself is not vendored here; the binary is
+  fetched at build time over HTTPS under its own license (see [NOTICE](NOTICE)).
 - **Container-based** on every target (Colima on macOS, Podman on Fedora).
 - Run behind a TLS-terminating proxy in production and set `MM_SITE_URL` to the `https://` URL.
 

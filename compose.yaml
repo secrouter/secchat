@@ -23,7 +23,14 @@ services:
       retries: 5
 
   mattermost:
-    image: mattermost/mattermost-team-edition:${MATTERMOST_TAG:-10.5}
+    # Built natively from Mattermost's official release binary (see Dockerfile) — arm64 on Apple
+    # Silicon, amd64 on Fedora — instead of the amd64-only published image. `image:` tags + caches
+    # the build so a redeploy reuses it (rebuild explicitly with `docker compose build`).
+    build:
+      context: .
+      args:
+        MM_VERSION: ${MATTERMOST_VERSION:-10.5.9}
+    image: secrouter/secchat-mattermost:${MATTERMOST_VERSION:-10.5.9}
     restart: unless-stopped
     depends_on:
       postgres:
