@@ -147,3 +147,71 @@ export interface LlmCompleteRequest {
 export interface LlmClient {
   complete(req: LlmCompleteRequest): AsyncIterable<string>;
 }
+
+// ── Coding-agent control plane: sessions, the execute-gate, the runner port ──────────────────
+// The sharp-edged subsystem (decision #2, review C1). A coding agent runs on a RUNNER (a pi
+// process, server- or laptop-hosted) as a SESSION; its transcript streams to the channel. It is
+// in PLAN MODE by default — reads/analysis only; a mutating tool needs the OWNER's execute grant.
+
+export type SessionStatus = "starting" | "active" | "orphaned" | "ended";
+
+/** A live coding-agent instance. Lease is renewed by runner heartbeats; a lapsed lease → the
+ * reaper marks it `orphaned` (the runner/laptop went away). */
+export interface AgentSession {
+  id: Id;
+  agentId: Id;
+  channelId: Id;
+  hostType: "server" | "local";
+  runnerId?: string;
+  status: SessionStatus;
+  createdAt: string;
+  leaseExpiresAt: string;
+  endedAt?: string;
+}
+
+/** A tool is `read` (safe — allowed in plan mode) or `mutate` (side-effectful — needs an owner
+ * execute grant). Unknown tools classify as `mutate` (fail closed). */
+export type ToolClass = "read" | "mutate";
+
+/** The owner's scoped authorization to let an agent run mutating tools. ONLY the agent's owner
+ * can create one — the execute-gate enforces that (an invited participant never can). */
+export interface ExecuteGrant {
+  sessionId: Id;
+  grantedBy: string; // must equal the agent's ownerSub
+  scope: "once" | "turn"; // one mutating call, or all mutations within one turn
+  turnId?: string;
+  grantedAt: string;
+  consumed?: boolean;
+}
+
+/** Events a runner emits to the control plane. `tool_request` is the gate's decision point. */
+export type RunnerEvent =
+  | { type: "output"; text: string }
+  | { type: "tool_request"; tool: string; input?: string; requestId: string; turnId?: string }
+  | { type: "status"; status: SessionStatus }
+  | { type: "exit"; code?: number };
+
+/** Hosts a pi process for a session. Abstract so the control plane is testable against a fake;
+ * a real server runner + the local `secagent daemon` (Sprint 5) implement it later. */
+export interface Runner {
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string }): Promise<void>;
+  sendInput(sessionId: Id, text: string): Promise<void>;
+  /** Deliver the gate's verdict for a pending tool_request back to the runner. */
+  answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;
+  stop(sessionId: Id): Promise<void>;
+  onEvent(cb: (sessionId: Id, event: RunnerEvent) => void): void;
+}
+
+/** Session + execute-grant persistence. MemoryStore implements it alongside `Store`. */
+export interface SessionStore {
+  createSession(input: Omit<AgentSession, "id" | "createdAt">): Promise<AgentSession>;
+  getSession(id: Id): Promise<AgentSession | null>;
+  listSessionsByChannel(channelId: Id): Promise<AgentSession[]>;
+  listActiveSessions(): Promise<AgentSession[]>;
+  setSessionStatus(id: Id, status: SessionStatus): Promise<void>;
+  renewLease(id: Id, leaseExpiresAt: string): Promise<void>;
+  addGrant(grant: ExecuteGrant): Promise<void>;
+  /** The current usable (non-consumed) grant for a session, if any. */
+  activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined>;
+  consumeGrant(sessionId: Id): Promise<void>;
+}
