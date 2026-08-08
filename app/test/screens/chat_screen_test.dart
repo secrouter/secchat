@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/screens/chat.dart';
+import 'package:secchat_app/widgets/composer.dart';
 
 import '../fakes/fake_api_client.dart';
 
@@ -103,6 +104,154 @@ void main() {
       // The sent message is appended straight from the response and shows
       // up in the transcript.
       expect(find.text('hello from a test'), findsOneWidget);
+
+      // A human channel is never runner-driven: sendInput must not fire.
+      expect(fake.sendInputCalls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'a pre-existing agent channel with no locally-known session still calls postMessage',
+    (tester) async {
+      // c2 ("release-bot") is a bare `kind: agent` channel from
+      // `getChannels`, exactly like one this client didn't create itself --
+      // so its AgentKind/session are unknown locally and it must fall back
+      // to postMessage just like a human channel (see the
+      // `_agentKindByChannel` doc comment in chat.dart). Made the only
+      // channel in this fake so it's auto-selected on load: switching
+      // channels mid-test isn't needed to prove this and only adds noise.
+      final fake = FakeApiClient(me: _principal, channels: [_channels[1]]);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      final composerField = find.descendant(
+        of: find.byType(MessageComposer),
+        matching: find.byType(TextField),
+      );
+      expect(composerField, findsOneWidget);
+      await tester.enterText(composerField, 'status?');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await pumpSettled(tester);
+
+      expect(fake.postMessageCalls, hasLength(1));
+      expect(fake.postMessageCalls.single.channelId, 'c2');
+      expect(fake.postMessageCalls.single.content, 'status?');
+      expect(fake.sendInputCalls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'entering text and tapping Send in an assistant channel calls postMessage, not sendInput',
+    (tester) async {
+      final fake = FakeApiClient(me: _principal, channels: const []);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      // Drive the real "New assistant" flow so the channel is locally
+      // tagged AgentKind.assistant exactly as it would be in the app.
+      // Tapped by text, not `widgetWithText(ElevatedButton, ...)`: this
+      // sidebar action button is built via `ElevatedButton.icon(...)` with
+      // a non-null icon, which Flutter's Material library implements as
+      // the private `_ElevatedButtonWithIcon` subclass -- `find.byType`
+      // matches by exact runtimeType, not `is`-subtype, so it would never
+      // match plain `ElevatedButton`.
+      await tester.tap(find.text('New assistant'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'release-helper');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+      await pumpSettled(tester, times: 10);
+
+      expect(fake.createAgentCalls, hasLength(1));
+      expect(fake.createAgentCalls.single.kind, AgentKind.assistant);
+
+      final composerField = find.descendant(
+        of: find.byType(MessageComposer),
+        matching: find.byType(TextField),
+      );
+      expect(composerField, findsOneWidget);
+      await tester.enterText(composerField, 'summarize the thread');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await pumpSettled(tester);
+
+      expect(fake.postMessageCalls, hasLength(1));
+      expect(fake.postMessageCalls.single.content, 'summarize the thread');
+      expect(fake.sendInputCalls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'entering text and tapping Send in a coding-agent channel with a known '
+    'session calls sendInput, not postMessage',
+    (tester) async {
+      // CodingStrip's header row (session label + short id + the
+      // grant-execute button) needs more width than the default 800x600
+      // test surface leaves for the main content area beside the sidebar;
+      // an ordinary desktop window is comfortably wider than that. This is
+      // a test-surface sizing concern only, not a change to app behavior.
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final fake = FakeApiClient(me: _principal, channels: const []);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      // Drive the real "New coding agent" flow so the channel is locally
+      // tagged AgentKind.coding *and* has a known session id, exactly as it
+      // would after `POST /agents` returns `{agent, channel, session}`.
+      // Tapped by text -- see the "New assistant" test above for why
+      // `widgetWithText(ElevatedButton, ...)` doesn't match this button.
+      await tester.tap(find.text('New coding agent'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'infra-fixer');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+      await pumpSettled(tester, times: 10);
+
+      expect(fake.createAgentCalls, hasLength(1));
+      expect(fake.createAgentCalls.single.kind, AgentKind.coding);
+
+      // The execute-gate strip is up for the new session, proving the
+      // coding-agent surface (grant-execute control) is live.
+      expect(find.text('Grant execute (once)'), findsOneWidget);
+
+      final composerField = find.descendant(
+        of: find.byType(MessageComposer),
+        matching: find.byType(TextField),
+      );
+      expect(composerField, findsOneWidget);
+      await tester.enterText(composerField, 'run the tests');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await pumpSettled(tester);
+
+      expect(fake.sendInputCalls, hasLength(1));
+      expect(fake.sendInputCalls.single.sessionId, 'session-1');
+      expect(fake.sendInputCalls.single.text, 'run the tests');
+      expect(fake.postMessageCalls, isEmpty);
+
+      // The user's own line is still visible locally even though it never
+      // went through postMessage.
+      expect(find.text('run the tests'), findsOneWidget);
     },
   );
 }

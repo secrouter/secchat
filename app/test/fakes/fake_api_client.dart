@@ -25,6 +25,9 @@ class FakeApiClient implements ApiClient {
   /// Every `postMessage` call, in order, as `(channelId, content)`.
   final List<({String channelId, String content})> postMessageCalls = [];
 
+  /// Every `sendInput` call, in order, as `(sessionId, text)`.
+  final List<({String sessionId, String text})> sendInputCalls = [];
+
   /// Every `createAgent` call, in order.
   final List<({AgentKind kind, String name})> createAgentCalls = [];
 
@@ -40,7 +43,7 @@ class FakeApiClient implements ApiClient {
 
   /// Override to make any call throw, keyed by a description of the call
   /// (`'getChannels'`, `'getMessages'`, `'postMessage'`, `'createChannel'`,
-  /// `'createAgent'`, `'grantExecute'`).
+  /// `'createAgent'`, `'grantExecute'`, `'sendInput'`).
   final Map<String, Object> failures = {};
 
   void _maybeThrow(String op) {
@@ -94,6 +97,12 @@ class FakeApiClient implements ApiClient {
         );
     _messagesByChannel[channelId] = [...existing, message];
     return message;
+  }
+
+  @override
+  Future<void> sendInput(String sessionId, String text) async {
+    _maybeThrow('sendInput');
+    sendInputCalls.add((sessionId: sessionId, text: text));
   }
 
   @override

@@ -36,6 +36,15 @@ abstract class ApiClient {
 
   Future<Message> postMessage(String channelId, String content);
 
+  /// Feeds free-text input to a running coding-agent *session* (as opposed
+  /// to [postMessage], which posts a chat message to a *channel*). A coding
+  /// agent is driven by its runner, not chat history, so its reply never
+  /// comes back as a return value here -- it streams back over the
+  /// channel's WebSocket as `agent_output` / `tool_decision` events. 202
+  /// Accepted is the expected response; callers should treat this as
+  /// fire-and-forget beyond surfacing a thrown [ApiException].
+  Future<void> sendInput(String sessionId, String text);
+
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
@@ -154,6 +163,11 @@ class HttpApiClient implements ApiClient {
         await _post('/channels/$channelId/messages', {'content': content})
             as Map<String, dynamic>,
       );
+
+  @override
+  Future<void> sendInput(String sessionId, String text) async {
+    await _post('/sessions/$sessionId/input', {'text': text});
+  }
 
   @override
   Future<CreateAgentResult> createAgent({

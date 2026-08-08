@@ -59,6 +59,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, AgentKind> _agentKindByChannel = {};
   final Map<String, String> _sessionIdByChannel = {};
   final Set<String> _endedSessionIds = {};
+  int _localEchoSeq = 0;
 
   @override
   void initState() {
@@ -208,9 +209,33 @@ class _ChatScreenState extends State<ChatScreen> {
     _transcripts[channelId] = [...existing, MessageEntry(message)];
   }
 
+  /// The session to drive with `sendInput` for [channelId], or `null` if
+  /// this channel should go through `postMessage` instead -- i.e. it isn't
+  /// a coding-agent channel, or it is one but its session id isn't known
+  /// locally (see the `_agentKindByChannel` doc above: that happens for a
+  /// coding-agent channel from before this session, which degrades to
+  /// looking like a plain agent channel).
+  String? _codingSessionIdFor(String channelId) =>
+      _agentKindByChannel[channelId] == AgentKind.coding
+          ? _sessionIdByChannel[channelId]
+          : null;
+
   Future<void> _handleSend(String text) async {
     final channel = _selected;
     if (channel == null) return;
+    final sessionId = _codingSessionIdFor(channel.id);
+    if (sessionId != null) {
+      // A coding agent is driven by its runner, not chat history: input
+      // goes to the session, and the agent's reply streams back as
+      // `agent_output` / `tool_decision` WS events (handled in
+      // `_handleEvent`), never as a `message`. There's no response body to
+      // append here, so echo the user's own line locally -- otherwise it
+      // would simply vanish from the transcript.
+      await widget.api.sendInput(sessionId, text);
+      if (!mounted) return;
+      setState(() => _append(channel.id, MessageEntry(_localEcho(text))));
+      return;
+    }
     // Append straight from the POST response rather than waiting for a WS
     // echo (some backends don't echo the sender's own message back to
     // them); `_appendMessageUnlessDuplicate` dedupes by id in case the
@@ -219,6 +244,21 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
   }
+
+  /// A locally-synthesized "sent" message for text handed to `sendInput`,
+  /// which -- unlike `postMessage` -- has no server response to render
+  /// instead. The `local-` id prefix keeps it out of the way of real
+  /// message ids (server ids are never expected to collide with it), so it
+  /// can't be mistaken for a duplicate by `_appendMessageUnlessDuplicate`
+  /// elsewhere.
+  Message _localEcho(String text) => Message(
+    id: 'local-${_localEchoSeq++}',
+    seq: 0,
+    authorRef: widget.principal.sub,
+    authorType: AuthorType.user,
+    content: text,
+    createdAt: DateTime.now(),
+  );
 
   Future<void> _handleNewChannel() async {
     final name = await showNewItemDialog(

@@ -9,7 +9,7 @@
 import { buildOverview } from "./admin/overview.ts";
 import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
-import { makeEchoRunner } from "./agent/echo-runner.ts";
+import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
 import { devVerifyToken } from "./dev/auth.ts";
@@ -41,7 +41,9 @@ let hub: Hub | undefined;
 const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channelId, payload);
 // Coding-agent control plane. The echo runner is a dev stand-in until a real pi runner lands
 // (Sprint 5); the execute-gate (plan-mode default, owner-authorized mutation) is fully real.
-const control = makeControlPlane({ sessions: store, runner: makeEchoRunner(), getAgent: (id) => store.getAgent(id), broadcast });
+// The interactive demo runner drives coding-agent sessions and requests a bash tool on build/run
+// intent, so the execute-gate is exercised (a real pi runner replaces it later — same Runner port).
+const control = makeControlPlane({ sessions: store, runner: makeInteractiveRunner(), getAgent: (id) => store.getAgent(id), broadcast });
 
 if (config.devMode) {
   // DEV ONLY (SECCHAT_DEV_MODE=1): seed the in-memory store so /admin has something to show.
