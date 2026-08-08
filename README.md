@@ -67,6 +67,21 @@ GitLab connector at it (or use Mattermost's native SAML/OIDC if you run Enterpri
 | `SECCHAT_HTTP_PORT` | published port (8065) |
 | `MM_GITLAB_*` | SSO connector settings (point at SecSSO) |
 
+## Backup
+
+The control helper exposes self-contained `backup`/`restore` verbs — the suite orchestrator
+(`secdeploy backup`) calls these and encrypts the result, but they also work standalone:
+
+```bash
+./bootstrap/secchat.sh backup  ./snap   # → mattermost.sql + /mattermost files + .env into ./snap
+./bootstrap/secchat.sh restore ./snap   # reinitialize the stack from ./snap (REPLACES state)
+```
+
+`backup` needs the stack up (it dumps the live Postgres). `restore` reinitializes Postgres from
+a clean volume and restores the dumped `.env` (its `POSTGRES_PASSWORD` must match the dump) plus
+the `/mattermost/{data,config}` files — so Mattermost's own at-rest keys line up. For the
+encrypted, whole-suite backup see [secdeploy](https://github.com/secrouter/secdeploy)'s runbooks.
+
 ## Notes
 
 - **Native on both arches.** Mattermost's published Docker image is amd64-only, so on Apple
