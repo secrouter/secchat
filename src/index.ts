@@ -20,6 +20,7 @@ import { MemoryStore } from "./store/memory.ts";
 import { attachWsHub } from "./ws/hub.ts";
 import type { Hub } from "./ws/hub.ts";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 
 const config = loadConfig();
 // In dev-mode (SECCHAT_DEV_MODE=1) accept `dev.<sub>.<groups>` tokens so the local web client
@@ -65,10 +66,17 @@ if (config.devMode) {
   console.error("▸ dev seed loaded (SECCHAT_DEV_MODE=1) — visit /admin");
 }
 
+// Serve the Flutter build when it exists (the primary client — web/desktop/mobile, one codebase),
+// else fall back to the archived dependency-free minimal client (clients/web-minimal).
+const flutterWeb = fileURLToPath(new URL("../app/build/web", import.meta.url));
+const minimalWeb = fileURLToPath(new URL("../clients/web-minimal", import.meta.url));
+const webRoot = existsSync(`${flutterWeb}/index.html`) ? flutterWeb : minimalWeb;
+if (config.devMode) console.error(`▸ web client: ${webRoot === flutterWeb ? "Flutter build" : "minimal JS (fallback)"} — ${webRoot}`);
+
 const server = createHttpServer({
   verifyToken, store, llm, control, broadcast,
   search: (userSub, q) => searchMessages(store, userSub, q),
-  web: { root: fileURLToPath(new URL("./web", import.meta.url)) }, // serves the SPA at / + /assets/*
+  web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
 });
 hub = attachWsHub(server, { verifyToken });

@@ -17,7 +17,7 @@ test("exit 1 — devVerifyToken parses a dev token into a principal, rejects jun
 });
 
 function devServer() {
-  return createHttpServer({ verifyToken: devVerifyToken, store: new MemoryStore(), web: { root: "src/web" } });
+  return createHttpServer({ verifyToken: devVerifyToken, store: new MemoryStore(), web: { root: "clients/web-minimal" } });
 }
 
 test("exit 2 — the SPA + assets are served publicly with the right content-types", async () => {
