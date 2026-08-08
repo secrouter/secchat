@@ -1,0 +1,17 @@
+name: secchat_app
+description: SecChat client (Flutter — web now, desktop/mobile later; one codebase).
+publish_to: none
+version: 0.0.0
+environment:
+  sdk: ^3.9.0
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.3.0
+  web_socket_channel: ^3.0.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+flutter:
+  uses-material-design: true

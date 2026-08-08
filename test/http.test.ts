@@ -376,9 +376,13 @@ writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>shell</title>"
 mkdirSync(join(webRoot, "assets"));
 writeFileSync(join(webRoot, "assets", "app.js"), "console.log('app');");
 writeFileSync(join(webRoot, "assets", "app.css"), "body { color: red; }");
-// Lives directly under webRoot, OUTSIDE assets/ — the traversal test below asserts this is NOT
-// reachable via /assets/.., even though the file genuinely exists one directory up.
-writeFileSync(join(webRoot, "secret.txt"), "top secret");
+// A root-level file (not under assets/) — the general static server serves the WHOLE client build
+// dir (Flutter emits main.dart.js/flutter.js/canvaskit/ at the root), so this IS a served file.
+writeFileSync(join(webRoot, "app.js"), "console.log('root');");
+// Lives OUTSIDE webRoot (a sibling in tmpdir) — the traversal test asserts the guard blocks any
+// path that would ESCAPE the web root, which is the security property that actually matters.
+const outsideSecret = join(webRoot, "..", "secchat-outside-secret.txt");
+writeFileSync(outsideSecret, "top secret outside the web root");
 
 let webServer: Server;
 let webBaseUrl: string;
@@ -394,6 +398,7 @@ before(async () => {
 after(async () => {
   await new Promise<void>((resolve) => webServer.close(() => resolve()));
   rmSync(webRoot, { recursive: true, force: true });
+  rmSync(outsideSecret, { force: true });
 });
 
 test("GET /healthz is 200 with no auth required", async () => {
@@ -976,25 +981,31 @@ test("GET /assets/app.css serves the asset as text/css", async () => {
   assert.equal(await res.text(), "body { color: red; }");
 });
 
-test("GET /assets/<missing file> is 404", async () => {
-  const res = await fetch(`${webBaseUrl}/assets/does-not-exist.js`);
-  assert.equal(res.status, 404);
-  assert.deepEqual(await res.json(), { error: "not_found" });
+test("GET a root-level static file (not under assets/) is served", async () => {
+  // The general static server serves the WHOLE client build dir, not just /assets/ — this is what
+  // lets a Flutter build's root-level main.dart.js/flutter.js load.
+  const res = await fetch(`${webBaseUrl}/app.js`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/javascript"));
+  assert.equal(await res.text(), "console.log('root');");
 });
 
-test("GET /assets/<path> cannot escape the assets root, even to a file that really exists", async () => {
-  // "%2e%2e%2f" decodes to "../". It's sent percent-encoded (rather than as a literal ".."
-  // path segment) specifically because a literal "/assets/../secret.txt" gets collapsed by the
-  // URL parser itself — on both the fetch() client and the `new URL(req.url, ...)` call in
-  // server.ts — into "/secret.txt" before any handler ever sees an "/assets/" prefix at all, so
-  // it can't exercise this route's own path-safety check. The encoded slash survives that
-  // normalization intact as one opaque "/assets/" segment, decodeURIComponent'd only inside the
-  // handler itself — which is exactly the case the resolve()+startsWith() guard exists for. It
-  // targets secret.txt, which genuinely exists one directory above assets/ (see webRoot setup
-  // above): a 404 here proves the guard is doing the work, not just a missing file.
-  const res = await fetch(`${webBaseUrl}/assets/%2e%2e%2fsecret.txt`);
-  assert.equal(res.status, 404);
-  assert.deepEqual(await res.json(), { error: "not_found" });
+test("GET a missing static file falls through to the API (401 without a token)", async () => {
+  // A path with no real file under the web root is NOT a static 404 — it falls through to the
+  // normal auth+router (so it can never shadow an API route like /me). Unauthenticated ⇒ 401.
+  const res = await fetch(`${webBaseUrl}/does-not-exist.js`);
+  assert.equal(res.status, 401);
+});
+
+test("static serving cannot escape the web root (percent-encoded traversal is blocked)", async () => {
+  // "%2e%2e%2f" decodes to "../". A literal ".." is collapsed by the URL parser before the handler
+  // sees it; the percent-encoded form survives, decoded only inside the handler — exactly what the
+  // resolve()+startsWith() guard is for. This targets a file that genuinely exists OUTSIDE the web
+  // root (secchat-outside-secret.txt, a sibling in tmpdir): the guard must refuse to serve it, so
+  // it falls through to auth → 401 (never 200, never the file's contents).
+  const res = await fetch(`${webBaseUrl}/%2e%2e%2fsecchat-outside-secret.txt`);
+  assert.notEqual(res.status, 200);
+  assert.equal(res.status, 401);
 });
 
 test("GET / without a web root wired falls through to the normal auth flow, unchanged", async () => {

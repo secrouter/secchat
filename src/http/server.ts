@@ -5,7 +5,7 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import type { AdminOverview, AgentControl, AgentKind, Channel, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
@@ -511,21 +511,24 @@ export function createHttpServer(deps: {
     // escape the directory — defense in depth alongside the dot-segment normalization `new URL`
     // already applied to `pathname` above.
     if (method === "GET" && deps.web) {
-      const webRoot = deps.web.root;
-      if (pathname === "/" || pathname === "" || pathname === "/index.html") {
-        serveWebFile(res, webCache, join(webRoot, "index.html"), "text/html; charset=utf-8");
-        return;
-      }
-      if (pathname.startsWith("/assets/")) {
-        const assetsRoot = resolve(webRoot, "assets");
-        const requested = decodeURIComponent(pathname.slice("/assets/".length));
-        const target = resolve(assetsRoot, requested);
-        if (target !== assetsRoot && !target.startsWith(assetsRoot + sep)) {
-          sendJson(res, 404, { error: "not_found" });
-          return;
+      // Serve any EXISTING file under the web root (the SPA shell + all its assets). This must be
+      // general, not just `/assets/*`: a Flutter build emits `/main.dart.js`, `/flutter.js`,
+      // `/canvaskit/*`, `/assets/*`, etc. at arbitrary paths. The path is resolved against the root
+      // and rejected if it would escape it (traversal-safe). A path that isn't a real file — an API
+      // route like `/me`, or an in-app route — falls THROUGH to the auth+router below (we only
+      // short-circuit when a file actually exists), so static serving never shadows the API.
+      const rootAbs = resolve(deps.web.root);
+      const rel = pathname === "/" || pathname === "" ? "index.html" : decodeURIComponent(pathname).replace(/^\/+/, "");
+      const target = resolve(rootAbs, rel);
+      if (target === rootAbs || target.startsWith(rootAbs + sep)) {
+        try {
+          if (statSync(target).isFile()) {
+            serveWebFile(res, webCache, target, contentTypeFor(target));
+            return;
+          }
+        } catch {
+          // no such file (ENOENT) or not a regular file → fall through to the API router
         }
-        serveWebFile(res, webCache, target, contentTypeFor(target));
-        return;
       }
     }
 
