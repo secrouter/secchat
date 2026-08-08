@@ -1,0 +1,12 @@
+# Keep the build context lean — Dockerfile COPYs only src/, clients/, db/, tsconfig.json,
+# package.json, package-lock.json explicitly, but this trims what's sent to the daemon and
+# keeps stray local files (secrets, logs) out of it entirely.
+node_modules
+.git
+test
+coverage
+*.log
+.env
+app/.dart_tool
+app/build
+.DS_Store

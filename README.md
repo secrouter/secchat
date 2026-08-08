@@ -57,6 +57,42 @@ test/             node:test suites, one per module
 db/migrations/    SQL schema (applied by the Postgres store when it lands)
 ```
 
+## Deploy (Docker Compose stack)
+
+SecChat packages as a two-container Compose stack — the app plus its own Postgres — for the
+SecRouter suite's orchestrator (SecDeploy). `bootstrap/secchatng.sh` is the control helper;
+SecDeploy drives the same verbs it exposes standalone. (`secchatng` — "SecChat, next-gen" — is
+this rebuild's SecDeploy component id while it ships alongside the incumbent Mattermost `secchat`
+during the transition; deploy it with `secdeploy … --with secchatng`. It becomes plain `secchat`
+at cutover.)
+
+```bash
+cp .env.example .env
+# set SECCHAT_OIDC_ISSUER / SECCHAT_OIDC_AUDIENCE (SecSSO) and PG_PASSWORD; $EDITOR .env
+./bootstrap/secchatng.sh up          # build + start, wait for /healthz, print the wiring readout
+```
+
+```
+./bootstrap/secchatng.sh up             build + start, wait, print the SSO/gateway wiring
+./bootstrap/secchatng.sh status         compose ps
+./bootstrap/secchatng.sh wiring         reprint the SecSSO + SecRouter wiring readout
+./bootstrap/secchatng.sh backup <dir>   pg_dump + .env → <dir>
+./bootstrap/secchatng.sh restore <dir>  reinitialize the stack from <dir> (REPLACES state)
+./bootstrap/secchatng.sh logs [svc]     follow logs (secchat | postgres)
+./bootstrap/secchatng.sh down [-v]      stop (-v also wipes volumes/state)
+```
+
+**All state lives in Postgres** — channels, messages, agents, the audit log, everything (see
+`db/migrations/`); migrations are applied automatically on boot. There is no separate uploads
+volume, so `backup` (a `pg_dump` plus the `.env` needed to reconstruct `DATABASE_URL`) captures
+the stack's complete state, and `restore` reinstates it from a clean volume.
+
+**Web client**: the image serves `clients/web-minimal` (dependency-free, always present in the
+repo). It does **not** build the Flutter client (`app/`) — that toolchain doesn't belong in
+this lean runtime image. `Dockerfile` has a commented block showing how to add a Flutter-web
+build stage later; `src/index.ts` already prefers `app/build/web` over the minimal client
+whenever that build is present, so no server code change is needed when that lands.
+
 ## License
 
 [Apache 2.0](LICENSE) — Copyright 2026 Austin Probe.

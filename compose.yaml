@@ -1,0 +1,48 @@
+# SecChat — auditable team + agentic chat backend, packaged for the SecRouter suite's Docker
+# Compose deploy path (driven by bootstrap/secchat.sh, or SecDeploy calling the same verbs).
+#
+#   cp .env.example .env && edit    # set PG_PASSWORD + the SecSSO issuer/audience
+#   ./bootstrap/secchat.sh up
+name: secchat
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: secchat
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      POSTGRES_DB: secchat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secchat"]
+      interval: 5s
+      retries: 10
+    # Internal only — not published to the host; the secchat app is the only client.
+
+  secchat:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Container-topology values fixed here so they always point at the compose service names
+      # regardless of what .env says (matches the sibling stacks' convention).
+      DATABASE_URL: postgres://secchat:${PG_PASSWORD}@postgres:5432/secchat
+      SECCHAT_HOST: 0.0.0.0
+      SECCHAT_PORT: "47010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${SECCHAT_HTTP_PORT:-47010}:47010"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:47010/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata: {}
