@@ -1,5 +1,15 @@
-# secrets & runtime state — NEVER commit
+# dependencies (reconstructed from package.json + the committed lockfile)
+node_modules/
+
+# build output
+dist/
+
+# local env / secrets (the .example is tracked)
+*.env
+!*.env.example
 .env
+
+# logs, coverage, OS cruft
 *.log
-volumes/
-data/
+coverage/
+.DS_Store

@@ -1,0 +1,22 @@
+{
+  "name": "secchat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SecChat — auditable team + agentic chat for CUI / air-gapped enclaves (SecRouter suite)",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jose": "6.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.7.0",
+    "typescript": "5.9.3"
+  }
+}

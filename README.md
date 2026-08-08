@@ -1,96 +1,61 @@
-# SecChat — team chat & chat-ops for the SecRouter suite
+# SecChat
 
-**Mattermost, wired into the suite.** SecChat is a Community-Edition (Team Edition) Mattermost
-deployment that logs in through **SecSSO** and turns a channel into a control surface for
-**SecAgent** via the [`@whonixnetworks/pi-mattermost`](https://pi.dev/packages/@whonixnetworks/pi-mattermost)
-bridge — type `/pi-connect` and drive an agent from chat.
+Auditable **team chat + agentic chat** for CUI / air-gapped enclaves — the SecRouter suite's
+purpose-built replacement for the Mattermost-based `secchat` and the LibreChat-based
+`secassist`. One app: people talk to each other, spawn governed agents, and every message is
+tamper-evidently logged.
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+> **Status: rearchitecture in progress** (this `rearchitecture` branch). The prior
+> Mattermost stack lives on `main` until this reaches parity. See `docs/` for the design.
 
-## What you get
+## Why it exists
 
-- Mattermost Team Edition + Postgres via Compose, built **natively** from Mattermost's official
-  release binary (arm64 + amd64 — native on Apple Silicon, no emulation; see [`Dockerfile`](Dockerfile)).
-- A control helper that stands it up and provisions the **SecAgent bot** + token (`mmctl --local`).
-- The exact **`pi-mattermost` config** to drop on the SecAgent host.
-- SSO through **SecSSO** (Mattermost's GitLab connector → Authentik).
+- **Auditable by construction** — every message links into a per-channel SHA‑256 hash chain
+  bound to the content *hash* (not the plaintext), plus a metadata-only audit chain. Tampering
+  is detectable; CUI spillage is still purgeable (redaction removes plaintext, the chain
+  stays verifiable).
+- **Agents are first-class + governed** — spawn a SecAgent tied to you; it runs in *plan mode*
+  by default, and only *you* can authorize code-executing work. Its model calls go through
+  SecRouter, attributed and budgeted to you.
+- **SSO from the ground up** — every session is a SecSSO (Authentik) session, validated via
+  JWKS. No local passwords.
 
-## Quickstart
+## Dependency policy (read before adding anything)
 
-```bash
-cp .env.example .env      # set POSTGRES_PASSWORD (+ SSO if desired)
-./bootstrap/secchat.sh up
+This is a supply-chain-conscious, CMMC/air-gap component. Dependencies are a **liability**, not
+a convenience:
+
+- **Runtime dependencies: `jose` only** (JWKS/JWT — security-focused, zero transitive deps),
+  pinned to an exact version. WebSockets are implemented on the Node **standard library**.
+  Postgres (`pg`) will be added — pinned, with its transitive tree vetted — when the data layer
+  moves off the in-memory store; until then there is no `pg` import.
+- **No web frameworks, no bundlers, no "utility" micro-packages.** Node 24 LTS + TypeScript
+  (native type-stripping — no build step for dev) covers it.
+- **Exact version pins, no floating ranges.** A committed lockfile is the source of truth.
+- Adding *any* new package requires an explicit review of the package, its maintainer, and its
+  entire transitive tree. When in doubt, use the standard library or write the ~100 lines.
+
+## Toolchain
+
+- **Node 24 LTS** (`engines: >=24`). TypeScript runs natively via Node's type-stripping — no
+  compile step to run or test.
+- `npm test` → `node --test` (the built-in runner; test files are `test/*.test.ts`).
+- `npm run typecheck` → `tsc --noEmit`.
+
+## Layout
+
 ```
-
-Open `http://localhost:8065`, create the first admin account, then provision the agent bot:
-
-```bash
-./bootstrap/secchat.sh bot          # creates the 'secagent' bot + 'secrouter' team + a token
-./bootstrap/secchat.sh pi-config    # prints ~/.config/pi-mattermost/config.toml for SecAgent
+src/
+  types.ts        shared contracts (Principal, Store, Channel, Message, AuditEvent, …)
+  config.ts       env-driven config (fails closed on missing secrets)
+  audit/chain.ts  the tamper-evident hash chains (message + audit)
+  store/          persistence behind the Store interface (memory now, Postgres later)
+  auth/           SecSSO (Authentik) JWKS token verification
+  http/           bare-Node HTTP server + routes
+  ws/             stdlib WebSocket hub (realtime)
+test/             node:test suites, one per module
+db/migrations/    SQL schema (applied by the Postgres store when it lands)
 ```
-
-## Connect SecAgent (chat-ops)
-
-On the **SecAgent** host, install the bridge and point it at SecChat:
-
-```bash
-pi install npm:@whonixnetworks/pi-mattermost
-mkdir -p ~/.config/pi-mattermost
-$EDITOR ~/.config/pi-mattermost/config.toml   # paste what `secchat.sh pi-config` printed
-pi-mattermost install                          # runs the bridge as a user service
-```
-
-Then, from a Mattermost channel:
-
-```
-/pi-connect /path/to/your/project
-```
-
-…starts a SecAgent session bound to that channel — the same engines as SecAgent's use cases
-(this is SecAgent **UC101 — Mattermost interaction**), with results streamed back in-thread.
-See [docs/connect-secagent.md](docs/connect-secagent.md).
-
-## SSO via SecSSO
-
-Mattermost Team Edition authenticates SSO through its **GitLab** connector; SecSSO (Authentik)
-presents GitLab-compatible OAuth endpoints. Set the `MM_GITLAB_*` values in `.env` and create
-the provider in SecSSO — see [docs/sso.md](docs/sso.md). Already have an IdP? Point the
-GitLab connector at it (or use Mattermost's native SAML/OIDC if you run Enterprise).
-
-## Configuration (`.env`)
-
-| Variable | Meaning |
-|---|---|
-| `MATTERMOST_VERSION` | Mattermost release (full x.y.z) — built natively from the official binary |
-| `POSTGRES_PASSWORD` | Postgres password (required) |
-| `MM_SITE_URL` | site URL clients use; must match the SSO redirect |
-| `SECCHAT_HTTP_PORT` | published port (8065) |
-| `MM_GITLAB_*` | SSO connector settings (point at SecSSO) |
-
-## Backup
-
-The control helper exposes self-contained `backup`/`restore` verbs — the suite orchestrator
-(`secdeploy backup`) calls these and encrypts the result, but they also work standalone:
-
-```bash
-./bootstrap/secchat.sh backup  ./snap   # → mattermost.sql + /mattermost files + .env into ./snap
-./bootstrap/secchat.sh restore ./snap   # reinitialize the stack from ./snap (REPLACES state)
-```
-
-`backup` needs the stack up (it dumps the live Postgres). `restore` reinitializes Postgres from
-a clean volume and restores the dumped `.env` (its `POSTGRES_PASSWORD` must match the dump) plus
-the `/mattermost/{data,config}` files — so Mattermost's own at-rest keys line up. For the
-encrypted, whole-suite backup see [secdeploy](https://github.com/secrouter/secdeploy)'s runbooks.
-
-## Notes
-
-- **Native on both arches.** Mattermost's published Docker image is amd64-only, so on Apple
-  Silicon it would run emulated. Instead the [`Dockerfile`](Dockerfile) builds a native image from
-  Mattermost's **official release binary** (published for arm64 *and* amd64) — arm64 on Apple
-  Silicon, amd64 on Fedora, no emulation. Mattermost itself is not vendored here; the binary is
-  fetched at build time over HTTPS under its own license (see [NOTICE](NOTICE)).
-- **Container-based** on every target (Colima on macOS, Podman on Fedora).
-- Run behind a TLS-terminating proxy in production and set `MM_SITE_URL` to the `https://` URL.
 
 ## License
 
