@@ -3,7 +3,7 @@
 // Kept deliberately small and dependency-free (matches SecRouter's zero-dep ethos). The
 // backend depends only on `jose` (JWKS) at runtime; persistence is behind the `Store`
 // interface (an in-memory impl now, a Postgres impl when the network is back), and the
-// HTTP/WS layers take their dependencies by injection so each is testable in isolation.
+// HTTP/WS/LLM layers take their dependencies by injection so each is testable in isolation.
 
 export type Id = string; // uuid v4 (string form)
 export type Sha256Hex = string; // 64-char lowercase hex
@@ -23,6 +23,7 @@ export type VerifyToken = (token: string) => Promise<Principal>;
 export type ChannelKind = "human" | "agent" | "dm";
 export type MemberType = "user" | "agent";
 export type AuthorType = "user" | "agent";
+export type AgentKind = "assistant" | "coding";
 
 export interface Channel {
   id: Id;
@@ -41,14 +42,30 @@ export interface Member {
   role: "owner" | "member";
 }
 
+/** A spawned agent, owned by — and acting as — exactly one user (decision #2/#7). Sprint 2
+ * implements `assistant` (server-side model chat, NO runner); `coding` (runner + tools +
+ * owner-gated execution) lands in Sprint 4. Its model calls are always attributed to
+ * `ownerSub` at SecRouter, regardless of who prompts. */
+export interface Agent {
+  id: Id;
+  ownerSub: string;
+  kind: AgentKind;
+  name?: string;
+  model?: string; // SecRouter model id used for the assistant path
+  createdAt: string;
+}
+
 /** A message row. The hash chain is over metadata + the CONTENT HASH (never the plaintext),
  * so a redaction can drop the plaintext while leaving the chain verifiable (see audit/chain). */
 export interface Message {
   id: Id;
   channelId: Id;
   seq: number; // 1-based, per channel
-  authorRef: string;
+  authorRef: string; // Principal.sub for users; agent id for agent messages
   authorType: AuthorType;
+  /** For an agent message, the human whose prompt triggered this turn (decision #2). Recorded
+   * on the row AND in the chained audit event; not itself bound into the message hash. */
+  promptedBy?: string;
   contentSha256: Sha256Hex; // hash of the ORIGINAL content — stays even after redaction
   prevHash: Sha256Hex;
   hash: Sha256Hex;
@@ -64,6 +81,7 @@ export interface AuditEvent {
   actAs?: string; // delegated end-user, when an agent/service acts on someone's behalf
   action: string; // e.g. "message.redact", "channel.create", "agent.spawn"
   target?: string;
+  detail?: string; // short non-content note, e.g. a redaction reason (still metadata, not CUI)
   prevHash: Sha256Hex;
   hash: Sha256Hex;
   at: string;
@@ -74,6 +92,7 @@ export interface AppendMessageInput {
   authorRef: string;
   authorType: AuthorType;
   content: string;
+  promptedBy?: string;
 }
 
 export interface AppendAuditInput {
@@ -81,6 +100,7 @@ export interface AppendAuditInput {
   action: string;
   actAs?: string;
   target?: string;
+  detail?: string;
 }
 
 /** Persistence port. MemoryStore implements it now; PgStore later (behind the same interface).
@@ -92,6 +112,10 @@ export interface Store {
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;
 
+  createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent>;
+  getAgent(id: Id): Promise<Agent | null>;
+  listAgentsByOwner(ownerSub: string): Promise<Agent[]>;
+
   appendMessage(input: AppendMessageInput): Promise<Message>;
   /** Messages in seq order; `content` is omitted for redacted rows. */
   listMessages(channelId: Id): Promise<Array<Message & { content?: string }>>;
@@ -100,4 +124,26 @@ export interface Store {
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */
   verifyChains(): Promise<{ messagesOk: boolean; auditOk: boolean }>;
+}
+
+// ── The LLM egress port (the assistant path) ────────────────────────────────────────────────
+// The assistant path calls SecRouter's OpenAI-compatible endpoint, delegated to the agent's
+// owner (X-Sec-Acting-User) so policy/budget/audit land on that user. Behind a port so the
+// orchestration is testable against a stub upstream (no running SecRouter needed).
+
+export interface LlmMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface LlmCompleteRequest {
+  model: string;
+  messages: LlmMessage[];
+  /** The owner sub — forwarded as X-Sec-Acting-User so SecRouter governs this call as them. */
+  actingUser: string;
+}
+
+/** Streams assistant text deltas. The real impl talks to SecRouter; tests use a fake. */
+export interface LlmClient {
+  complete(req: LlmCompleteRequest): AsyncIterable<string>;
 }

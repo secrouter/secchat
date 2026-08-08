@@ -12,6 +12,9 @@ export interface Config {
   jwksUrl: string;
   /** SecRouter gateway base URL — the assistant path routes model calls here (delegated). */
   secrouterUrl: string;
+  /** Service token SecChat presents to SecRouter (the assistant path needs it; a bare chat
+   * without agents does not). The real client-credentials flow replaces the static token later. */
+  secrouterToken?: string;
   /** Postgres DSN for the PgStore (unset ⇒ in-memory store; dev/test only). */
   databaseUrl?: string;
 }
@@ -37,6 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oidcAudience: req(env, "SECCHAT_OIDC_AUDIENCE"),
     jwksUrl: opt(env, "SECCHAT_JWKS_URL", `${issuer}/.well-known/jwks.json`),
     secrouterUrl: opt(env, "SECROUTER_URL", "http://127.0.0.1:47002"),
+    secrouterToken: env.SECROUTER_TOKEN?.trim() || undefined,
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
   };
 }

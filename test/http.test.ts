@@ -15,12 +15,18 @@ const verifyToken: VerifyToken = async (token) => {
 };
 
 // MINIMAL fake Store — implements ONLY the methods src/http/server.ts's routes call
-// (createChannel, addMember, appendAudit, isMember, appendMessage, listMessages). It
-// intentionally does NOT implement getChannel/listMembers/redactMessage/verifyChains, so it's
-// cast through `unknown` rather than structurally satisfying the full Store contract.
+// (createChannel, addMember, appendAudit, isMember, appendMessage, listMessages, createAgent,
+// listAgentsByOwner). It intentionally does NOT implement getChannel/listMembers/redactMessage/
+// verifyChains/getAgent, so it's cast through `unknown` rather than structurally satisfying the
+// full Store contract.
 let nextChannelId = 1;
 let nextMessageId = 1;
+let nextAgentId = 1;
 const knownChannelIds = new Set<string>();
+// channelId -> set of memberRefs (users by sub, agents by id) — populated by addMember, read by
+// isMember. This is the membership-tracking approach the /agents tests below reuse.
+const channelMembers = new Map<string, Set<string>>();
+const agentsByOwner = new Map<string, Array<{ id: string; ownerSub: string; kind: string; name?: string; model?: string; createdAt: string }>>();
 
 const store = {
   async createChannel(input: { workspaceId: string; kind: string; name?: string; createdBy: string }) {
@@ -28,14 +34,16 @@ const store = {
     knownChannelIds.add(id);
     return { id, ...input, createdAt: new Date().toISOString() };
   },
-  async addMember() {
-    // noop — membership isn't queried by anything the tests exercise besides isMember below.
+  async addMember(m: { channelId: string; memberRef: string }) {
+    const members = channelMembers.get(m.channelId) ?? new Set<string>();
+    members.add(m.memberRef);
+    channelMembers.set(m.channelId, members);
   },
   async appendAudit() {
     // noop
   },
   async isMember(channelId: string, ref: string) {
-    return knownChannelIds.has(channelId) && ref === "user-1";
+    return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
   },
   async appendMessage(input: { channelId: string; authorRef: string; authorType: string; content: string }) {
     return {
@@ -52,6 +60,16 @@ const store = {
   },
   async listMessages() {
     return [];
+  },
+  async createAgent(input: { ownerSub: string; kind: string; name?: string; model?: string }) {
+    const agent = { id: `agent-${nextAgentId++}`, ...input, createdAt: new Date().toISOString() };
+    const list = agentsByOwner.get(input.ownerSub) ?? [];
+    list.push(agent);
+    agentsByOwner.set(input.ownerSub, list);
+    return agent;
+  },
+  async listAgentsByOwner(ownerSub: string) {
+    return agentsByOwner.get(ownerSub) ?? [];
   },
 } as unknown as Store;
 
@@ -144,6 +162,44 @@ test("POST /channels/:id/messages appends a message", async () => {
   assert.equal(res.status, 201);
   const body = await res.json() as { channelId: string };
   assert.equal(body.channelId, channel.id);
+});
+
+test("POST /agents spawns an agent plus a channel with the owner as a member", async () => {
+  const res = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "my-assistant" }),
+  });
+  assert.equal(res.status, 201);
+  const body = await res.json() as { agent: { id: string }; channel: { id: string } };
+  assert.equal(typeof body.agent.id, "string");
+  assert.ok(body.agent.id.length > 0);
+  assert.equal(typeof body.channel.id, "string");
+  assert.ok(body.channel.id.length > 0);
+
+  // The owner should already be a member of the spawned channel — a follow-up read succeeds
+  // rather than 403ing, which is how we assert membership without a dedicated members endpoint.
+  const messagesRes = await fetch(`${baseUrl}/channels/${body.channel.id}/messages`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(messagesRes.status, 200);
+});
+
+test("GET /agents lists agents spawned by the caller", async () => {
+  const spawned = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "list-me" }),
+  });
+  const { agent } = await spawned.json() as { agent: { id: string } };
+
+  const res = await fetch(`${baseUrl}/agents`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as Array<{ id: string }>;
+  assert.ok(Array.isArray(body));
+  assert.ok(body.some((a) => a.id === agent.id));
 });
 
 test("an unmatched route is 404", async () => {

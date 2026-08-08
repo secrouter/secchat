@@ -5,8 +5,9 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { ChannelKind, Principal, Store, VerifyToken } from "../types.ts";
+import type { AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
+import { handleAssistantTurn } from "../assistant/service.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -58,7 +59,34 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * Optional so the HTTP layer stays testable without a hub. */
 type Broadcast = (channelId: string, payload: unknown) => void;
 
-function buildRouter(store: Store, broadcast?: Broadcast): Router<Handler> {
+/** After a human posts to a channel, run any ASSISTANT agents that are members of it (decision
+ * #5 — server-side model chat, no runner). Fire-and-forget from the route: the user's POST has
+ * already returned 201; the reply streams in over the WS hub. Only human-authored messages ever
+ * reach here (an assistant's own reply is persisted by handleAssistantTurn directly, not via the
+ * HTTP route), so there is no reply loop. Coding agents are ignored here — they run through the
+ * agent control plane (Sprint 4), not this synchronous path. */
+async function triggerAssistants(
+  store: Store,
+  llm: LlmClient,
+  broadcast: Broadcast | undefined,
+  channelId: string,
+  promptedBy: string,
+  userText: string,
+): Promise<void> {
+  const members = await store.listMembers(channelId);
+  for (const m of members) {
+    if (m.memberType !== "agent") continue;
+    const agent = await store.getAgent(m.memberRef);
+    if (agent?.kind !== "assistant") continue;
+    try {
+      await handleAssistantTurn({ store, llm, broadcast }, { channelId, agent, promptedBy, userText });
+    } catch (err) {
+      broadcast?.(channelId, { type: "assistant_error", agentId: agent.id, error: String(err) });
+    }
+  }
+}
+
+function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient): Router<Handler> {
   const router = new Router<Handler>();
 
   router.add("GET", "/me", async ({ res, principal }) => {
@@ -101,6 +129,30 @@ function buildRouter(store: Store, broadcast?: Broadcast): Router<Handler> {
     const enriched = { ...message, content };
     broadcast?.(channelId, { type: "message", message: enriched });
     sendJson(res, 201, enriched);
+    // Kick any assistant members of this channel (after responding — the reply arrives over WS).
+    if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content);
+  });
+
+  // Spawning an agent creates a channel with the agent pre-added as a member (decision #7: an
+  // agent is a channel member, not a separate concept) plus the owning human as its owner.
+  router.add("POST", "/agents", async ({ req, res, principal }) => {
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string };
+    const kind = body.kind ?? "assistant";
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model });
+    const channel = await store.createChannel({
+      workspaceId: "ws-default",
+      kind: "agent",
+      name: body.name ?? "agent",
+      createdBy: principal.sub,
+    });
+    await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
+    await store.addMember({ channelId: channel.id, memberRef: agent.id, memberType: "agent", role: "member" });
+    await store.appendAudit({ actor: principal.sub, action: "agent.spawn", target: agent.id });
+    sendJson(res, 201, { agent, channel });
+  });
+
+  router.add("GET", "/agents", async ({ res, principal }) => {
+    sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
   });
 
   return router;
@@ -113,8 +165,9 @@ export function createHttpServer(deps: {
   verifyToken: VerifyToken;
   store: Store;
   broadcast?: Broadcast;
+  llm?: LlmClient;
 }): Server {
-  const router = buildRouter(deps.store, deps.broadcast);
+  const router = buildRouter(deps.store, deps.broadcast, deps.llm);
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";

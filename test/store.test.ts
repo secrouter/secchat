@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GENESIS } from "../src/audit/chain.ts";
+import { GENESIS, computeMessageHash } from "../src/audit/chain.ts";
 import { MemoryStore } from "../src/store/memory.ts";
 
 const WORKSPACE = "ws-1";
@@ -114,4 +114,85 @@ test("seq/prevHash linkage is independent per channel (each starts at GENESIS)",
 test("getChannel returns null for an unknown id", async () => {
   const store = new MemoryStore();
   assert.equal(await store.getChannel("00000000-0000-4000-8000-000000000000"), null);
+});
+
+test("createAgent -> getAgent round-trip; unknown id returns null", async () => {
+  const store = new MemoryStore();
+  const agent = await store.createAgent({ ownerSub: "user-alice", kind: "assistant", name: "helper", model: "claude-x" });
+  assert.ok(agent.id);
+  assert.ok(agent.createdAt);
+  assert.equal(agent.ownerSub, "user-alice");
+  assert.equal(agent.kind, "assistant");
+  assert.equal(agent.name, "helper");
+  assert.equal(agent.model, "claude-x");
+
+  const fetched = await store.getAgent(agent.id);
+  assert.deepEqual(fetched, agent);
+
+  assert.equal(await store.getAgent("00000000-0000-4000-8000-000000000000"), null);
+});
+
+test("listAgentsByOwner filters by owner and preserves creation order", async () => {
+  const store = new MemoryStore();
+  const a1 = await store.createAgent({ ownerSub: "user-alice", kind: "assistant" });
+  const b1 = await store.createAgent({ ownerSub: "user-bob", kind: "coding" });
+  const a2 = await store.createAgent({ ownerSub: "user-alice", kind: "coding" });
+
+  const aliceAgents = await store.listAgentsByOwner("user-alice");
+  assert.deepEqual(aliceAgents.map((a) => a.id), [a1.id, a2.id]);
+
+  const bobAgents = await store.listAgentsByOwner("user-bob");
+  assert.deepEqual(bobAgents.map((a) => a.id), [b1.id]);
+
+  assert.deepEqual(await store.listAgentsByOwner("user-carol"), []);
+});
+
+test("an agent message's promptedBy round-trips via listMessages but is NOT bound into the hash", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "agent", createdBy: "user-alice" });
+  const agent = await store.createAgent({ ownerSub: "user-alice", kind: "assistant" });
+
+  const m1 = await store.appendMessage({
+    channelId: channel.id,
+    authorRef: agent.id,
+    authorType: "agent",
+    promptedBy: "user-alice",
+    content: "agent reply",
+  });
+  assert.equal(m1.promptedBy, "user-alice");
+
+  const listed = await store.listMessages(channel.id);
+  const found = listed.find((m) => m.id === m1.id)!;
+  assert.equal(found.promptedBy, "user-alice");
+  assert.equal(found.content, "agent reply");
+
+  // Recomputing the hash WITHOUT promptedBy still matches -> it isn't a hash input.
+  const expectedHash = computeMessageHash(GENESIS, {
+    channelId: channel.id,
+    seq: m1.seq,
+    authorRef: agent.id,
+    authorType: "agent",
+    contentSha256: m1.contentSha256,
+    createdAt: m1.createdAt,
+  });
+  assert.equal(m1.hash, expectedHash);
+
+  assert.equal((await store.verifyChains()).messagesOk, true);
+});
+
+test("redactMessage persists the reason as the last audit event's detail; chain still verifies", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+  const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "ssn: 123-45-6789" });
+
+  await store.redactMessage(m1.id, "user-x", "spillage: CUI");
+
+  const events = await store.listAudit();
+  const last = events[events.length - 1]!;
+  assert.equal(last.action, "message.redact");
+  assert.equal(last.detail, "spillage: CUI");
+  assert.equal(last.actor, "user-x");
+  assert.equal(last.target, m1.id);
+
+  assert.equal((await store.verifyChains()).messagesOk, true);
 });

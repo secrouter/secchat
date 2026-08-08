@@ -11,6 +11,11 @@
 //   * appendMessage/appendAudit own their chain's linkage (seq/prevHash/hash) internally, the
 //     same way a correct Postgres implementation will: read the current tail, compute the next
 //     link, append. Callers never construct these fields themselves.
+//
+// A third invariant added in this pass: Message.promptedBy and AuditEvent.detail ride along on
+// their rows/events (and therefore round-trip through listMessages/listAudit) but are NOT bound
+// into either hash — computeMessageHash/computeAuditHash (src/audit/chain.ts, frozen) simply
+// don't take them as inputs, so carrying them costs nothing chain-wise.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -22,6 +27,7 @@ import {
   verifyMessageChain,
 } from "../audit/chain.ts";
 import type {
+  Agent,
   AppendAuditInput,
   AppendMessageInput,
   AuditEvent,
@@ -35,6 +41,7 @@ import type {
 export class MemoryStore implements Store {
   #channels = new Map<Id, Channel>();
   #members = new Map<Id, Member[]>(); // channelId -> members
+  #agents = new Map<Id, Agent>();
   #messagesByChannel = new Map<Id, Message[]>(); // channelId -> messages, seq order
   #messagesById = new Map<Id, Message>(); // same row objects as #messagesByChannel's arrays
   #content = new Map<Id, string>(); // message id -> plaintext; absent once redacted
@@ -66,6 +73,21 @@ export class MemoryStore implements Store {
     return (this.#members.get(channelId) ?? []).some((m) => m.memberRef === ref);
   }
 
+  async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {
+    const agent: Agent = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
+    this.#agents.set(agent.id, agent);
+    return agent;
+  }
+
+  async getAgent(id: Id): Promise<Agent | null> {
+    return this.#agents.get(id) ?? null;
+  }
+
+  /** Owner's agents, in creation order (Map iteration order == insertion order). */
+  async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
+    return [...this.#agents.values()].filter((a) => a.ownerSub === ownerSub);
+  }
+
   async appendMessage(input: AppendMessageInput): Promise<Message> {
     const messages = this.#messagesByChannel.get(input.channelId);
     if (!messages) throw new Error(`MemoryStore.appendMessage: unknown channel ${input.channelId}`);
@@ -90,6 +112,7 @@ export class MemoryStore implements Store {
       seq,
       authorRef: input.authorRef,
       authorType: input.authorType,
+      promptedBy: input.promptedBy, // NOT a hash input (see header comment) — carried for provenance only
       contentSha256,
       prevHash,
       hash,
@@ -107,20 +130,16 @@ export class MemoryStore implements Store {
     return messages.map((m) => (m.redactedAt ? { ...m } : { ...m, content: this.#content.get(m.id) }));
   }
 
+  /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a
+   * short note), never content, so it's safe on the metadata-only audit chain. */
   async redactMessage(id: Id, by: string, reason: string): Promise<void> {
-    // `reason` is accepted (the Store contract requires it) but has nowhere to be persisted:
-    // AppendAuditInput has no `reason` field (the audit chain is metadata-only by design, see
-    // audit/chain.ts) and Message has no redaction-reason field either. Flagged as contract
-    // friction in this task's report rather than silently smuggled into `action`/`target`.
-    void reason;
-
     const message = this.#messagesById.get(id);
     if (!message) throw new Error(`MemoryStore.redactMessage: unknown message ${id}`);
     if (message.redactedAt) throw new Error(`MemoryStore.redactMessage: ${id} is already redacted`);
 
     this.#content.delete(id);
     message.redactedAt = new Date().toISOString();
-    await this.appendAudit({ actor: by, action: "message.redact", target: id });
+    await this.appendAudit({ actor: by, action: "message.redact", target: id, detail: reason });
   }
 
   async appendAudit(input: AppendAuditInput): Promise<AuditEvent> {
@@ -144,12 +163,22 @@ export class MemoryStore implements Store {
       actAs: input.actAs,
       action: input.action,
       target: input.target,
+      detail: input.detail, // NOT a hash input (computeAuditHash doesn't take it) — see header comment
       prevHash,
       hash,
       at,
     };
     this.#auditLog.push(event);
     return event;
+  }
+
+  /** Snapshot of the global audit log, in seq order. NOT part of the frozen `Store` contract —
+   * that interface exposes no read path for AuditEvent content, only verifyChains()'s pass/fail
+   * boolean. Added here (a concrete-class extra, same spirit as the doc comment on verifyChains
+   * anticipating an "audit-review console") so tests — and that future console — can inspect
+   * event fields like `detail`. Flagged as contract friction in this task's report. */
+  async listAudit(): Promise<AuditEvent[]> {
+    return [...this.#auditLog];
   }
 
   /** Recompute both chains end-to-end: every channel's message chain (all must pass) plus the

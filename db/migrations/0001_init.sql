@@ -72,6 +72,21 @@ CREATE TABLE channels (
 );
 
 -- ---------------------------------------------------------------------------------------------
+-- agents — mirrors src/types.ts Agent. Owned by (and acting as) exactly one user; joins its
+-- channels as a member (see channel_members.member_type = 'agent'). No local users FK by design.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE agents (
+  id         uuid PRIMARY KEY,
+  owner_sub  text NOT NULL,            -- Principal.sub the agent is tied to and acts as; no FK
+  kind       text NOT NULL CHECK (kind IN ('assistant', 'coding')),
+  name       text,                     -- Agent.name?
+  model      text,                     -- Agent.model? — SecRouter model id (assistant path)
+  created_at timestamptz NOT NULL
+);
+
+CREATE INDEX agents_owner_sub_idx ON agents (owner_sub);  -- backs listAgentsByOwner()
+
+-- ---------------------------------------------------------------------------------------------
 -- channel_members — mirrors src/types.ts Member
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE channel_members (
@@ -99,6 +114,8 @@ CREATE TABLE messages (
   seq            integer NOT NULL CHECK (seq > 0),
   author_ref     text NOT NULL,         -- Principal.sub or agent id; no local FK (see channels)
   author_type    text NOT NULL CHECK (author_type IN ('user', 'agent')),
+  prompted_by    text,                  -- Message.promptedBy? — human who triggered an agent turn
+                                        -- (provenance; set at insert, NOT bound into the hash chain)
   content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
   prev_hash      text NOT NULL CHECK (prev_hash ~ '^[0-9a-f]{64}$'),
   hash           text NOT NULL CHECK (hash ~ '^[0-9a-f]{64}$'),
@@ -134,6 +151,7 @@ BEGIN
      OR NEW.seq            IS DISTINCT FROM OLD.seq
      OR NEW.author_ref     IS DISTINCT FROM OLD.author_ref
      OR NEW.author_type    IS DISTINCT FROM OLD.author_type
+     OR NEW.prompted_by    IS DISTINCT FROM OLD.prompted_by
      OR NEW.content_sha256 IS DISTINCT FROM OLD.content_sha256
      OR NEW.prev_hash      IS DISTINCT FROM OLD.prev_hash
      OR NEW.hash           IS DISTINCT FROM OLD.hash
@@ -181,6 +199,8 @@ CREATE TABLE audit_log (
   -- entity kind — a loose reference by design, matching the "metadata-only" audit philosophy
   -- (this table doesn't get to assume what it's an audit trail FOR).
   target    text,
+  detail    text,                      -- AuditEvent.detail? — short metadata note (e.g. a
+                                        -- redaction reason). Metadata only — NEVER CUI content.
   prev_hash text NOT NULL CHECK (prev_hash ~ '^[0-9a-f]{64}$'),
   hash      text NOT NULL CHECK (hash ~ '^[0-9a-f]{64}$'),
   at        timestamptz NOT NULL
