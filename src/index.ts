@@ -10,6 +10,7 @@ import { buildOverview } from "./admin/overview.ts";
 import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
 import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
+import { makeAuthGateway } from "./auth/bff.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
 import { devVerifyToken } from "./dev/auth.ts";
@@ -34,6 +35,18 @@ const verifyToken = config.devMode ? devVerifyToken : makeVerifyToken(config);
 if (config.devMode) console.error("! DEV MODE: dev tokens accepted + /admin open + web client served — never in production");
 // The assistant path: model calls go through SecRouter, delegated to each agent's owner.
 const llm = makeLlmClient(config);
+
+// SSO login (OIDC BFF, see auth/bff.ts): the backend runs the Authorization Code + PKCE dance
+// itself and issues an httpOnly session cookie — no OIDC token ever reaches the browser. Always
+// built (not conditionally); makeAuthGateway itself degrades to 503-ing /auth/login|callback|
+// logout (while still answering /auth/status truthfully) when config.ssoEnabled is false, so the
+// bearer/dev-token path above keeps working unchanged either way.
+const auth = makeAuthGateway(config);
+console.error(
+  config.ssoEnabled
+    ? `▸ SSO login: enabled (OIDC BFF via ${config.oidcIssuer})`
+    : "▸ SSO login: disabled (SECCHAT_OIDC_CLIENT_SECRET/PUBLIC_URL/SESSION_SECRET not all set) — bearer/dev tokens only",
+);
 
 // Durable Postgres store when DATABASE_URL is set (migrations applied on boot); else the
 // in-memory store (dev/eval — state is lost on restart). Both implement Store + SessionStore.
@@ -88,12 +101,12 @@ const webRoot = existsSync(`${flutterWeb}/index.html`) ? flutterWeb : minimalWeb
 if (config.devMode) console.error(`▸ web client: ${webRoot === flutterWeb ? "Flutter build" : "minimal JS (fallback)"} — ${webRoot}`);
 
 const server = createHttpServer({
-  verifyToken, store, llm, control, broadcast,
+  verifyToken, store, llm, control, broadcast, auth,
   search: (userSub, q) => searchMessages(store, userSub, q),
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
 });
-hub = attachWsHub(server, { verifyToken });
+hub = attachWsHub(server, { verifyToken, auth });
 
 server.listen(config.port, config.host, () => {
   console.error(`▸ SecChat listening on http://${config.host}:${config.port} (in-memory store)`);

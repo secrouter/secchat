@@ -23,7 +23,7 @@
 
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
-import type { Principal, VerifyToken } from "../types.ts";
+import type { AuthGateway, Principal, VerifyToken } from "../types.ts";
 import {
   computeAcceptKey,
   decodeFrames,
@@ -53,8 +53,11 @@ export interface Hub {
   close(): void;
 }
 
-/** Attach a WebSocket hub to an existing http.Server's `"upgrade"` event. */
-export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken }): Hub {
+/** Attach a WebSocket hub to an existing http.Server's `"upgrade"` event. `deps.auth` (see
+ * auth/bff.ts) is the SAME AuthGateway the HTTP server is wired with — it's optional here too,
+ * and behaves identically: unset, or `resolveSession` returning null, just means the cookie
+ * fallback below never fires and only `?token=`/subprotocol can authenticate. */
+export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken; auth?: AuthGateway }): Hub {
   const connections = new Set<Connection>();
   const connectionsBySub = new Map<string, Set<Connection>>(); // principal.sub -> its sockets
   const channelSubscriptions = new Map<string, Set<Connection>>(); // channelId -> subscribers
@@ -140,10 +143,19 @@ export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken }):
 
     const { token, usedProtocol } = extractToken(req);
 
+    // Same bearer-first order as the HTTP server (see http/server.ts's auth block): a `?token=`
+    // or subprotocol token found by extractToken is the credential and must verify; only when
+    // NEITHER is present do we fall back to `secchat_session` via deps.auth?.resolveSession — the
+    // Cookie header a same-origin browser sends automatically on the upgrade request too.
     let principal: Principal;
     try {
-      if (!token) throw new Error("missing token");
-      principal = await deps.verifyToken(token);
+      if (token) {
+        principal = await deps.verifyToken(token);
+      } else {
+        const sessionPrincipal = await deps.auth?.resolveSession(req);
+        if (!sessionPrincipal) throw new Error("no credentials (no token, no valid session cookie)");
+        principal = sessionPrincipal;
+      }
     } catch {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();

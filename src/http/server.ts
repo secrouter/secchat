@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, Channel, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -420,8 +420,11 @@ function buildRouter(
 
 /** Builds (but does not start listening) the SecChat HTTP server. `GET /healthz` is always
  * unauthenticated, and so is `GET /admin` when `deps.admin?.devMode` is true (a local/dev
- * convenience — see the dev-mode bypass below); every other route requires a valid
- * `Authorization: Bearer <token>` resolved via `deps.verifyToken`. */
+ * convenience — see the dev-mode bypass below); every other route requires either a valid
+ * `Authorization: Bearer <token>` resolved via `deps.verifyToken`, or (bearer absent, `deps.auth`
+ * wired) a valid `secchat_session` cookie resolved via `deps.auth.resolveSession` — see the auth
+ * block near the bottom of this function. `deps.auth` also serves `/auth/*` (login/callback/
+ * logout/status) itself, pre-auth, exactly like `/healthz`. */
 export function createHttpServer(deps: {
   verifyToken: VerifyToken;
   store: Store;
@@ -430,6 +433,10 @@ export function createHttpServer(deps: {
   control?: AgentControl;
   admin?: AdminDeps;
   search?: SearchFn;
+  /** The SSO login BFF (see auth/bff.ts's makeAuthGateway). Unset ⇒ no /auth/* routes at all
+   * (404, same as any other unmatched path) and cookie-session auth is never attempted — only
+   * the bearer path works, same behavior as before this dependency existed. */
+  auth?: AuthGateway;
   /** Static web root for the SPA shell (index.html + assets/*) — see the static-serving block
    * below. Unset in a deployment/test that doesn't serve the SPA from this process. */
   web?: { root: string };
@@ -444,6 +451,17 @@ export function createHttpServer(deps: {
 
     if (method === "GET" && pathname === "/healthz") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    // SSO LOGIN (OIDC BFF): special-cased before the auth block the SAME way `/healthz` is —
+    // logging in can't itself require already being logged in. `deps.auth` (see auth/bff.ts)
+    // owns GET /auth/status|login|callback and POST /auth/logout entirely — it writes the
+    // response itself and reports whether it recognized the request. Placed first (right after
+    // /healthz, before the webhook/dev-admin/static-serving special cases below) so nothing can
+    // ever shadow it. A deployment/test that doesn't wire `auth` falls through unchanged: every
+    // /auth/* request just reaches the normal 401/404 flow below, same as any other unknown path.
+    if (deps.auth && (await deps.auth.handleAuthRoutes(req, res))) {
       return;
     }
 
@@ -532,11 +550,22 @@ export function createHttpServer(deps: {
       }
     }
 
+    // Bearer-first: a presented Authorization header is the credential — if it's invalid this is
+    // a 401, full stop, with no silent fallback to the cookie. Only when NO bearer token is
+    // present at all do we consult `secchat_session` (via deps.auth?.resolveSession), which reads
+    // the Cookie header a same-origin browser sends automatically on every fetch/WS upgrade — see
+    // auth/bff.ts. `deps.auth` unset (no SSO wired) behaves exactly as before this dependency
+    // existed: no bearer ⇒ straight to 401.
     let principal: Principal;
     try {
       const token = bearerToken(req.headers.authorization);
-      if (!token) throw new Error("missing bearer token");
-      principal = await deps.verifyToken(token);
+      if (token) {
+        principal = await deps.verifyToken(token);
+      } else {
+        const sessionPrincipal = await deps.auth?.resolveSession(req);
+        if (!sessionPrincipal) throw new Error("no credentials (no bearer token, no valid session cookie)");
+        principal = sessionPrincipal;
+      }
     } catch {
       sendJson(res, 401, { error: "unauthorized" });
       return;

@@ -1,18 +1,46 @@
 import 'package:flutter/material.dart';
 
+import '../platform/browser_redirect.dart';
 import '../theme.dart';
 import '../widgets/brand_mark.dart';
 
-/// Dev sign-in: username + an "admin" checkbox, no password. The actual
-/// token synthesis (`dev.<username>.<groups>`) and the `GET /me` round trip
-/// that validates it live in whoever supplies [onSignIn] (see
-/// `lib/app.dart`) -- this screen only owns the form.
+/// The sign-in screen: a primary "Sign in with SecSSO" button plus a
+/// secondary developer sign-in form (username + an "admin" checkbox, no
+/// password).
+///
+/// SecSSO is a real login: tapping the button is a full browser navigation
+/// to `<origin>/auth/login`, which this screen never sees the outcome of
+/// directly -- the backend's OIDC round trip sets the `secchat_session`
+/// cookie and 302s back to `/`, reloading the whole app (see
+/// `lib/app.dart`'s boot probe, which is what actually notices the new
+/// session). The dev form is the opposite: entirely local token synthesis
+/// (`dev.<username>.<groups>`) with no password, validated by whoever
+/// supplies [onSignIn] via a `GET /me` round trip.
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key, required this.onSignIn});
+  const LoginScreen({
+    super.key,
+    required this.onSignIn,
+    this.ssoAvailable = false,
+    this.ssoError,
+  });
 
   /// Called with the trimmed username and the admin checkbox state.
   /// Returns an error message to display, or `null` on success.
   final Future<String?> Function(String username, bool isAdmin) onSignIn;
+
+  /// Whether the backend reports SSO as configured (`GET /auth/status` ->
+  /// `{"sso": true}`). Controls whether the primary "Sign in with SecSSO"
+  /// button renders. `false` (the default) is also the safe fallback for a
+  /// backend that can't be reached at all -- the dev form always renders
+  /// regardless, so the screen is still usable.
+  final bool ssoAvailable;
+
+  /// `?auth_error=<reason>` carried back from a just-failed SecSSO round
+  /// trip (see `lib/app.dart`). When set, the SecSSO section renders even
+  /// if [ssoAvailable] is somehow false, since a non-null error is itself
+  /// proof SSO is configured and reachable -- there's no world where this
+  /// value is set and SSO *isn't* usable.
+  final String? ssoError;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -24,10 +52,24 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _submitting = false;
   String? _error;
 
+  bool get _showSso => widget.ssoAvailable || widget.ssoError != null;
+
   @override
   void dispose() {
     _usernameController.dispose();
     super.dispose();
+  }
+
+  void _signInWithSso() {
+    // A path-absolute target, not a full "<origin>/auth/login" string: the
+    // browser resolves a path-absolute navigation against the current
+    // origin on its own, which is exactly the backend's origin here (the
+    // backend serves this app), so there is nothing to gain by
+    // reconstructing that origin by hand -- and doing so via `Uri.base`
+    // would blow up outside a real browser (e.g. `Uri.base` under
+    // `flutter test`'s VM binding is a `file://` URI, and `Uri.origin`
+    // rejects any scheme but http/https).
+    redirectBrowserTo('/auth/login');
   }
 
   Future<void> _submit() async {
@@ -69,6 +111,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Widget _buildCard() {
+    final showSso = _showSso;
     return Container(
       padding: const EdgeInsets.fromLTRB(34, 38, 34, 30),
       decoration: BoxDecoration(
@@ -90,11 +133,12 @@ class _LoginScreenState extends State<LoginScreen> {
             style: TextStyle(color: AppColors.textMuted, fontSize: 13.5),
           ),
           const SizedBox(height: 28),
+          if (showSso) ..._buildSsoSection(),
           const _FieldLabel('Username'),
           const SizedBox(height: 7),
           TextField(
             controller: _usernameController,
-            autofocus: true,
+            autofocus: !showSso,
             style: const TextStyle(color: AppColors.text, fontSize: 14),
             decoration: const InputDecoration(hintText: 'e.g. alice'),
             onSubmitted: (_) => _submit(),
@@ -131,19 +175,7 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           if (_error != null) ...[
             const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppColors.badBg,
-                border: Border.all(color: AppColors.badBorder),
-                borderRadius: BorderRadius.circular(AppRadius.sm),
-              ),
-              child: Text(
-                _error!,
-                style: const TextStyle(color: AppColors.bad, fontSize: 13),
-              ),
-            ),
+            _ErrorBanner(_error!),
           ],
           const SizedBox(height: 22),
           Container(
@@ -167,8 +199,10 @@ class _LoginScreenState extends State<LoginScreen> {
                     text: 'dev.<username>.<groups>',
                     style: AppFonts.mono(fontSize: 11, color: AppColors.textMuted),
                   ),
-                  const TextSpan(
-                    text: '. Real SecSSO login arrives in a later milestone.',
+                  TextSpan(
+                    text: showSso
+                        ? '. Prefer Sign in with SecSSO above for a real identity.'
+                        : '. SecSSO is not configured for this deployment.',
                   ),
                 ],
               ),
@@ -176,6 +210,97 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// The primary SecSSO button, its error banner (if the last attempt
+  /// failed), and the divider that demotes the dev form below it to a
+  /// clearly-secondary "Developer sign-in" section.
+  List<Widget> _buildSsoSection() {
+    final ssoError = widget.ssoError;
+    return [
+      SizedBox(
+        width: double.infinity,
+        height: 44,
+        child: ElevatedButton.icon(
+          onPressed: _signInWithSso,
+          style: AppButtonStyles.primary,
+          icon: const Icon(Icons.shield_outlined, size: 18),
+          label: const Text('Sign in with SecSSO'),
+        ),
+      ),
+      if (ssoError != null) ...[
+        const SizedBox(height: 12),
+        _ErrorBanner(_describeSsoError(ssoError)),
+      ],
+      const SizedBox(height: 24),
+      const _SectionDivider(label: 'Developer sign-in'),
+      const SizedBox(height: 20),
+    ];
+  }
+}
+
+/// Turns a short backend-supplied error slug (e.g. `state_mismatch`) into a
+/// readable sentence. The backend deliberately keeps this value a safe,
+/// generic reason code rather than internal detail (see the SSO contract's
+/// "never leak internals" callback note), so there is nothing more specific
+/// to surface than a humanized version of the code itself.
+String _describeSsoError(String reason) {
+  final humanized = reason.replaceAll(RegExp('[_-]+'), ' ').trim();
+  return humanized.isEmpty
+      ? 'Sign-in with SecSSO failed. Please try again.'
+      : 'Sign-in with SecSSO failed: $humanized.';
+}
+
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner(this.message);
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.badBg,
+        border: Border.all(color: AppColors.badBorder),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Text(
+        message,
+        style: const TextStyle(color: AppColors.bad, fontSize: 13),
+      ),
+    );
+  }
+}
+
+/// A labeled horizontal rule, used to separate the primary SecSSO button
+/// from the secondary developer sign-in form beneath it.
+class _SectionDivider extends StatelessWidget {
+  const _SectionDivider({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        const Expanded(child: Divider(color: AppColors.border)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Text(
+            label.toUpperCase(),
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.6,
+              color: AppColors.textFaint,
+            ),
+          ),
+        ),
+        const Expanded(child: Divider(color: AppColors.border)),
+      ],
     );
   }
 }

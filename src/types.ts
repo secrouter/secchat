@@ -5,6 +5,10 @@
 // interface (an in-memory impl now, a Postgres impl when the network is back), and the
 // HTTP/WS/LLM layers take their dependencies by injection so each is testable in isolation.
 
+// Type-only import of Node's built-in http types (not an npm dependency — erased at compile
+// time by `verbatimModuleSyntax`); needed for AuthGateway's method signatures below.
+import type { IncomingMessage, ServerResponse } from "node:http";
+
 export type Id = string; // uuid v4 (string form)
 export type Sha256Hex = string; // 64-char lowercase hex
 
@@ -19,6 +23,25 @@ export interface Principal {
 /** Verifies a bearer token and returns the Principal, or throws. Injected everywhere so the
  * HTTP layer never imports a concrete verifier (testable with a fake). */
 export type VerifyToken = (token: string) => Promise<Principal>;
+
+/** The SSO login port (server-side OIDC Backend-For-Frontend): a concrete implementation is
+ * built by auth/bff.ts's `makeAuthGateway` and injected into both the HTTP server and the WS hub
+ * — mirroring how VerifyToken above is defined here but implemented in auth/jwks.ts, so neither
+ * transport module imports auth/bff.ts directly (stays testable with a fake). The BFF flow keeps
+ * every OIDC token server-side; the browser only ever holds an httpOnly session cookie. */
+export interface AuthGateway {
+  /** Serves GET /auth/status, GET /auth/login, GET /auth/callback, and POST /auth/logout —
+   * writing the response itself and returning true when it did. Returns false (response
+   * untouched) for any other request, so the caller falls through to its normal routing; called
+   * PRE-AUTH (alongside /healthz), since logging in can't itself require already being logged
+   * in. */
+  handleAuthRoutes(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+  /** Parses and verifies the `secchat_session` cookie (if any) from `req`'s Cookie header,
+   * returning the Principal it carries. Null — never throws — if the cookie is absent, expired,
+   * or invalid, so callers can treat "no cookie" and "bad cookie" identically. The fallback
+   * credential behind a missing bearer token (see http/server.ts and ws/hub.ts). */
+  resolveSession(req: IncomingMessage): Promise<Principal | null>;
+}
 
 export type ChannelKind = "human" | "agent" | "dm";
 export type MemberType = "user" | "agent";

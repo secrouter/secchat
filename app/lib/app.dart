@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'api.dart';
@@ -7,8 +9,19 @@ import 'screens/login.dart';
 import 'theme.dart';
 
 /// App root: an auth gate between [LoginScreen] and [ChatScreen], holding
-/// the signed-in [ApiClient] + [Principal] in memory only (per the dev
-/// sign-in note on [LoginScreen] -- nothing is persisted across reloads).
+/// the signed-in [ApiClient] + [Principal] in memory only (nothing is
+/// persisted across reloads -- a reload always re-runs the boot probe
+/// below).
+///
+/// Two ways to land signed in:
+///  - **Dev/bearer**: [LoginScreen]'s username form synthesizes a
+///    `dev.<user>.<groups>` token, validated with `GET /me`.
+///  - **SecSSO/session**: [LoginScreen]'s primary button navigates the whole
+///    browser to `/auth/login`. The backend's OIDC round trip sets the
+///    `secchat_session` httpOnly cookie and 302s back to `/`, which reloads
+///    this app from scratch -- the boot sequence below then finds the live
+///    session on its own `GET /me` probe and skips the login screen
+///    entirely.
 class SecChatApp extends StatefulWidget {
   const SecChatApp({super.key});
 
@@ -19,6 +32,72 @@ class SecChatApp extends StatefulWidget {
 class _SecChatAppState extends State<SecChatApp> {
   ApiClient? _api;
   Principal? _principal;
+
+  /// `true` until the boot-time `/auth/status` + `/me` probe (see [_boot])
+  /// settles. A brief splash covers this instead of flashing the login
+  /// screen for what's normally a sub-second round trip.
+  bool _booting = true;
+
+  /// Whether the backend reports SSO as configured. Threaded down to
+  /// [LoginScreen] to decide whether the "Sign in with SecSSO" button
+  /// renders at all. Defaults to (and falls back to, on any probe failure)
+  /// `false`, which also covers the no-backend-reachable case -- the screen
+  /// still degrades to the dev form rather than hanging or erroring.
+  bool _ssoAvailable = false;
+
+  /// `?auth_error=<reason>` from a just-completed, failed `/auth/callback`
+  /// round trip, read once at boot. `null` in the common case (no error, or
+  /// no query at all).
+  String? _ssoError;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_boot());
+  }
+
+  /// Runs once at startup: checks whether SSO is configured, then probes
+  /// `GET /me` in session (cookie) mode. A live `secchat_session` cookie
+  /// (freshly set by a completed SecSSO round trip, or left over from an
+  /// earlier one) makes the probe succeed and skips straight to
+  /// [ChatScreen]; anything else (no cookie, expired session, SSO
+  /// unconfigured, no backend reachable at all) falls through to
+  /// [LoginScreen] instead of hanging or crashing.
+  Future<void> _boot() async {
+    final ssoError = Uri.base.queryParameters['auth_error'];
+    final probe = HttpApiClient(); // session mode: no token, cookie only.
+
+    var ssoAvailable = false;
+    try {
+      ssoAvailable = await probe.getAuthStatus();
+    } catch (_) {
+      // No backend reachable, or the route isn't wired up yet -- the login
+      // screen should still render (dev form only), not hang or crash.
+    }
+
+    Principal? principal;
+    try {
+      principal = await probe.getMe();
+    } catch (_) {
+      // Not signed in via cookie -- expected outside the post-SSO-redirect
+      // case, so this is not an error worth surfacing.
+    }
+
+    // Discard the probe client unless it just became the live session
+    // client below; otherwise its underlying http.Client would leak.
+    if (principal == null) probe.dispose();
+
+    if (!mounted) return;
+    setState(() {
+      _booting = false;
+      _ssoAvailable = ssoAvailable;
+      _ssoError = ssoError;
+      if (principal != null) {
+        _api = probe;
+        _principal = principal;
+      }
+    });
+  }
 
   /// Synthesizes the dev token, then validates it with `GET /me` before
   /// committing to it -- so a typo'd username still gets caught (assuming
@@ -43,7 +122,28 @@ class _SecChatAppState extends State<SecChatApp> {
   }
 
   void _handleSignOut() {
-    _api?.dispose();
+    unawaited(_performSignOut());
+  }
+
+  /// Best-effort `POST /auth/logout` (clears the session cookie
+  /// server-side; a harmless no-op round trip in dev/bearer mode), awaited
+  /// *before* disposing the client -- so the request has actually gone out
+  /// over the wire, rather than being cancelled mid-flight by closing the
+  /// underlying `http.Client` immediately after firing it. Local sign-out
+  /// (dropping the client, returning to [LoginScreen]) always proceeds
+  /// regardless of whether the network call succeeds.
+  Future<void> _performSignOut() async {
+    final api = _api;
+    if (api is HttpApiClient) {
+      try {
+        await api.logout().timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // Sign out locally regardless -- SSO unconfigured, backend
+        // unreachable, already logged out, etc. are all fine to ignore.
+      }
+    }
+    api?.dispose();
+    if (!mounted) return;
     setState(() {
       _api = null;
       _principal = null;
@@ -67,6 +167,7 @@ class _SecChatAppState extends State<SecChatApp> {
   }
 
   Widget _buildHome() {
+    if (_booting) return const _BootSplash();
     final api = _api;
     final principal = _principal;
     if (api != null && principal != null) {
@@ -76,6 +177,34 @@ class _SecChatAppState extends State<SecChatApp> {
         onSignOut: _handleSignOut,
       );
     }
-    return LoginScreen(onSignIn: _handleSignIn);
+    return LoginScreen(
+      onSignIn: _handleSignIn,
+      ssoAvailable: _ssoAvailable,
+      ssoError: _ssoError,
+    );
+  }
+}
+
+/// Covers the brief `/auth/status` + `GET /me` round trip at startup, so a
+/// reload that's actually signed in via cookie doesn't flash the login
+/// screen first.
+class _BootSplash extends StatelessWidget {
+  const _BootSplash();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: AppColors.bg,
+      body: Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.4,
+            color: AppColors.accent,
+          ),
+        ),
+      ),
+    );
   }
 }

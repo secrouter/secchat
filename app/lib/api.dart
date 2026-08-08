@@ -73,6 +73,23 @@ abstract class ApiClient {
 /// API on, so [origin] defaults to `Uri.base` and every request path is
 /// resolved against it.
 ///
+/// Two auth modes, chosen by whether [token] is supplied:
+///  - **Bearer/dev** (`token` non-null): every request carries
+///    `Authorization: Bearer $token`, and the WebSocket URL carries
+///    `?token=`. Used for the dev sign-in form's synthesized
+///    `dev.<user>.<groups>` tokens (and would equally work for a real
+///    programmatic bearer JWT).
+///  - **Session/cookie** (`token` null): no `Authorization` header anywhere.
+///    The same-origin httpOnly `secchat_session` cookie -- set server-side
+///    by the `/auth/login` -> SecSSO -> `/auth/callback` round trip -- is
+///    the credential instead, and the browser attaches it automatically to
+///    same-origin requests *and* the WebSocket upgrade (`package:http`'s
+///    `BrowserClient` sends `fetch` with `credentials: 'same-origin'` by
+///    default, which already includes cookies for same-origin calls; no
+///    `withCredentials`/CORS dance needed since this client never talks
+///    cross-origin). See [getAuthStatus] and [logout] for the two calls
+///    that only make sense in this mode.
+///
 /// The four live event types (`message`, `assistant_delta`, `agent_output`,
 /// `tool_decision`) and `session_ended` carry an `agentId` or `sessionId`
 /// but never a `channelId`. This client treats a socket as scoped entirely
@@ -81,19 +98,23 @@ abstract class ApiClient {
 /// interpretation consistent with "one connect+subscribe per opened
 /// channel" and the events' own shapes.
 class HttpApiClient implements ApiClient {
-  HttpApiClient({required this.token, Uri? origin})
-    : origin = origin ?? Uri.base;
+  HttpApiClient({this.token, Uri? origin}) : origin = origin ?? Uri.base;
 
-  final String token;
+  /// The bearer token, or `null` for session (cookie) mode. See the class
+  /// doc for what each mode sends on the wire.
+  final String? token;
   final Uri origin;
 
   final http.Client _http = http.Client();
   final List<WebSocketChannel> _sockets = <WebSocketChannel>[];
 
-  Map<String, String> get _headers => <String, String>{
-    'Authorization': 'Bearer $token',
-    'Content-Type': 'application/json',
-  };
+  Map<String, String> get _headers {
+    final token = this.token;
+    return <String, String>{
+      if (token != null) 'Authorization': 'Bearer $token',
+      'Content-Type': 'application/json',
+    };
+  }
 
   Uri _uri(String path) => origin.replace(path: path);
 
@@ -135,6 +156,25 @@ class HttpApiClient implements ApiClient {
   @override
   Future<Principal> getMe() async =>
       Principal.fromJson(await _get('/me') as Map<String, dynamic>);
+
+  /// `GET /auth/status` -- `{"sso": bool}`, unauthenticated. Lets the login
+  /// screen decide whether to render the "Sign in with SecSSO" button.
+  /// Callers should treat a thrown [ApiException] (or any other failure --
+  /// e.g. no backend reachable at all) the same as `sso: false`, so the
+  /// screen still degrades to the dev form when this probe can't complete.
+  Future<bool> getAuthStatus() async {
+    final data = await _get('/auth/status') as Map<String, dynamic>;
+    return data['sso'] as bool? ?? false;
+  }
+
+  /// `POST /auth/logout` -- clears the `secchat_session` cookie server-side;
+  /// 204 on success. Harmless to call in bearer/dev mode too (there's no
+  /// session cookie to clear there, so it's just a round trip); callers
+  /// should treat failures as non-fatal and sign out of the client locally
+  /// regardless.
+  Future<void> logout() async {
+    await _post('/auth/logout');
+  }
 
   @override
   Future<List<Channel>> getChannels() async {
@@ -189,10 +229,17 @@ class HttpApiClient implements ApiClient {
 
   @override
   Stream<WsEvent> subscribeChannel(String channelId) {
+    final token = this.token;
+    // Bearer/dev mode carries `?token=`; session mode relies entirely on
+    // the cookie riding the WS upgrade, so the query is cleared outright
+    // (rather than left as whatever `origin`/`Uri.base` happened to carry,
+    // e.g. a stray `?auth_error=` from a just-completed SSO redirect).
     final wsUri = origin.replace(
       scheme: origin.scheme == 'https' ? 'wss' : 'ws',
       path: '/',
-      queryParameters: {'token': token},
+      queryParameters: token != null
+          ? {'token': token}
+          : const <String, String>{},
     );
     final socket = WebSocketChannel.connect(wsUri);
     _sockets.add(socket);
