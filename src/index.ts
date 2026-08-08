@@ -17,10 +17,15 @@ import { searchMessages } from "./search/search.ts";
 import { createHttpServer } from "./http/server.ts";
 import { makeLlmClient } from "./secrouter/client.ts";
 import { MemoryStore } from "./store/memory.ts";
+import { PgStore } from "./store/pg.ts";
+import { migrate } from "./db/migrate.ts";
 import { attachWsHub } from "./ws/hub.ts";
 import type { Hub } from "./ws/hub.ts";
+import type { SessionStore, Store } from "./types.ts";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import pg from "pg";
+const { Pool } = pg;
 
 const config = loadConfig();
 // In dev-mode (SECCHAT_DEV_MODE=1) accept `dev.<sub>.<groups>` tokens so the local web client
@@ -30,12 +35,18 @@ if (config.devMode) console.error("! DEV MODE: dev tokens accepted + /admin open
 // The assistant path: model calls go through SecRouter, delegated to each agent's owner.
 const llm = makeLlmClient(config);
 
-// Sprint 1 uses the in-memory store (state is lost on restart). The Postgres store lands in
-// Sprint 2 behind the same `Store` interface; until then DATABASE_URL is accepted but unused.
+// Durable Postgres store when DATABASE_URL is set (migrations applied on boot); else the
+// in-memory store (dev/eval — state is lost on restart). Both implement Store + SessionStore.
+let store: Store & SessionStore;
 if (config.databaseUrl) {
-  console.error("! DATABASE_URL is set but the Postgres store isn't wired yet (Sprint 2) — using the in-memory store");
+  const pool = new Pool({ connectionString: config.databaseUrl });
+  await migrate(pool);
+  store = new PgStore(pool);
+  console.error(`▸ store: Postgres (${config.databaseUrl.replace(/\/\/[^@/]*@/, "//****@")})`);
+} else {
+  store = new MemoryStore();
+  console.error("▸ store: in-memory (DATABASE_URL unset — dev/eval only, not durable)");
 }
-const store = new MemoryStore();
 
 let hub: Hub | undefined;
 const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channelId, payload);
@@ -45,8 +56,9 @@ const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channe
 // intent, so the execute-gate is exercised (a real pi runner replaces it later — same Runner port).
 const control = makeControlPlane({ sessions: store, runner: makeInteractiveRunner(), getAgent: (id) => store.getAgent(id), broadcast });
 
-if (config.devMode) {
-  // DEV ONLY (SECCHAT_DEV_MODE=1): seed the in-memory store so /admin has something to show.
+if (config.devMode && !config.databaseUrl) {
+  // DEV ONLY (SECCHAT_DEV_MODE=1, in-memory only): seed so /admin + the client have sample data.
+  // Skipped with a real DB so it doesn't accumulate duplicate rows on every restart.
   // Never runs in a real deployment (in-memory store + no real login is dev-only anyway).
   const gen = await store.createChannel({ workspaceId: "ws-dev", kind: "human", name: "general", createdBy: "alice" });
   await store.addMember({ channelId: gen.id, memberRef: "alice", memberType: "user", role: "owner" });
