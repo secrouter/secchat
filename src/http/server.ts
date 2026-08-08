@@ -5,7 +5,7 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
+import type { AgentControl, AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 
@@ -86,7 +86,7 @@ async function triggerAssistants(
   }
 }
 
-function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient): Router<Handler> {
+function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, control?: AgentControl): Router<Handler> {
   const router = new Router<Handler>();
 
   router.add("GET", "/me", async ({ res, principal }) => {
@@ -148,11 +148,64 @@ function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient): Rout
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.addMember({ channelId: channel.id, memberRef: agent.id, memberType: "agent", role: "member" });
     await store.appendAudit({ actor: principal.sub, action: "agent.spawn", target: agent.id });
+    // A coding agent needs a live runner session (Sprint 4's control plane); the assistant path
+    // runs synchronously per-message (triggerAssistants) and never gets one. If this deployment
+    // hasn't wired a control plane, a "coding" agent is still created — just without a session.
+    if (kind === "coding" && control) {
+      const session = await control.spawn({ agent, channelId: channel.id, hostType: "server" });
+      sendJson(res, 201, { agent, channel, session });
+      return;
+    }
     sendJson(res, 201, { agent, channel });
   });
 
   router.add("GET", "/agents", async ({ res, principal }) => {
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
+  });
+
+  // ── Coding-agent session routes (Sprint 4). `control` is the injected AgentControl port; a
+  // deployment/test that doesn't wire one gets a clean 404 on every session route rather than a
+  // crash on an undefined `control`.
+  router.add("POST", "/sessions/:id/grant-execute", async ({ req, res, params, principal }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "sessions_unavailable" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { scope?: "once" | "turn"; turnId?: string };
+    const decision = await control.grantExecute({
+      sessionId: params.id!,
+      byUser: principal.sub,
+      scope: body.scope ?? "once",
+      turnId: body.turnId,
+    });
+    // A denied grant is not a server error — it's a policy verdict (only the agent's owner may
+    // grant execute; see src/agent/gate.ts) — so the body always carries the decision + reason.
+    sendJson(res, decision.allow ? 200 : 403, decision);
+  });
+
+  router.add("POST", "/sessions/:id/input", async ({ req, res, params }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "sessions_unavailable" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { text?: string };
+    // TODO(Sprint 4 follow-up): verify the caller is a participant in this session's channel
+    // before accepting input — for now, any authenticated caller can send input.
+    await control.sendInput(params.id!, body.text ?? "");
+    sendJson(res, 202, { status: "accepted" });
+  });
+
+  router.add("GET", "/sessions/:id", async ({ res, params }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "sessions_unavailable" });
+      return;
+    }
+    const session = await control.getSession(params.id!);
+    if (!session) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    sendJson(res, 200, session);
   });
 
   return router;
@@ -166,8 +219,9 @@ export function createHttpServer(deps: {
   store: Store;
   broadcast?: Broadcast;
   llm?: LlmClient;
+  control?: AgentControl;
 }): Server {
-  const router = buildRouter(deps.store, deps.broadcast, deps.llm);
+  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control);
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";

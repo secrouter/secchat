@@ -6,6 +6,8 @@
 // that reads `hub` lazily, and `hub` is assigned immediately after. By the time any request can
 // fire, both exist.
 
+import { makeControlPlane } from "./agent/control.ts";
+import { makeEchoRunner } from "./agent/echo-runner.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
 import { createHttpServer } from "./http/server.ts";
@@ -27,12 +29,12 @@ if (config.databaseUrl) {
 const store = new MemoryStore();
 
 let hub: Hub | undefined;
-const server = createHttpServer({
-  verifyToken,
-  store,
-  llm,
-  broadcast: (channelId, payload) => hub?.broadcast(channelId, payload),
-});
+const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channelId, payload);
+// Coding-agent control plane. The echo runner is a dev stand-in until a real pi runner lands
+// (Sprint 5); the execute-gate (plan-mode default, owner-authorized mutation) is fully real.
+const control = makeControlPlane({ sessions: store, runner: makeEchoRunner(), getAgent: (id) => store.getAgent(id), broadcast });
+
+const server = createHttpServer({ verifyToken, store, llm, control, broadcast });
 hub = attachWsHub(server, { verifyToken });
 
 server.listen(config.port, config.host, () => {

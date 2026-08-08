@@ -215,3 +215,14 @@ export interface SessionStore {
   activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined>;
   consumeGrant(sessionId: Id): Promise<void>;
 }
+
+/** The control plane's surface, as the HTTP layer sees it. The concrete implementation drives a
+ * Runner, applies the execute-gate to tool requests, and streams output to the channel; the HTTP
+ * routes just call these. A port so the HTTP layer stays testable with a fake. */
+export interface AgentControl {
+  spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" }): Promise<AgentSession>;
+  /** Owner-only (enforced via the gate). Returns the gate decision — deny is not an error. */
+  grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
+  sendInput(sessionId: Id, text: string): Promise<void>;
+  getSession(id: Id): Promise<AgentSession | null>;
+}

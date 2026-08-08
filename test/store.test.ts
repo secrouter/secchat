@@ -5,8 +5,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { GENESIS, computeMessageHash } from "../src/audit/chain.ts";
 import { MemoryStore } from "../src/store/memory.ts";
+import type { ExecuteGrant } from "../src/types.ts";
 
 const WORKSPACE = "ws-1";
+
+/** ISO timestamp `ms` in the future — a plausible lease expiry for session tests. */
+function futureLease(ms = 60_000): string {
+  return new Date(Date.now() + ms).toISOString();
+}
 
 test("channel -> members -> messages: listMessages is seq-ordered with content, chain verifies", async () => {
   const store = new MemoryStore();
@@ -195,4 +201,139 @@ test("redactMessage persists the reason as the last audit event's detail; chain 
   assert.equal(last.target, m1.id);
 
   assert.equal((await store.verifyChains()).messagesOk, true);
+});
+
+// ── SessionStore ─────────────────────────────────────────────────────────────────────────────
+
+test("createSession -> getSession round-trip; unknown id returns null", async () => {
+  const store = new MemoryStore();
+  const lease = futureLease();
+  const session = await store.createSession({
+    agentId: "agent-1",
+    channelId: "chan-1",
+    hostType: "server",
+    status: "starting",
+    leaseExpiresAt: lease,
+  });
+  assert.ok(session.id);
+  assert.ok(session.createdAt);
+  assert.equal(session.agentId, "agent-1");
+  assert.equal(session.channelId, "chan-1");
+  assert.equal(session.hostType, "server");
+  assert.equal(session.status, "starting");
+  assert.equal(session.leaseExpiresAt, lease);
+
+  const fetched = await store.getSession(session.id);
+  assert.deepEqual(fetched, session);
+
+  assert.equal(await store.getSession("00000000-0000-4000-8000-000000000000"), null);
+});
+
+test("listSessionsByChannel filters by channel and preserves creation order", async () => {
+  const store = new MemoryStore();
+  const c1 = await store.createChannel({ workspaceId: WORKSPACE, kind: "agent", createdBy: "user-alice" });
+  const c2 = await store.createChannel({ workspaceId: WORKSPACE, kind: "agent", createdBy: "user-alice" });
+  const lease = futureLease();
+
+  const a1 = await store.createSession({ agentId: "agent-1", channelId: c1.id, hostType: "server", status: "starting", leaseExpiresAt: lease });
+  const b1 = await store.createSession({ agentId: "agent-2", channelId: c2.id, hostType: "local", status: "starting", leaseExpiresAt: lease });
+  const a2 = await store.createSession({ agentId: "agent-1", channelId: c1.id, hostType: "server", status: "active", leaseExpiresAt: lease });
+
+  const c1Sessions = await store.listSessionsByChannel(c1.id);
+  assert.deepEqual(c1Sessions.map((s) => s.id), [a1.id, a2.id]);
+
+  const c2Sessions = await store.listSessionsByChannel(c2.id);
+  assert.deepEqual(c2Sessions.map((s) => s.id), [b1.id]);
+
+  assert.deepEqual(await store.listSessionsByChannel("00000000-0000-4000-8000-000000000000"), []);
+});
+
+test("listActiveSessions includes starting/active and excludes ended/orphaned", async () => {
+  const store = new MemoryStore();
+  const lease = futureLease();
+
+  const starting = await store.createSession({ agentId: "agent-1", channelId: "chan-1", hostType: "server", status: "starting", leaseExpiresAt: lease });
+  const active = await store.createSession({ agentId: "agent-1", channelId: "chan-1", hostType: "server", status: "active", leaseExpiresAt: lease });
+  const ended = await store.createSession({ agentId: "agent-1", channelId: "chan-1", hostType: "server", status: "ended", leaseExpiresAt: lease });
+  const orphaned = await store.createSession({ agentId: "agent-1", channelId: "chan-1", hostType: "server", status: "orphaned", leaseExpiresAt: lease });
+
+  const activeIds = (await store.listActiveSessions()).map((s) => s.id);
+  assert.deepEqual(activeIds, [starting.id, active.id]);
+  assert.equal(activeIds.includes(ended.id), false);
+  assert.equal(activeIds.includes(orphaned.id), false);
+});
+
+test('setSessionStatus updates status and stamps endedAt only on "ended"; unknown id throws', async () => {
+  const store = new MemoryStore();
+  const session = await store.createSession({
+    agentId: "agent-1",
+    channelId: "chan-1",
+    hostType: "server",
+    status: "starting",
+    leaseExpiresAt: futureLease(),
+  });
+  assert.equal(session.endedAt, undefined);
+
+  await store.setSessionStatus(session.id, "active");
+  assert.equal((await store.getSession(session.id))?.status, "active");
+  assert.equal((await store.getSession(session.id))?.endedAt, undefined);
+
+  await store.setSessionStatus(session.id, "ended");
+  const ended = await store.getSession(session.id);
+  assert.equal(ended?.status, "ended");
+  assert.ok(ended?.endedAt);
+
+  await assert.rejects(() => store.setSessionStatus("00000000-0000-4000-8000-000000000000", "ended"));
+});
+
+test("renewLease updates leaseExpiresAt; unknown id throws", async () => {
+  const store = new MemoryStore();
+  const original = futureLease();
+  const session = await store.createSession({
+    agentId: "agent-1",
+    channelId: "chan-1",
+    hostType: "server",
+    status: "active",
+    leaseExpiresAt: original,
+  });
+
+  const renewed = futureLease(120_000);
+  await store.renewLease(session.id, renewed);
+  assert.equal((await store.getSession(session.id))?.leaseExpiresAt, renewed);
+
+  await assert.rejects(() => store.renewLease("00000000-0000-4000-8000-000000000000", renewed));
+});
+
+test("addGrant -> activeGrant -> consumeGrant -> activeGrant undefined; a later addGrant becomes the new active grant", async () => {
+  const store = new MemoryStore();
+  const session = await store.createSession({
+    agentId: "agent-1",
+    channelId: "chan-1",
+    hostType: "server",
+    status: "active",
+    leaseExpiresAt: futureLease(),
+  });
+
+  assert.equal(await store.activeGrant(session.id), undefined);
+
+  const grant1: ExecuteGrant = { sessionId: session.id, grantedBy: "user-alice", scope: "once", grantedAt: new Date().toISOString() };
+  await store.addGrant(grant1);
+  assert.deepEqual(await store.activeGrant(session.id), grant1);
+
+  await store.consumeGrant(session.id);
+  assert.equal(await store.activeGrant(session.id), undefined);
+  assert.equal(grant1.consumed, true); // the stored row was flipped in place, not replaced by a copy
+
+  // No active grant right now -> consumeGrant is a no-op, not a throw.
+  await store.consumeGrant(session.id);
+
+  const grant2: ExecuteGrant = {
+    sessionId: session.id,
+    grantedBy: "user-alice",
+    scope: "turn",
+    turnId: "turn-1",
+    grantedAt: new Date().toISOString(),
+  };
+  await store.addGrant(grant2);
+  assert.deepEqual(await store.activeGrant(session.id), grant2);
 });

@@ -8,10 +8,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { createHttpServer } from "../src/http/server.ts";
+import { makeControlPlane } from "../src/agent/control.ts";
 import { makeLlmClient } from "../src/secrouter/client.ts";
 import { MemoryStore } from "../src/store/memory.ts";
 import { attachWsHub, type Hub } from "../src/ws/hub.ts";
-import type { Principal, VerifyToken } from "../src/types.ts";
+import type { Id, Principal, RunnerEvent, Runner, VerifyToken } from "../src/types.ts";
 
 const verifyToken: VerifyToken = async (token) => {
   if (token !== "good") throw new Error("bad token");
@@ -183,5 +184,89 @@ test("end-to-end assistant: spawn → post → SecRouter reply, governed as owne
     hub.close();
     await new Promise<void>((r) => server.close(() => r()));
     await new Promise<void>((r) => stub.server.close(() => r()));
+  }
+});
+
+// ── Sprint 3: the execute-gate, end to end ───────────────────────────────────────────────────
+// Spawn a coding agent, then drive tool requests through the WHOLE stack (HTTP → control plane →
+// gate → store) via a scripted runner. Proves decision #2 / review C1: a mutating tool is denied
+// in plan mode, a non-owner can't authorize it, the owner's grant permits exactly ONE mutation,
+// and read tools are always fine.
+
+/** A runner the test drives by hand: it records the control plane's gate verdicts and lets the
+ * test synthesize runner events (the real pi runner emits these; here the test does). */
+function makeScriptedRunner() {
+  let emit: ((sessionId: Id, event: RunnerEvent) => void) | undefined;
+  const answers: Array<{ requestId: string; allow: boolean }> = [];
+  const runner: Runner = {
+    async start() {},
+    async sendInput() {},
+    async answerTool(_sessionId, requestId, decision) {
+      answers.push({ requestId, allow: decision.allow });
+    },
+    async stop() {},
+    onEvent(cb) {
+      emit = cb;
+    },
+  };
+  return { runner, answers, emit: (s: Id, e: RunnerEvent) => emit?.(s, e) };
+}
+
+const twoUsers: VerifyToken = async (token) => {
+  if (token === "owner") return { sub: "user-1", groups: [] };
+  if (token === "other") return { sub: "user-2", groups: [] };
+  throw new Error("bad token");
+};
+
+test("end-to-end coding agent: bash denied in plan mode, allowed ONCE after the owner grants", async () => {
+  const store = new MemoryStore();
+  const scripted = makeScriptedRunner();
+  const control = makeControlPlane({
+    sessions: store,
+    runner: scripted.runner,
+    getAgent: (id) => store.getAgent(id),
+  });
+  const server = createHttpServer({ verifyToken: twoUsers, store, control });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as { port: number };
+  const base = `http://127.0.0.1:${port}`;
+  const owner = { authorization: "Bearer owner", "content-type": "application/json" };
+
+  // emit a bash (mutating) tool_request for `sid` and return the gate's verdict
+  const bash = async (sid: string, id: string) => {
+    scripted.emit(sid, { type: "tool_request", tool: "bash", requestId: id });
+    return (await waitFor(() => scripted.answers.find((a) => a.requestId === id))).allow;
+  };
+
+  try {
+    // the owner spawns a coding agent (its channel + a runner session)
+    const spawned = await fetch(`${base}/agents`, { method: "POST", headers: owner, body: JSON.stringify({ kind: "coding", name: "builder" }) });
+    assert.equal(spawned.status, 201);
+    const session = ((await spawned.json()) as { session: { id: string } }).session;
+    assert.ok(session.id);
+
+    // 1. a mutating tool in plan mode is DENIED
+    assert.equal(await bash(session.id, "r1"), false);
+
+    // 2. a NON-owner cannot authorize execution (C1)
+    const denied = await fetch(`${base}/sessions/${session.id}/grant-execute`, {
+      method: "POST", headers: { authorization: "Bearer other", "content-type": "application/json" }, body: JSON.stringify({ scope: "once" }),
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(await bash(session.id, "r2"), false); // still denied
+
+    // 3. the OWNER grants execute (once)
+    const granted = await fetch(`${base}/sessions/${session.id}/grant-execute`, { method: "POST", headers: owner, body: JSON.stringify({ scope: "once" }) });
+    assert.equal(granted.status, 200);
+
+    // 4. exactly ONE mutation is now allowed; the grant is then consumed
+    assert.equal(await bash(session.id, "r3"), true);
+    assert.equal(await bash(session.id, "r4"), false);
+
+    // 5. a read tool is always fine in plan mode (and never consumed the grant above)
+    scripted.emit(session.id, { type: "tool_request", tool: "grep", requestId: "r5" });
+    assert.equal((await waitFor(() => scripted.answers.find((a) => a.requestId === "r5"))).allow, true);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
   }
 });

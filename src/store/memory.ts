@@ -16,6 +16,13 @@
 // their rows/events (and therefore round-trip through listMessages/listAudit) but are NOT bound
 // into either hash — computeMessageHash/computeAuditHash (src/audit/chain.ts, frozen) simply
 // don't take them as inputs, so carrying them costs nothing chain-wise.
+//
+// This pass also backs `SessionStore` (src/types.ts) — coding-agent sessions and their owner
+// execute-grants (see src/agent/gate.ts for how a grant is consumed at the decision point). Two
+// more maps, same "single in-memory row store" spirit as everything above: #sessions (id ->
+// AgentSession) and #grants (sessionId -> ExecuteGrant[], append-ordered so "most recent" is
+// just "last in the array"). Grants are never removed, only marked `consumed` — same
+// tombstone-not-delete instinct as message redaction, and it keeps a full history per session.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -28,17 +35,21 @@ import {
 } from "../audit/chain.ts";
 import type {
   Agent,
+  AgentSession,
   AppendAuditInput,
   AppendMessageInput,
   AuditEvent,
   Channel,
+  ExecuteGrant,
   Id,
   Member,
   Message,
+  SessionStatus,
+  SessionStore,
   Store,
 } from "../types.ts";
 
-export class MemoryStore implements Store {
+export class MemoryStore implements Store, SessionStore {
   #channels = new Map<Id, Channel>();
   #members = new Map<Id, Member[]>(); // channelId -> members
   #agents = new Map<Id, Agent>();
@@ -46,6 +57,8 @@ export class MemoryStore implements Store {
   #messagesById = new Map<Id, Message>(); // same row objects as #messagesByChannel's arrays
   #content = new Map<Id, string>(); // message id -> plaintext; absent once redacted
   #auditLog: AuditEvent[] = []; // one global chain
+  #sessions = new Map<Id, AgentSession>(); // insertion order == creation order
+  #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
 
   async createChannel(input: Omit<Channel, "id" | "createdAt">): Promise<Channel> {
     const channel: Channel = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -193,5 +206,80 @@ export class MemoryStore implements Store {
     }
     const auditOk = verifyAuditChain(this.#auditLog).ok;
     return { messagesOk, auditOk };
+  }
+
+  // ── SessionStore ───────────────────────────────────────────────────────────────────────────
+
+  /** `status`/`leaseExpiresAt` come from the caller (the control plane decides the starting
+   * state); this just assigns the id/createdAt and persists the row. */
+  async createSession(input: Omit<AgentSession, "id" | "createdAt">): Promise<AgentSession> {
+    const session: AgentSession = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
+    this.#sessions.set(session.id, session);
+    return session;
+  }
+
+  async getSession(id: Id): Promise<AgentSession | null> {
+    return this.#sessions.get(id) ?? null;
+  }
+
+  /** A channel's sessions, in creation order (Map iteration order == insertion order) — same
+   * pattern as listAgentsByOwner. */
+  async listSessionsByChannel(channelId: Id): Promise<AgentSession[]> {
+    return [...this.#sessions.values()].filter((s) => s.channelId === channelId);
+  }
+
+  /** Sessions still live in the control-plane sense: `starting` or `active`. Excludes `orphaned`
+   * (lease lapsed — the reaper's territory) and `ended`. */
+  async listActiveSessions(): Promise<AgentSession[]> {
+    return [...this.#sessions.values()].filter((s) => s.status === "starting" || s.status === "active");
+  }
+
+  /** Fails closed on an unknown session (matches addMember/redactMessage's guard style). Moving
+   * to `ended` also stamps `endedAt` — the one derived field this row carries. */
+  async setSessionStatus(id: Id, status: SessionStatus): Promise<void> {
+    const session = this.#sessions.get(id);
+    if (!session) throw new Error(`MemoryStore.setSessionStatus: unknown session ${id}`);
+    session.status = status;
+    if (status === "ended") session.endedAt = new Date().toISOString();
+  }
+
+  /** Called on runner heartbeats to push the lease forward. Unknown id fails closed. */
+  async renewLease(id: Id, leaseExpiresAt: string): Promise<void> {
+    const session = this.#sessions.get(id);
+    if (!session) throw new Error(`MemoryStore.renewLease: unknown session ${id}`);
+    session.leaseExpiresAt = leaseExpiresAt;
+  }
+
+  async addGrant(grant: ExecuteGrant): Promise<void> {
+    const grants = this.#grants.get(grant.sessionId);
+    if (grants) grants.push(grant);
+    else this.#grants.set(grant.sessionId, [grant]);
+  }
+
+  /** The most-recently-added, not-yet-consumed grant for this session — i.e. what
+   * agent/gate.ts's evaluateTool() should be checking right now — or undefined if none. */
+  async activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined> {
+    const grants = this.#grants.get(sessionId);
+    if (!grants) return undefined;
+    for (let i = grants.length - 1; i >= 0; i--) {
+      const grant = grants[i]!;
+      if (!grant.consumed) return grant;
+    }
+    return undefined;
+  }
+
+  /** Marks the current active grant consumed (tombstone, not delete — mirrors redactMessage's
+   * approach to Message rows). No-op if there is no active grant, so a caller doesn't need to
+   * check activeGrant() first just to make this call safe. */
+  async consumeGrant(sessionId: Id): Promise<void> {
+    const grants = this.#grants.get(sessionId);
+    if (!grants) return;
+    for (let i = grants.length - 1; i >= 0; i--) {
+      const grant = grants[i]!;
+      if (!grant.consumed) {
+        grant.consumed = true;
+        return;
+      }
+    }
   }
 }
