@@ -124,6 +124,21 @@ export interface Store {
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */
   verifyChains(): Promise<{ messagesOk: boolean; auditOk: boolean }>;
+
+  // Read paths for the admin / audit-review console (AU 3.3.5/6).
+  listAudit(): Promise<AuditEvent[]>;
+  listChannels(): Promise<Channel[]>;
+  listAllAgents(): Promise<Agent[]>;
+}
+
+/** A read-only snapshot for the admin / audit-review console. */
+export interface AdminOverview {
+  generatedAt: string;
+  channels: Channel[];
+  agents: Agent[];
+  sessions: AgentSession[];
+  audit: AuditEvent[];
+  chains: { messagesOk: boolean; auditOk: boolean };
 }
 
 // ── The LLM egress port (the assistant path) ────────────────────────────────────────────────
@@ -208,6 +223,7 @@ export interface SessionStore {
   getSession(id: Id): Promise<AgentSession | null>;
   listSessionsByChannel(channelId: Id): Promise<AgentSession[]>;
   listActiveSessions(): Promise<AgentSession[]>;
+  listAllSessions(): Promise<AgentSession[]>; // for the admin console (all statuses)
   setSessionStatus(id: Id, status: SessionStatus): Promise<void>;
   renewLease(id: Id, leaseExpiresAt: string): Promise<void>;
   addGrant(grant: ExecuteGrant): Promise<void>;

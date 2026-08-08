@@ -5,9 +5,10 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AgentControl, AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
+import { isAdmin } from "../admin/gate.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -59,6 +60,20 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * Optional so the HTTP layer stays testable without a hub. */
 type Broadcast = (channelId: string, payload: unknown) => void;
 
+/** Optional admin / audit-review console port (AU 3.3.5/6) — src/admin/overview.ts (the
+ * `overview` snapshot builder) and src/admin/console.ts (the `renderConsole` HTML renderer) are
+ * built in parallel and injected here, never imported directly, so this module stays testable
+ * with fakes. `devMode` additionally exposes `GET /admin` without a bearer token (see
+ * createServer below) — a local/dev convenience, never set in a real deployment. A
+ * deployment/test that doesn't wire `admin` gets a clean 404 on every /admin* route, same pattern
+ * as `control` above. */
+interface AdminDeps {
+  adminGroup: string;
+  devMode?: boolean;
+  overview: () => Promise<AdminOverview>;
+  renderConsole: (o: AdminOverview) => string;
+}
+
 /** After a human posts to a channel, run any ASSISTANT agents that are members of it (decision
  * #5 — server-side model chat, no runner). Fire-and-forget from the route: the user's POST has
  * already returned 201; the reply streams in over the WS hub. Only human-authored messages ever
@@ -86,7 +101,7 @@ async function triggerAssistants(
   }
 }
 
-function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, control?: AgentControl): Router<Handler> {
+function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, control?: AgentControl, admin?: AdminDeps): Router<Handler> {
   const router = new Router<Handler>();
 
   router.add("GET", "/me", async ({ res, principal }) => {
@@ -208,20 +223,59 @@ function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, contr
     sendJson(res, 200, session);
   });
 
+  // ── Admin / audit-review console (AU 3.3.5/6). `admin` is the injected port to
+  // src/admin/overview.ts + console.ts — never imported directly here (see AdminDeps above). Both
+  // routes run through the normal post-auth router pipeline, so `principal` is already a verified
+  // identity here; access is gated by isAdmin (membership in admin.adminGroup), the same helper
+  // used everywhere admin access is checked. The unauthenticated dev-mode bypass for GET /admin is
+  // handled separately in createServer, before routing — see there for why.
+  router.add("GET", "/admin/api/overview", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, await admin.overview());
+  });
+
+  router.add("GET", "/admin", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    // Render before writing any header: if overview()/renderConsole() throws, this lets the
+    // dispatcher's catch-all (createServer below) turn it into a clean 500. Writing the 200
+    // header first would leave headers already sent by the time the error is caught, so the
+    // dispatcher's own 500 write would itself throw (ERR_HTTP_HEADERS_SENT) instead of a clean
+    // response reaching the client.
+    const html = admin.renderConsole(await admin.overview());
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+
   return router;
 }
 
-/** Builds (but does not start listening) the SecChat HTTP server. `GET /healthz` is the only
- * unauthenticated route; every other route requires a valid `Authorization: Bearer <token>`
- * resolved via `deps.verifyToken`. */
+/** Builds (but does not start listening) the SecChat HTTP server. `GET /healthz` is always
+ * unauthenticated, and so is `GET /admin` when `deps.admin?.devMode` is true (a local/dev
+ * convenience — see the dev-mode bypass below); every other route requires a valid
+ * `Authorization: Bearer <token>` resolved via `deps.verifyToken`. */
 export function createHttpServer(deps: {
   verifyToken: VerifyToken;
   store: Store;
   broadcast?: Broadcast;
   llm?: LlmClient;
   control?: AgentControl;
+  admin?: AdminDeps;
 }): Server {
-  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control);
+  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin);
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -229,6 +283,25 @@ export function createHttpServer(deps: {
 
     if (method === "GET" && pathname === "/healthz") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    // DEV-MODE BYPASS: special-cased the SAME way `/healthz` is (before the auth block below) so
+    // the console is reachable in a browser with no bearer token — but ONLY when admin.devMode is
+    // true (a local/dev convenience; never set in a real deployment). The production/authed path
+    // is the `GET /admin` route registered in buildRouter, which requires isAdmin like every other
+    // admin route. This has its own try/catch (rather than relying on the router's dispatcher,
+    // which this bypasses entirely) so a render error becomes a 500 instead of an unhandled
+    // rejection; rendering before writing any header keeps that 500 write clean (see the router's
+    // GET /admin handler above for why order matters here).
+    if (method === "GET" && pathname === "/admin" && deps.admin?.devMode) {
+      try {
+        const html = deps.admin.renderConsole(await deps.admin.overview());
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html);
+      } catch {
+        sendJson(res, 500, { error: "internal" });
+      }
       return;
     }
 

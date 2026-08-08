@@ -36,6 +36,9 @@ function makeFakeSessionStore() {
     async listActiveSessions() {
       return [...sessions.values()].filter((s) => s.status === "active");
     },
+    async listAllSessions() {
+      return [...sessions.values()];
+    },
     async setSessionStatus(id, status) {
       const session = sessions.get(id);
       if (!session) throw new Error(`fake SessionStore.setSessionStatus: unknown session ${id}`);

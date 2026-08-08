@@ -6,6 +6,8 @@
 // that reads `hub` lazily, and `hub` is assigned immediately after. By the time any request can
 // fire, both exist.
 
+import { buildOverview } from "./admin/overview.ts";
+import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
 import { makeEchoRunner } from "./agent/echo-runner.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
@@ -34,7 +36,33 @@ const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channe
 // (Sprint 5); the execute-gate (plan-mode default, owner-authorized mutation) is fully real.
 const control = makeControlPlane({ sessions: store, runner: makeEchoRunner(), getAgent: (id) => store.getAgent(id), broadcast });
 
-const server = createHttpServer({ verifyToken, store, llm, control, broadcast });
+if (config.devMode) {
+  // DEV ONLY (SECCHAT_DEV_MODE=1): seed the in-memory store so /admin has something to show.
+  // Never runs in a real deployment (in-memory store + no real login is dev-only anyway).
+  const gen = await store.createChannel({ workspaceId: "ws-dev", kind: "human", name: "general", createdBy: "alice" });
+  await store.addMember({ channelId: gen.id, memberRef: "alice", memberType: "user", role: "owner" });
+  await store.appendAudit({ actor: "alice", action: "channel.create", target: gen.id });
+  await store.appendMessage({ channelId: gen.id, authorRef: "alice", authorType: "user", content: "morning all" });
+  const spill = await store.appendMessage({ channelId: gen.id, authorRef: "bob", authorType: "user", content: "pasted the CUI doc here by mistake" });
+  await store.redactMessage(spill.id, "admin", "CUI spillage — wrong channel");
+  const asst = await store.createAgent({ ownerSub: "alice", kind: "assistant", name: "Research Assistant", model: "balanced" });
+  const asstCh = await store.createChannel({ workspaceId: "ws-dev", kind: "agent", name: "alice · assistant", createdBy: "alice" });
+  await store.addMember({ channelId: asstCh.id, memberRef: "alice", memberType: "user", role: "owner" });
+  await store.addMember({ channelId: asstCh.id, memberRef: asst.id, memberType: "agent", role: "member" });
+  await store.appendAudit({ actor: "alice", action: "agent.spawn", target: asst.id });
+  const coder = await store.createAgent({ ownerSub: "bob", kind: "coding", name: "Build Bot" });
+  const coderCh = await store.createChannel({ workspaceId: "ws-dev", kind: "agent", name: "bob · coding", createdBy: "bob" });
+  await store.addMember({ channelId: coderCh.id, memberRef: "bob", memberType: "user", role: "owner" });
+  await store.addMember({ channelId: coderCh.id, memberRef: coder.id, memberType: "agent", role: "member" });
+  await store.appendAudit({ actor: "bob", action: "agent.spawn", target: coder.id });
+  await control.spawn({ agent: coder, channelId: coderCh.id, hostType: "server" });
+  console.error("▸ dev seed loaded (SECCHAT_DEV_MODE=1) — visit /admin");
+}
+
+const server = createHttpServer({
+  verifyToken, store, llm, control, broadcast,
+  admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
+});
 hub = attachWsHub(server, { verifyToken });
 
 server.listen(config.port, config.host, () => {

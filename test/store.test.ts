@@ -337,3 +337,54 @@ test("addGrant -> activeGrant -> consumeGrant -> activeGrant undefined; a later 
   await store.addGrant(grant2);
   assert.deepEqual(await store.activeGrant(session.id), grant2);
 });
+
+// ── Admin / audit-review console reads ──────────────────────────────────────────────────────
+
+test("listAudit/listChannels/listAllAgents/listAllSessions return the full set in creation/seq order", async () => {
+  const store = new MemoryStore();
+
+  const c1 = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+  const c2 = await store.createChannel({ workspaceId: WORKSPACE, kind: "agent", createdBy: "user-bob" });
+
+  // Different owners -> listAllAgents (unfiltered) must differ from listAgentsByOwner.
+  const a1 = await store.createAgent({ ownerSub: "user-alice", kind: "assistant" });
+  const a2 = await store.createAgent({ ownerSub: "user-bob", kind: "coding" });
+
+  const session = await store.createSession({
+    agentId: a2.id,
+    channelId: c2.id,
+    hostType: "server",
+    status: "starting",
+    leaseExpiresAt: futureLease(),
+  });
+
+  const m1 = await store.appendMessage({ channelId: c1.id, authorRef: "user-alice", authorType: "user", content: "hello" });
+  await store.appendAudit({ actor: "user-alice", action: "channel.create", target: c1.id });
+  await store.redactMessage(m1.id, "user-alice", "test redaction"); // appends a 2nd audit event internally
+
+  const channels = await store.listChannels();
+  assert.deepEqual(channels.map((c) => c.id), [c1.id, c2.id]);
+
+  const agents = await store.listAllAgents();
+  assert.deepEqual(agents.map((a) => a.id), [a1.id, a2.id]);
+  assert.deepEqual(agents.map((a) => a.ownerSub), ["user-alice", "user-bob"]);
+
+  const sessions = await store.listAllSessions();
+  assert.deepEqual(sessions.map((s) => s.id), [session.id]);
+
+  const audit = await store.listAudit();
+  assert.deepEqual(audit.map((e) => e.seq), [1, 2]);
+  assert.deepEqual(audit.map((e) => e.action), ["channel.create", "message.redact"]);
+
+  assert.equal((await store.verifyChains()).auditOk, true);
+
+  // Snapshots, not live references into the store's internal maps.
+  channels.pop();
+  agents.pop();
+  sessions.pop();
+  audit.pop();
+  assert.equal((await store.listChannels()).length, 2);
+  assert.equal((await store.listAllAgents()).length, 2);
+  assert.equal((await store.listAllSessions()).length, 1);
+  assert.equal((await store.listAudit()).length, 2);
+});

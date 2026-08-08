@@ -6,7 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import type { AgentControl, AgentSession, Store, VerifyToken } from "../src/types.ts";
+import type { AdminOverview, AgentControl, AgentSession, Store, VerifyToken } from "../src/types.ts";
 import { createHttpServer } from "../src/http/server.ts";
 
 const verifyToken: VerifyToken = async (token) => {
@@ -14,6 +14,9 @@ const verifyToken: VerifyToken = async (token) => {
   // A second identity, used only by the coding-agent session tests below to exercise the
   // "not this session's owner" denial path through POST /sessions/:id/grant-execute.
   if (token === "good2") return { sub: "user-2", groups: ["eng"] };
+  // An admin identity — member of "secchat-admins" — used only by the admin-console tests below
+  // to exercise the isAdmin-gated /admin* routes.
+  if (token === "admingood") return { sub: "admin-1", groups: ["secchat-admins"] };
   throw new Error("invalid token");
 };
 
@@ -150,6 +153,64 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve) => controlServer.close(() => resolve()));
+});
+
+// ── Fake admin console deps (src/admin/overview.ts + console.ts, built in parallel — never
+// imported here) — used ONLY by the admin-console tests below, injected into TWO server
+// instances so the tests above keep proving the no-admin path (`server`/`baseUrl`, already built
+// without `admin`) works untouched:
+//   - adminDevServer  (devMode: true)  — the unauthenticated GET /admin dev-mode bypass.
+//   - adminServer     (devMode: false) — the production/authed GET /admin router path, which the
+//     dev-mode bypass would otherwise intercept before routing ever runs.
+// GET /admin/api/overview is unaffected by devMode either way (it always goes through the normal
+// auth flow), so either server exercises it.
+const fakeOverview: AdminOverview = {
+  generatedAt: "t",
+  channels: [],
+  agents: [],
+  sessions: [],
+  audit: [],
+  chains: { messagesOk: true, auditOk: true },
+};
+
+const renderConsole = (_overview: AdminOverview): string => "<!doctype html><title>console</title>";
+
+let adminDevServer: Server;
+let adminDevBaseUrl: string;
+
+before(async () => {
+  adminDevServer = createHttpServer({
+    verifyToken,
+    store,
+    admin: { adminGroup: "secchat-admins", devMode: true, overview: async () => fakeOverview, renderConsole },
+  });
+  await new Promise<void>((resolve) => adminDevServer.listen(0, resolve));
+  const address = adminDevServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  adminDevBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => adminDevServer.close(() => resolve()));
+});
+
+let adminServer: Server;
+let adminBaseUrl: string;
+
+before(async () => {
+  adminServer = createHttpServer({
+    verifyToken,
+    store,
+    admin: { adminGroup: "secchat-admins", devMode: false, overview: async () => fakeOverview, renderConsole },
+  });
+  await new Promise<void>((resolve) => adminServer.listen(0, resolve));
+  const address = adminServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  adminBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => adminServer.close(() => resolve()));
 });
 
 test("GET /healthz is 200 with no auth required", async () => {
@@ -389,4 +450,78 @@ test("with no control injected, GET /sessions/:id is 404 sessions_unavailable", 
   });
   assert.equal(res.status, 404);
   assert.deepEqual(await res.json(), { error: "sessions_unavailable" });
+});
+
+// ── Admin / audit-review console routes — exercised against `adminDevBaseUrl` (devMode on),
+// `adminBaseUrl` (devMode off, admin still wired), and `baseUrl` (no admin wired at all). ────────
+
+test("GET /admin/api/overview without a token is 401", async () => {
+  const res = await fetch(`${adminDevBaseUrl}/admin/api/overview`);
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { error: "unauthorized" });
+});
+
+test("GET /admin/api/overview as a non-admin is 403", async () => {
+  const res = await fetch(`${adminDevBaseUrl}/admin/api/overview`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "forbidden" });
+});
+
+test("GET /admin/api/overview as an admin returns the overview JSON", async () => {
+  const res = await fetch(`${adminDevBaseUrl}/admin/api/overview`, {
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), fakeOverview);
+});
+
+test("GET /admin/api/overview with no admin dep wired is 404", async () => {
+  const res = await fetch(`${baseUrl}/admin/api/overview`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "admin_unavailable" });
+});
+
+test("GET /admin in dev mode serves the HTML console without a token", async () => {
+  const res = await fetch(`${adminDevBaseUrl}/admin`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/html"));
+  assert.equal(await res.text(), "<!doctype html><title>console</title>");
+});
+
+// Non-dev (authed) GET /admin — a separate code path from the dev-mode bypass above: devMode:true
+// intercepts every GET /admin before routing runs at all, so only a devMode:false server (or one
+// with no admin wired) ever reaches the router's GET /admin handler.
+test("GET /admin without devMode requires auth (no token is 401)", async () => {
+  const res = await fetch(`${adminBaseUrl}/admin`);
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { error: "unauthorized" });
+});
+
+test("GET /admin without devMode is forbidden for a non-admin", async () => {
+  const res = await fetch(`${adminBaseUrl}/admin`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "forbidden" });
+});
+
+test("GET /admin without devMode serves the HTML console for an admin", async () => {
+  const res = await fetch(`${adminBaseUrl}/admin`, {
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/html"));
+  assert.equal(await res.text(), "<!doctype html><title>console</title>");
+});
+
+test("GET /admin with no admin dep wired is 404", async () => {
+  const res = await fetch(`${baseUrl}/admin`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "admin_unavailable" });
 });

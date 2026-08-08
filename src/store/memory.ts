@@ -86,6 +86,12 @@ export class MemoryStore implements Store, SessionStore {
     return (this.#members.get(channelId) ?? []).some((m) => m.memberRef === ref);
   }
 
+  /** All channels, creation order (Map iteration order == insertion order) — for the admin /
+   * audit-review console (AU 3.3.5/6), same idiom as listMembers/listAgentsByOwner. */
+  async listChannels(): Promise<Channel[]> {
+    return [...this.#channels.values()];
+  }
+
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {
     const agent: Agent = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     this.#agents.set(agent.id, agent);
@@ -99,6 +105,12 @@ export class MemoryStore implements Store, SessionStore {
   /** Owner's agents, in creation order (Map iteration order == insertion order). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     return [...this.#agents.values()].filter((a) => a.ownerSub === ownerSub);
+  }
+
+  /** Every agent, creation order, regardless of owner — for the admin / audit-review console
+   * (AU 3.3.5/6). Distinct from listAgentsByOwner, which filters to a single owner. */
+  async listAllAgents(): Promise<Agent[]> {
+    return [...this.#agents.values()];
   }
 
   async appendMessage(input: AppendMessageInput): Promise<Message> {
@@ -185,11 +197,8 @@ export class MemoryStore implements Store, SessionStore {
     return event;
   }
 
-  /** Snapshot of the global audit log, in seq order. NOT part of the frozen `Store` contract —
-   * that interface exposes no read path for AuditEvent content, only verifyChains()'s pass/fail
-   * boolean. Added here (a concrete-class extra, same spirit as the doc comment on verifyChains
-   * anticipating an "audit-review console") so tests — and that future console — can inspect
-   * event fields like `detail`. Flagged as contract friction in this task's report. */
+  /** Snapshot of the global audit log, in seq order — for the admin / audit-review console
+   * (AU 3.3.5/6). Part of the frozen `Store` contract, alongside listChannels/listAllAgents. */
   async listAudit(): Promise<AuditEvent[]> {
     return [...this.#auditLog];
   }
@@ -232,6 +241,12 @@ export class MemoryStore implements Store, SessionStore {
    * (lease lapsed — the reaper's territory) and `ended`. */
   async listActiveSessions(): Promise<AgentSession[]> {
     return [...this.#sessions.values()].filter((s) => s.status === "starting" || s.status === "active");
+  }
+
+  /** Every session, all statuses, creation order — for the admin console. Distinct from
+   * listActiveSessions, which filters to starting/active only. */
+  async listAllSessions(): Promise<AgentSession[]> {
+    return [...this.#sessions.values()];
   }
 
   /** Fails closed on an unknown session (matches addMember/redactMessage's guard style). Moving

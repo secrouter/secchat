@@ -17,6 +17,11 @@ export interface Config {
   secrouterToken?: string;
   /** Postgres DSN for the PgStore (unset ⇒ in-memory store; dev/test only). */
   databaseUrl?: string;
+  /** SecSSO group whose members may read the admin / audit-review console (/admin*). */
+  adminGroup: string;
+  /** DEV ONLY: serve /admin with a synthetic admin principal (no real login). Off by default;
+   * never enable outside local development — the real console auths via SecSSO. */
+  devMode: boolean;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -42,5 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secrouterUrl: opt(env, "SECROUTER_URL", "http://127.0.0.1:47002"),
     secrouterToken: env.SECROUTER_TOKEN?.trim() || undefined,
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
+    adminGroup: opt(env, "SECCHAT_ADMIN_GROUP", "secchat-admins"),
+    devMode: (env.SECCHAT_DEV_MODE?.trim() || "") === "1",
   };
 }
