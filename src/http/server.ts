@@ -5,7 +5,7 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AdminOverview, AgentControl, AgentKind, ChannelKind, LlmClient, Principal, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -60,6 +60,11 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * Optional so the HTTP layer stays testable without a hub. */
 type Broadcast = (channelId: string, payload: unknown) => void;
 
+/** Optional full-text search port (whatever index the deployment wires up — not built here). A
+ * deployment/test that doesn't wire one gets a clean 404 on GET /search, same pattern as
+ * `control`/`admin` below rather than every route needing its own guard. */
+type SearchFn = (userSub: string, q: string) => Promise<Array<Message & { content?: string }>>;
+
 /** Optional admin / audit-review console port (AU 3.3.5/6) — src/admin/overview.ts (the
  * `overview` snapshot builder) and src/admin/console.ts (the `renderConsole` HTML renderer) are
  * built in parallel and injected here, never imported directly, so this module stays testable
@@ -101,7 +106,14 @@ async function triggerAssistants(
   }
 }
 
-function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, control?: AgentControl, admin?: AdminDeps): Router<Handler> {
+function buildRouter(
+  store: Store,
+  broadcast?: Broadcast,
+  llm?: LlmClient,
+  control?: AgentControl,
+  admin?: AdminDeps,
+  search?: SearchFn,
+): Router<Handler> {
   const router = new Router<Handler>();
 
   router.add("GET", "/me", async ({ res, principal }) => {
@@ -136,9 +148,15 @@ function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, contr
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    const body = (await readJsonBody(req)) as { content?: string };
+    const body = (await readJsonBody(req)) as { content?: string; parentId?: string };
     const content = body.content ?? "";
-    const message = await store.appendMessage({ channelId, authorRef: principal.sub, authorType: "user", content });
+    const message = await store.appendMessage({
+      channelId,
+      authorRef: principal.sub,
+      authorType: "user",
+      content,
+      parentId: body.parentId,
+    });
     // Echo the plaintext the client just posted (the Message row carries only the content HASH),
     // and fan the same shape out to the channel's realtime subscribers.
     const enriched = { ...message, content };
@@ -146,6 +164,83 @@ function buildRouter(store: Store, broadcast?: Broadcast, llm?: LlmClient, contr
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
     if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content);
+  });
+
+  // ── Threads: a reply carries `parentId` (read above); this lists a parent's replies in seq
+  // order. Same membership gate as every other channel-scoped read here. ─────────────────────────
+  router.add("GET", "/channels/:id/threads/:parentId", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, await store.listThread(channelId, params.parentId!));
+  });
+
+  // ── Reactions: a mutable per-(message,user,emoji) social signal — never chained (see Store).
+  // v1 only requires the caller to be authenticated; it does not check that they can see the
+  // message's channel (TODO below), unlike every other route in this file.
+  router.add("POST", "/messages/:id/reactions", async ({ req, res, params, principal }) => {
+    const body = (await readJsonBody(req)) as { emoji?: string };
+    // TODO: verify the caller can see the message's channel
+    await store.addReaction(params.id!, principal.sub, body.emoji ?? "");
+    sendJson(res, 201, { ok: true });
+  });
+
+  router.add("DELETE", "/messages/:id/reactions/:emoji", async ({ res, params, principal }) => {
+    await store.removeReaction(params.id!, principal.sub, params.emoji!); // router already decoded the segment
+    sendJson(res, 200, { ok: true });
+  });
+
+  router.add("GET", "/messages/:id/reactions", async ({ res, params }) => {
+    sendJson(res, 200, await store.listReactions(params.id!));
+  });
+
+  // ── Per-user read markers → unread counts. Same membership gate as the routes above.
+  router.add("GET", "/channels/:id/unread", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, { unread: await store.unreadCount(channelId, principal.sub) });
+  });
+
+  router.add("POST", "/channels/:id/read", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { seq?: number };
+    await store.setLastRead(channelId, principal.sub, body.seq ?? 0);
+    sendJson(res, 200, { ok: true });
+  });
+
+  // ── Inbound webhooks: this route MINTS the token (returned once, to the member creating it).
+  // POSTing TO that token is a separate, unauthenticated route handled before the auth block in
+  // createServer below — see there for why (the token itself is the credential, not a bearer
+  // token).
+  router.add("POST", "/channels/:id/webhooks", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const wh = await store.createWebhook(channelId, principal.sub);
+    await store.appendAudit({ actor: principal.sub, action: "webhook.create", target: wh.id });
+    sendJson(res, 201, wh);
+  });
+
+  // ── Full-text search. `search` is the injected port (see SearchFn above); a deployment/test
+  // that doesn't wire one gets a clean 404, same pattern as `control`/`admin`.
+  router.add("GET", "/search", async ({ req, res, principal }) => {
+    if (!search) {
+      sendJson(res, 404, { error: "search_unavailable" });
+      return;
+    }
+    const q = new URL(req.url ?? "/", "http://internal").searchParams.get("q") ?? "";
+    sendJson(res, 200, await search(principal.sub, q));
   });
 
   // Spawning an agent creates a channel with the agent pre-added as a member (decision #7: an
@@ -274,8 +369,9 @@ export function createHttpServer(deps: {
   llm?: LlmClient;
   control?: AgentControl;
   admin?: AdminDeps;
+  search?: SearchFn;
 }): Server {
-  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin);
+  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -283,6 +379,42 @@ export function createHttpServer(deps: {
 
     if (method === "GET" && pathname === "/healthz") {
       sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    // INBOUND WEBHOOK: special-cased before the auth block the SAME way `/healthz` is — the path
+    // token IS the credential (minted once, by the owning member, via POST
+    // /channels/:id/webhooks above), so there is no bearer token to check here. The body is
+    // always read to completion FIRST, before either branch below writes a response header
+    // (including the 401 for an unknown token): leaving request-body bytes unconsumed while
+    // ending the response can corrupt the next request on a reused keep-alive connection, so
+    // draining is unconditional rather than only on the success path.
+    if (method === "POST" && pathname.startsWith("/hooks/")) {
+      try {
+        const token = decodeURIComponent(pathname.slice("/hooks/".length));
+        const body = (await readJsonBody(req)) as { text?: string };
+        const wh = await deps.store.getWebhookByToken(token);
+        if (!wh) {
+          sendJson(res, 401, { error: "invalid_webhook" });
+          return;
+        }
+        const text = body.text ?? "";
+        const msg = await deps.store.appendMessage({
+          channelId: wh.channelId,
+          authorRef: "webhook:" + wh.id,
+          authorType: "user",
+          content: text,
+        });
+        await deps.store.appendAudit({ actor: "webhook:" + wh.id, action: "webhook.post", target: msg.id });
+        deps.broadcast?.(wh.channelId, { type: "message", message: { ...msg, content: text } });
+        sendJson(res, 201, { id: msg.id });
+      } catch (err) {
+        if (err instanceof BadJsonError) {
+          sendJson(res, 400, { error: "bad_json" });
+        } else {
+          sendJson(res, 500, { error: "internal" });
+        }
+      }
       return;
     }
 

@@ -66,6 +66,9 @@ export interface Message {
   /** For an agent message, the human whose prompt triggered this turn (decision #2). Recorded
    * on the row AND in the chained audit event; not itself bound into the message hash. */
   promptedBy?: string;
+  /** Thread parent — a reply points at the message it answers. Metadata (like promptedBy); not
+   * bound into the message hash. Top-level messages leave it unset. */
+  parentId?: Id;
   contentSha256: Sha256Hex; // hash of the ORIGINAL content — stays even after redaction
   prevHash: Sha256Hex;
   hash: Sha256Hex;
@@ -93,6 +96,26 @@ export interface AppendMessageInput {
   authorType: AuthorType;
   content: string;
   promptedBy?: string;
+  parentId?: Id;
+}
+
+/** A reaction (emoji) a user placed on a message. Mutable social signal — NOT in the audit
+ * chain. (userSub, messageId, emoji) is unique: reacting twice with the same emoji is a no-op. */
+export interface Reaction {
+  messageId: Id;
+  userSub: string;
+  emoji: string;
+  at: string;
+}
+
+/** An inbound webhook: an opaque token that lets an external system post into ONE channel as a
+ * bot author. The token is the credential; treat it like a secret. */
+export interface Webhook {
+  id: Id;
+  channelId: Id;
+  token: string;
+  createdBy: string;
+  createdAt: string;
 }
 
 export interface AppendAuditInput {
@@ -119,7 +142,22 @@ export interface Store {
   appendMessage(input: AppendMessageInput): Promise<Message>;
   /** Messages in seq order; `content` is omitted for redacted rows. */
   listMessages(channelId: Id): Promise<Array<Message & { content?: string }>>;
+  /** Replies to `parentId` in `channelId`, seq order; `content` omitted for redacted rows. */
+  listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>>;
   redactMessage(id: Id, by: string, reason: string): Promise<void>;
+
+  // Reactions (mutable; not chained).
+  addReaction(messageId: Id, userSub: string, emoji: string): Promise<void>; // idempotent per (user,emoji)
+  removeReaction(messageId: Id, userSub: string, emoji: string): Promise<void>;
+  listReactions(messageId: Id): Promise<Reaction[]>;
+
+  // Per-user read markers → unread counts.
+  setLastRead(channelId: Id, userSub: string, seq: number): Promise<void>;
+  unreadCount(channelId: Id, userSub: string): Promise<number>; // messages with seq > last-read
+
+  // Inbound webhooks.
+  createWebhook(channelId: Id, createdBy: string): Promise<Webhook>; // mints a random token
+  getWebhookByToken(token: string): Promise<Webhook | null>;
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

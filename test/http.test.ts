@@ -5,8 +5,9 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
-import type { AdminOverview, AgentControl, AgentSession, Store, VerifyToken } from "../src/types.ts";
+import type { AdminOverview, AgentControl, AgentSession, Message, Store, VerifyToken } from "../src/types.ts";
 import { createHttpServer } from "../src/http/server.ts";
 
 const verifyToken: VerifyToken = async (token) => {
@@ -21,18 +22,55 @@ const verifyToken: VerifyToken = async (token) => {
 };
 
 // MINIMAL fake Store — implements ONLY the methods src/http/server.ts's routes call
-// (createChannel, addMember, appendAudit, isMember, appendMessage, listMessages, createAgent,
-// listAgentsByOwner). It intentionally does NOT implement getChannel/listMembers/redactMessage/
-// verifyChains/getAgent, so it's cast through `unknown` rather than structurally satisfying the
-// full Store contract.
+// (createChannel, addMember, appendAudit, isMember, appendMessage, listMessages, listThread,
+// addReaction, removeReaction, listReactions, setLastRead, unreadCount, createWebhook,
+// getWebhookByToken, createAgent, listAgentsByOwner). It intentionally does NOT implement
+// getChannel/listMembers/redactMessage/verifyChains/getAgent/listChannels/listAllAgents, so it's
+// cast through `unknown` rather than structurally satisfying the full Store contract.
 let nextChannelId = 1;
 let nextMessageId = 1;
 let nextAgentId = 1;
+let nextWebhookId = 1;
 const knownChannelIds = new Set<string>();
 // channelId -> set of memberRefs (users by sub, agents by id) — populated by addMember, read by
 // isMember. This is the membership-tracking approach the /agents tests below reuse.
 const channelMembers = new Map<string, Set<string>>();
 const agentsByOwner = new Map<string, Array<{ id: string; ownerSub: string; kind: string; name?: string; model?: string; createdAt: string }>>();
+
+// channelId -> messages, seq order (1-based per channel, mirrors MemoryStore) — real enough to
+// back GET .../messages, GET .../threads/:parentId (filtered by parentId), and unreadCount
+// (counted by seq) below, not just a stub.
+interface FakeMessage {
+  id: string;
+  channelId: string;
+  seq: number;
+  authorRef: string;
+  authorType: string;
+  parentId?: string;
+  contentSha256: string;
+  prevHash: string;
+  hash: string;
+  createdAt: string;
+}
+const messagesByChannel = new Map<string, FakeMessage[]>();
+
+// messageId -> emoji -> set of userSubs who reacted — mirrors the (messageId,userSub,emoji)
+// uniqueness Reaction documents (reacting twice with the same emoji is a no-op).
+const reactionsByMessage = new Map<string, Map<string, Set<string>>>();
+
+// `${channelId}:${userSub}` -> last-read seq, read back by unreadCount.
+const lastReadByChannelUser = new Map<string, number>();
+
+// token -> webhook — a Map keyed by token, as createWebhook mints the credential and
+// getWebhookByToken (used by the unauthenticated POST /hooks/:token path) looks it up by it.
+interface FakeWebhook {
+  id: string;
+  channelId: string;
+  token: string;
+  createdBy: string;
+  createdAt: string;
+}
+const webhooksByToken = new Map<string, FakeWebhook>();
 
 const store = {
   async createChannel(input: { workspaceId: string; kind: string; name?: string; createdBy: string }) {
@@ -51,21 +89,70 @@ const store = {
   async isMember(channelId: string, ref: string) {
     return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
   },
-  async appendMessage(input: { channelId: string; authorRef: string; authorType: string; content: string }) {
-    return {
+  async appendMessage(input: { channelId: string; authorRef: string; authorType: string; content: string; parentId?: string }) {
+    const rows = messagesByChannel.get(input.channelId) ?? [];
+    const message: FakeMessage = {
       id: `msg-${nextMessageId++}`,
       channelId: input.channelId,
-      seq: 1,
+      seq: rows.length + 1,
       authorRef: input.authorRef,
       authorType: input.authorType,
+      parentId: input.parentId,
       contentSha256: "0".repeat(64),
       prevHash: "0".repeat(64),
       hash: "0".repeat(64),
       createdAt: new Date().toISOString(),
     };
+    rows.push(message);
+    messagesByChannel.set(input.channelId, rows);
+    return message;
   },
-  async listMessages() {
-    return [];
+  async listMessages(channelId: string) {
+    return messagesByChannel.get(channelId) ?? [];
+  },
+  async listThread(channelId: string, parentId: string) {
+    return (messagesByChannel.get(channelId) ?? []).filter((m) => m.parentId === parentId);
+  },
+  async addReaction(messageId: string, userSub: string, emoji: string) {
+    const byEmoji = reactionsByMessage.get(messageId) ?? new Map<string, Set<string>>();
+    const users = byEmoji.get(emoji) ?? new Set<string>();
+    users.add(userSub);
+    byEmoji.set(emoji, users);
+    reactionsByMessage.set(messageId, byEmoji);
+  },
+  async removeReaction(messageId: string, userSub: string, emoji: string) {
+    reactionsByMessage.get(messageId)?.get(emoji)?.delete(userSub);
+  },
+  async listReactions(messageId: string) {
+    const byEmoji = reactionsByMessage.get(messageId) ?? new Map<string, Set<string>>();
+    const out: Array<{ messageId: string; userSub: string; emoji: string; at: string }> = [];
+    for (const [emoji, users] of byEmoji) {
+      for (const userSub of users) {
+        out.push({ messageId, userSub, emoji, at: new Date().toISOString() });
+      }
+    }
+    return out;
+  },
+  async setLastRead(channelId: string, userSub: string, seq: number) {
+    lastReadByChannelUser.set(`${channelId}:${userSub}`, seq);
+  },
+  async unreadCount(channelId: string, userSub: string) {
+    const read = lastReadByChannelUser.get(`${channelId}:${userSub}`) ?? 0;
+    return (messagesByChannel.get(channelId) ?? []).filter((m) => m.seq > read).length;
+  },
+  async createWebhook(channelId: string, createdBy: string) {
+    const wh: FakeWebhook = {
+      id: `wh-${nextWebhookId++}`,
+      channelId,
+      token: randomUUID(),
+      createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    webhooksByToken.set(wh.token, wh);
+    return wh;
+  },
+  async getWebhookByToken(token: string) {
+    return webhooksByToken.get(token) ?? null;
   },
   async createAgent(input: { ownerSub: string; kind: string; name?: string; model?: string }) {
     const agent = { id: `agent-${nextAgentId++}`, ...input, createdAt: new Date().toISOString() };
@@ -211,6 +298,47 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve) => adminServer.close(() => resolve()));
+});
+
+// ── Fake search port (src/http/server.ts's `SearchFn`) — used ONLY by the GET /search tests
+// below, injected into a SEPARATE server instance (`searchServer`/`searchBaseUrl`) so the tests
+// above keep proving the no-search path (`server`/`baseUrl`, already built without `search`)
+// still 404s cleanly. Records every call and returns a canned result list regardless of query.
+const fakeSearchResults: Array<Message & { content?: string }> = [
+  {
+    id: "msg-search-1",
+    channelId: "chan-search",
+    seq: 1,
+    authorRef: "user-1",
+    authorType: "user",
+    contentSha256: "0".repeat(64),
+    prevHash: "0".repeat(64),
+    hash: "0".repeat(64),
+    createdAt: new Date().toISOString(),
+    content: "matched text",
+  },
+];
+
+const searchCalls: Array<{ userSub: string; q: string }> = [];
+
+const search = async (userSub: string, q: string): Promise<Array<Message & { content?: string }>> => {
+  searchCalls.push({ userSub, q });
+  return fakeSearchResults;
+};
+
+let searchServer: Server;
+let searchBaseUrl: string;
+
+before(async () => {
+  searchServer = createHttpServer({ verifyToken, store, search });
+  await new Promise<void>((resolve) => searchServer.listen(0, resolve));
+  const address = searchServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  searchBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => searchServer.close(() => resolve()));
 });
 
 test("GET /healthz is 200 with no auth required", async () => {
@@ -524,4 +652,203 @@ test("GET /admin with no admin dep wired is 404", async () => {
   });
   assert.equal(res.status, 404);
   assert.deepEqual(await res.json(), { error: "admin_unavailable" });
+});
+
+// ── Chat-parity routes: threads, reactions, unread/read, inbound webhooks, search. All run
+// through the normal auth flow against `baseUrl` EXCEPT POST /hooks/:token, which is the one
+// unauthenticated route (the path token is itself the credential). ─────────────────────────────
+
+test("a threaded reply carries parentId and shows up in the thread list", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "general" }),
+  });
+  const channel = await created.json() as { id: string };
+
+  const parentRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "parent message" }),
+  });
+  const parent = await parentRes.json() as { id: string };
+
+  const replyRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "a reply", parentId: parent.id }),
+  });
+  assert.equal(replyRes.status, 201);
+  const reply = await replyRes.json() as { id: string; parentId?: string };
+  assert.equal(reply.parentId, parent.id);
+
+  const threadRes = await fetch(`${baseUrl}/channels/${channel.id}/threads/${parent.id}`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(threadRes.status, 200);
+  const thread = await threadRes.json() as Array<{ id: string; parentId?: string }>;
+  assert.equal(thread.length, 1);
+  assert.equal(thread[0]?.id, reply.id);
+});
+
+test("GET /channels/:id/threads/:parentId is forbidden for a non-member", async () => {
+  const res = await fetch(`${baseUrl}/channels/no-such-channel/threads/no-such-parent`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 403);
+});
+
+test("reactions: add, list, and remove", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "general" }),
+  });
+  const channel = await created.json() as { id: string };
+  const msgRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "react to me" }),
+  });
+  const message = await msgRes.json() as { id: string };
+
+  const addRes = await fetch(`${baseUrl}/messages/${message.id}/reactions`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ emoji: "\u{1F44D}" }),
+  });
+  assert.equal(addRes.status, 201);
+  assert.deepEqual(await addRes.json(), { ok: true });
+
+  const listRes = await fetch(`${baseUrl}/messages/${message.id}/reactions`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(listRes.status, 200);
+  const reactions = await listRes.json() as Array<{ emoji: string; userSub: string }>;
+  assert.equal(reactions.length, 1);
+  assert.equal(reactions[0]?.emoji, "\u{1F44D}");
+  assert.equal(reactions[0]?.userSub, "user-1");
+
+  const delRes = await fetch(`${baseUrl}/messages/${message.id}/reactions/${encodeURIComponent("\u{1F44D}")}`, {
+    method: "DELETE",
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(delRes.status, 200);
+  assert.deepEqual(await delRes.json(), { ok: true });
+
+  const listAfterRes = await fetch(`${baseUrl}/messages/${message.id}/reactions`, {
+    headers: { authorization: "Bearer good" },
+  });
+  const reactionsAfter = await listAfterRes.json() as unknown[];
+  assert.equal(reactionsAfter.length, 0);
+});
+
+test("unread count reflects messages after the last-read marker, and read resets it", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "general" }),
+  });
+  const channel = await created.json() as { id: string };
+
+  await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "one" }),
+  });
+  const secondRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "two" }),
+  });
+  const second = await secondRes.json() as { seq: number };
+
+  const unreadRes = await fetch(`${baseUrl}/channels/${channel.id}/unread`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(unreadRes.status, 200);
+  assert.deepEqual(await unreadRes.json(), { unread: 2 });
+
+  const readRes = await fetch(`${baseUrl}/channels/${channel.id}/read`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ seq: second.seq }),
+  });
+  assert.equal(readRes.status, 200);
+  assert.deepEqual(await readRes.json(), { ok: true });
+
+  const unreadAfterRes = await fetch(`${baseUrl}/channels/${channel.id}/unread`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.deepEqual(await unreadAfterRes.json(), { unread: 0 });
+});
+
+test("GET /channels/:id/unread is forbidden for a non-member", async () => {
+  const res = await fetch(`${baseUrl}/channels/no-such-channel/unread`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 403);
+});
+
+test("POST /channels/:id/webhooks creates a webhook, and POST /hooks/:token posts a message with it", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "general" }),
+  });
+  const channel = await created.json() as { id: string };
+
+  const whRes = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+  });
+  assert.equal(whRes.status, 201);
+  const wh = await whRes.json() as { id: string; channelId: string; token: string };
+  assert.equal(wh.channelId, channel.id);
+  assert.equal(typeof wh.token, "string");
+  assert.ok(wh.token.length > 0);
+
+  // No Authorization header at all — the path token IS the credential for this one route.
+  const hookRes = await fetch(`${baseUrl}/hooks/${encodeURIComponent(wh.token)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "posted by webhook" }),
+  });
+  assert.equal(hookRes.status, 201);
+  const hookBody = await hookRes.json() as { id: string };
+  assert.equal(typeof hookBody.id, "string");
+
+  // Confirm it was actually recorded, via the normal (authenticated) channel-messages route.
+  const messagesRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
+    headers: { authorization: "Bearer good" },
+  });
+  const messages = await messagesRes.json() as Array<{ id: string; authorRef: string }>;
+  assert.ok(messages.some((m) => m.id === hookBody.id && m.authorRef === `webhook:${wh.id}`));
+});
+
+test("POST /hooks/:token with an unknown token is 401 and requires no auth header to reach that verdict", async () => {
+  const res = await fetch(`${baseUrl}/hooks/not-a-real-token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "should not be recorded" }),
+  });
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { error: "invalid_webhook" });
+});
+
+test("GET /search returns results when a search dep is wired", async () => {
+  const res = await fetch(`${searchBaseUrl}/search?q=hello`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), fakeSearchResults);
+  assert.ok(searchCalls.some((c) => c.userSub === "user-1" && c.q === "hello"));
+});
+
+test("GET /search with no search dep wired is 404", async () => {
+  const res = await fetch(`${baseUrl}/search?q=hello`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "search_unavailable" });
 });

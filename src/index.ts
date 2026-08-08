@@ -12,6 +12,7 @@ import { makeControlPlane } from "./agent/control.ts";
 import { makeEchoRunner } from "./agent/echo-runner.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
+import { searchMessages } from "./search/search.ts";
 import { createHttpServer } from "./http/server.ts";
 import { makeLlmClient } from "./secrouter/client.ts";
 import { MemoryStore } from "./store/memory.ts";
@@ -61,6 +62,7 @@ if (config.devMode) {
 
 const server = createHttpServer({
   verifyToken, store, llm, control, broadcast,
+  search: (userSub, q) => searchMessages(store, userSub, q),
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
 });
 hub = attachWsHub(server, { verifyToken });

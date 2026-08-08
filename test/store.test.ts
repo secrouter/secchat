@@ -203,6 +203,141 @@ test("redactMessage persists the reason as the last audit event's detail; chain 
   assert.equal((await store.verifyChains()).messagesOk, true);
 });
 
+// ── Threads ──────────────────────────────────────────────────────────────────────────────────
+
+test("listThread returns only the replies to that parent, seq order, and doesn't leak into listMessages weirdly", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+  const parent = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "topic" });
+  const other = await store.appendMessage({ channelId: channel.id, authorRef: "user-bob", authorType: "user", content: "unrelated top-level" });
+  const reply1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-bob", authorType: "user", content: "first reply", parentId: parent.id });
+  const reply2 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "second reply", parentId: parent.id });
+
+  assert.equal(reply1.parentId, parent.id);
+  assert.equal(other.parentId, undefined);
+
+  const thread = await store.listThread(channel.id, parent.id);
+  assert.deepEqual(thread.map((m) => m.id), [reply1.id, reply2.id]); // seq order, exactly the two replies
+  assert.deepEqual(thread.map((m) => m.content), ["first reply", "second reply"]);
+
+  // The parent itself and the unrelated top-level message are NOT replies to themselves/parent.
+  assert.equal(thread.some((m) => m.id === parent.id), false);
+  assert.equal(thread.some((m) => m.id === other.id), false);
+
+  // A thread with no replies is just empty, not an error.
+  assert.deepEqual(await store.listThread(channel.id, other.id), []);
+
+  // listMessages is unaffected — still every message, in seq order, unfiltered by parentId.
+  const all = await store.listMessages(channel.id);
+  assert.deepEqual(all.map((m) => m.id), [parent.id, other.id, reply1.id, reply2.id]);
+
+  assert.equal((await store.verifyChains()).messagesOk, true); // parentId isn't a hash input
+});
+
+test("a redacted reply's content is omitted from listThread too, same rule as listMessages", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+  const parent = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "topic" });
+  const reply = await store.appendMessage({ channelId: channel.id, authorRef: "user-bob", authorType: "user", content: "ssn: 123-45-6789", parentId: parent.id });
+
+  await store.redactMessage(reply.id, "admin-1", "CUI spillage");
+
+  const thread = await store.listThread(channel.id, parent.id);
+  assert.equal(thread.length, 1);
+  assert.equal("content" in thread[0]!, false);
+  assert.ok(thread[0]!.redactedAt);
+});
+
+// ── Reactions ────────────────────────────────────────────────────────────────────────────────
+
+test("addReaction is idempotent per (messageId, userSub, emoji); distinct users/emoji each count; removeReaction removes exactly one triple", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+  const m = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "shipped it" });
+
+  assert.deepEqual(await store.listReactions(m.id), []);
+
+  await store.addReaction(m.id, "user-alice", "🚀");
+  await store.addReaction(m.id, "user-alice", "🚀"); // duplicate -> no-op
+  await store.addReaction(m.id, "user-bob", "🚀"); // different user, same emoji -> distinct
+  await store.addReaction(m.id, "user-alice", "🎉"); // same user, different emoji -> distinct
+
+  const reactions = await store.listReactions(m.id);
+  assert.equal(reactions.length, 3);
+  for (const r of reactions) {
+    assert.equal(r.messageId, m.id);
+    assert.ok(r.at); // ISO timestamp stamped
+  }
+  assert.ok(reactions.some((r) => r.userSub === "user-alice" && r.emoji === "🚀"));
+  assert.ok(reactions.some((r) => r.userSub === "user-bob" && r.emoji === "🚀"));
+  assert.ok(reactions.some((r) => r.userSub === "user-alice" && r.emoji === "🎉"));
+
+  await store.removeReaction(m.id, "user-alice", "🚀");
+  const afterRemove = await store.listReactions(m.id);
+  assert.equal(afterRemove.length, 2);
+  assert.equal(afterRemove.some((r) => r.userSub === "user-alice" && r.emoji === "🚀"), false);
+  // the other two are untouched
+  assert.ok(afterRemove.some((r) => r.userSub === "user-bob" && r.emoji === "🚀"));
+  assert.ok(afterRemove.some((r) => r.userSub === "user-alice" && r.emoji === "🎉"));
+
+  // removing something absent is a no-op, not a throw
+  await store.removeReaction(m.id, "user-carol", "👀");
+  assert.equal((await store.listReactions(m.id)).length, 2);
+
+  assert.equal((await store.verifyChains()).messagesOk, true); // reactions aren't chained at all
+});
+
+// ── Read markers / unread counts ────────────────────────────────────────────────────────────
+
+test("unreadCount defaults to everything unread, drops after setLastRead, and is per (channel,user)", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+  const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "a" });
+  await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "b" });
+
+  // No read marker set yet -> lastRead defaults to 0 -> everything is unread.
+  assert.equal(await store.unreadCount(channel.id, "user-bob"), 2);
+
+  await store.setLastRead(channel.id, "user-bob", m1.seq);
+  assert.equal(await store.unreadCount(channel.id, "user-bob"), 1); // only seq 2 is > 1
+
+  const m3 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "c" });
+  assert.equal(await store.unreadCount(channel.id, "user-bob"), 2); // seq 2 and seq 3 now
+
+  await store.setLastRead(channel.id, "user-bob", m3.seq);
+  assert.equal(await store.unreadCount(channel.id, "user-bob"), 0);
+
+  // A different user's marker is independent -> still fully unread.
+  assert.equal(await store.unreadCount(channel.id, "user-carol"), 3);
+});
+
+// ── Webhooks ─────────────────────────────────────────────────────────────────────────────────
+
+test("createWebhook -> getWebhookByToken round-trips; unknown/empty token returns null", async () => {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+  const hook = await store.createWebhook(channel.id, "user-alice");
+  assert.ok(hook.id);
+  assert.equal(hook.channelId, channel.id);
+  assert.equal(hook.createdBy, "user-alice");
+  assert.ok(hook.createdAt);
+  assert.ok(hook.token && hook.token.length > 10); // strong random secret, not a short/guessable id
+
+  const fetched = await store.getWebhookByToken(hook.token);
+  assert.deepEqual(fetched, hook);
+
+  assert.equal(await store.getWebhookByToken("not-a-real-token"), null);
+  assert.equal(await store.getWebhookByToken(""), null); // empty token must never match
+
+  // Two webhooks (even on the same channel) mint distinct tokens.
+  const hook2 = await store.createWebhook(channel.id, "user-alice");
+  assert.notEqual(hook2.token, hook.token);
+  assert.equal((await store.getWebhookByToken(hook2.token))?.id, hook2.id);
+});
+
 // ── SessionStore ─────────────────────────────────────────────────────────────────────────────
 
 test("createSession -> getSession round-trip; unknown id returns null", async () => {

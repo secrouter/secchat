@@ -23,8 +23,23 @@
 // AgentSession) and #grants (sessionId -> ExecuteGrant[], append-ordered so "most recent" is
 // just "last in the array"). Grants are never removed, only marked `consumed` — same
 // tombstone-not-delete instinct as message redaction, and it keeps a full history per session.
+//
+// Chat-parity pass (threads/reactions/unread/webhooks), same instincts throughout:
+//   * Threads: `Message.parentId` rides along exactly like `promptedBy` (set in appendMessage,
+//     never a hash input — computeMessageHash doesn't take it). listThread is listMessages'
+//     seq-order + redaction-omits-content rule, filtered to one parent.
+//   * Reactions are mutable social signal, deliberately OUTSIDE both hash chains: #reactions
+//     (messageId -> Reaction[]) with add/remove doing straight linear scans — row counts here
+//     are tiny (one message's reactions), so no need for a nested per-(user,emoji) index.
+//   * Read markers: #lastRead (channelId -> (userSub -> last-read seq)), same Map-of-Map shape
+//     as everything else here. unreadCount is a live recount (seq > lastRead), not a maintained
+//     counter, so it can never drift from the message list.
+//   * Webhooks: #webhooksById/#webhooksByToken are two indexes over the same rows (id lookup
+//     isn't required by the Store contract yet, but keeping it mirrors #messagesByChannel /
+//     #messagesById and costs nothing). The token is the bearer credential an external system
+//     presents, so it's minted with node:crypto's CSPRNG, never Math.random or a counter.
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   GENESIS,
   computeAuditHash,
@@ -44,9 +59,11 @@ import type {
   Id,
   Member,
   Message,
+  Reaction,
   SessionStatus,
   SessionStore,
   Store,
+  Webhook,
 } from "../types.ts";
 
 export class MemoryStore implements Store, SessionStore {
@@ -59,6 +76,10 @@ export class MemoryStore implements Store, SessionStore {
   #auditLog: AuditEvent[] = []; // one global chain
   #sessions = new Map<Id, AgentSession>(); // insertion order == creation order
   #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
+  #reactions = new Map<Id, Reaction[]>(); // messageId -> reactions, append order
+  #lastRead = new Map<Id, Map<string, number>>(); // channelId -> (userSub -> last-read seq)
+  #webhooksById = new Map<Id, Webhook>();
+  #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
 
   async createChannel(input: Omit<Channel, "id" | "createdAt">): Promise<Channel> {
     const channel: Channel = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -138,6 +159,7 @@ export class MemoryStore implements Store, SessionStore {
       authorRef: input.authorRef,
       authorType: input.authorType,
       promptedBy: input.promptedBy, // NOT a hash input (see header comment) — carried for provenance only
+      parentId: input.parentId, // thread parent — same deal: metadata only, not bound into the hash
       contentSha256,
       prevHash,
       hash,
@@ -153,6 +175,82 @@ export class MemoryStore implements Store, SessionStore {
   async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
     const messages = this.#messagesByChannel.get(channelId) ?? [];
     return messages.map((m) => (m.redactedAt ? { ...m } : { ...m, content: this.#content.get(m.id) }));
+  }
+
+  /** Replies to `parentId` in `channelId`, seq order; same redaction-omits-content rule as
+   * listMessages. Top-level messages (parentId unset) never match — parentId must equal exactly. */
+  async listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>> {
+    const messages = this.#messagesByChannel.get(channelId) ?? [];
+    return messages
+      .filter((m) => m.parentId === parentId)
+      .map((m) => (m.redactedAt ? { ...m } : { ...m, content: this.#content.get(m.id) }));
+  }
+
+  // ── Reactions (mutable; NOT chained) ──────────────────────────────────────────────────────
+
+  /** Idempotent per (messageId, userSub, emoji): reacting twice with the same emoji is a no-op. */
+  async addReaction(messageId: Id, userSub: string, emoji: string): Promise<void> {
+    const reactions = this.#reactions.get(messageId);
+    if (reactions) {
+      if (reactions.some((r) => r.userSub === userSub && r.emoji === emoji)) return;
+      reactions.push({ messageId, userSub, emoji, at: new Date().toISOString() });
+    } else {
+      this.#reactions.set(messageId, [{ messageId, userSub, emoji, at: new Date().toISOString() }]);
+    }
+  }
+
+  /** Removes exactly the (messageId, userSub, emoji) triple. No-op if it isn't present. */
+  async removeReaction(messageId: Id, userSub: string, emoji: string): Promise<void> {
+    const reactions = this.#reactions.get(messageId);
+    if (!reactions) return;
+    this.#reactions.set(
+      messageId,
+      reactions.filter((r) => !(r.userSub === userSub && r.emoji === emoji)),
+    );
+  }
+
+  async listReactions(messageId: Id): Promise<Reaction[]> {
+    return [...(this.#reactions.get(messageId) ?? [])];
+  }
+
+  // ── Per-user read markers → unread counts ─────────────────────────────────────────────────
+
+  async setLastRead(channelId: Id, userSub: string, seq: number): Promise<void> {
+    const perUser = this.#lastRead.get(channelId);
+    if (perUser) perUser.set(userSub, seq);
+    else this.#lastRead.set(channelId, new Map([[userSub, seq]]));
+  }
+
+  /** Messages in `channelId` with seq > the user's last-read seq (default 0 — everything
+   * unread). Recomputed live off the message list, so it can never drift out of sync. */
+  async unreadCount(channelId: Id, userSub: string): Promise<number> {
+    const lastRead = this.#lastRead.get(channelId)?.get(userSub) ?? 0;
+    const messages = this.#messagesByChannel.get(channelId) ?? [];
+    return messages.filter((m) => m.seq > lastRead).length;
+  }
+
+  // ── Inbound webhooks ───────────────────────────────────────────────────────────────────────
+
+  /** Mints a fresh bearer credential (24 bytes from node:crypto's CSPRNG, base64url-encoded) —
+   * treat `token` like a secret; it's what an external system presents to post as this webhook. */
+  async createWebhook(channelId: Id, createdBy: string): Promise<Webhook> {
+    const webhook: Webhook = {
+      id: randomUUID(),
+      channelId,
+      token: randomBytes(24).toString("base64url"),
+      createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    this.#webhooksById.set(webhook.id, webhook);
+    this.#webhooksByToken.set(webhook.token, webhook);
+    return webhook;
+  }
+
+  /** A null/empty token never matches a row — guards a caller that forwards a missing/blank
+   * header straight through instead of checking it first. */
+  async getWebhookByToken(token: string): Promise<Webhook | null> {
+    if (!token) return null;
+    return this.#webhooksByToken.get(token) ?? null;
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a
