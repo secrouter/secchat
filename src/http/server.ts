@@ -5,7 +5,9 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AdminOverview, AgentControl, AgentKind, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
+import { readFileSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
+import type { AdminOverview, AgentControl, AgentKind, Channel, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -54,6 +56,51 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
       }
     });
   });
+}
+
+/** Content-type for a static web asset, by extension — the small fixed set the SPA build emits
+ * (see the static-serving block in createServer below). Anything else is served as opaque bytes
+ * rather than guessed at. */
+function contentTypeFor(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".json":
+    case ".map":
+      return "application/json";
+    case ".ico":
+      return "image/x-icon";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/** Reads `absPath` (through `cache`, populated on first read — dev-served files don't change
+ * within a running process, so a plain read-through Map needs no invalidation) and writes it as
+ * the response body with `contentType`. ENOENT (no such file) → 404; anything else (e.g. `absPath`
+ * is a directory, a permissions error) → 500 — the same split every other route here uses. */
+function serveWebFile(res: ServerResponse, cache: Map<string, Buffer>, absPath: string, contentType: string): void {
+  try {
+    let data = cache.get(absPath);
+    if (!data) {
+      data = readFileSync(absPath);
+      cache.set(absPath, data);
+    }
+    res.writeHead(200, { "content-type": contentType });
+    res.end(data);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      sendJson(res, 404, { error: "not_found" });
+    } else {
+      sendJson(res, 500, { error: "internal" });
+    }
+  }
 }
 
 /** Notify realtime subscribers of a channel event (wired to the WS hub at the entrypoint).
@@ -131,6 +178,19 @@ function buildRouter(
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.appendAudit({ actor: principal.sub, action: "channel.create", target: channel.id });
     sendJson(res, 201, channel);
+  });
+
+  // The SPA sidebar needs a list of the caller's channels; every other channel read here is
+  // scoped to one already-known id. `store.listChannels()` returns every channel (the same read
+  // the admin console uses), so this filters to membership itself rather than needing a new
+  // Store method — the same isMember gate every per-channel route below already applies.
+  router.add("GET", "/channels", async ({ res, principal }) => {
+    const chans = await store.listChannels();
+    const mine: Channel[] = [];
+    for (const c of chans) {
+      if (await store.isMember(c.id, principal.sub)) mine.push(c);
+    }
+    sendJson(res, 200, mine);
   });
 
   router.add("GET", "/channels/:id/messages", async ({ res, params, principal }) => {
@@ -370,8 +430,13 @@ export function createHttpServer(deps: {
   control?: AgentControl;
   admin?: AdminDeps;
   search?: SearchFn;
+  /** Static web root for the SPA shell (index.html + assets/*) — see the static-serving block
+   * below. Unset in a deployment/test that doesn't serve the SPA from this process. */
+  web?: { root: string };
 }): Server {
   const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
+  // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
+  const webCache = new Map<string, Buffer>();
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -435,6 +500,33 @@ export function createHttpServer(deps: {
         sendJson(res, 500, { error: "internal" });
       }
       return;
+    }
+
+    // STATIC WEB ASSETS (the SPA shell): special-cased before the auth block the SAME way
+    // `/healthz` is — the shell (index.html) and its assets (JS/CSS/...) must be fetchable by a
+    // browser holding no bearer token yet, since loading the shell is how login happens in the
+    // first place. Only engages when `deps.web` is set; a deployment/test that doesn't wire it
+    // falls through `/` (and `/assets/...`) to the normal 401/404 below, same as any other route.
+    // `/assets/<path>` is resolved against `<root>/assets` and rejected (404) if that would
+    // escape the directory — defense in depth alongside the dot-segment normalization `new URL`
+    // already applied to `pathname` above.
+    if (method === "GET" && deps.web) {
+      const webRoot = deps.web.root;
+      if (pathname === "/" || pathname === "" || pathname === "/index.html") {
+        serveWebFile(res, webCache, join(webRoot, "index.html"), "text/html; charset=utf-8");
+        return;
+      }
+      if (pathname.startsWith("/assets/")) {
+        const assetsRoot = resolve(webRoot, "assets");
+        const requested = decodeURIComponent(pathname.slice("/assets/".length));
+        const target = resolve(assetsRoot, requested);
+        if (target !== assetsRoot && !target.startsWith(assetsRoot + sep)) {
+          sendJson(res, 404, { error: "not_found" });
+          return;
+        }
+        serveWebFile(res, webCache, target, contentTypeFor(target));
+        return;
+      }
     }
 
     let principal: Principal;

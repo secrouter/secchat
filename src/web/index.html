@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>SecChat</title>
+<link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+
+<!-- ── Login screen ─────────────────────────────────────────────────────── -->
+<section id="login-screen" class="screen">
+  <div class="login-card">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">S</span>
+      <h1 class="brand-word">Sec<span class="accent">Chat</span></h1>
+    </div>
+    <p class="login-tagline">Auditable team + agentic chat for CUI / air-gapped enclaves.</p>
+
+    <form id="login-form" novalidate>
+      <label class="field" for="login-username">
+        <span class="field-label">Username</span>
+        <input id="login-username" name="username" type="text" autocomplete="username"
+               placeholder="e.g. alice" autofocus required />
+      </label>
+
+      <label class="checkbox-field" for="login-admin">
+        <input id="login-admin" name="admin" type="checkbox" />
+        <span>Sign in as an admin (member of <code class="mono">secchat-admins</code>)</span>
+      </label>
+
+      <button id="login-submit" type="submit" class="btn btn-primary btn-block">Sign in (dev)</button>
+
+      <p id="login-error" class="form-error hidden" role="alert"></p>
+    </form>
+
+    <p class="dev-note">
+      <strong>Dev sign-in.</strong> This mints a client-side token
+      (<code>dev.&lt;username&gt;.&lt;groups&gt;</code>) — there is no password, and nothing but
+      the username shape is checked. Real sign-in will go through SecSSO (Authentik) once wired.
+    </p>
+  </div>
+</section>
+
+<!-- ── App shell ────────────────────────────────────────────────────────── -->
+<div id="app-screen" class="screen hidden">
+  <header id="topbar">
+    <div class="topbar-brand">
+      <span class="brand-mark small" aria-hidden="true">S</span>
+      <span class="brand-word small">Sec<span class="accent">Chat</span></span>
+    </div>
+    <div class="topbar-spacer"></div>
+
+    <div class="conn-indicator" id="conn-indicator" title="Realtime connection status">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-label">offline</span>
+    </div>
+
+    <div class="user-chip" id="user-chip">
+      <span class="avatar" id="user-avatar"></span>
+      <div class="user-meta">
+        <span class="user-name" id="user-name"></span>
+        <span class="user-groups" id="user-groups"></span>
+      </div>
+    </div>
+
+    <button id="logout-btn" class="btn btn-ghost" type="button">Log out</button>
+  </header>
+
+  <div id="body-row">
+    <aside id="sidebar">
+      <div class="sidebar-actions">
+        <button id="new-channel-btn" class="btn btn-secondary btn-block" type="button">
+          <span class="btn-glyph">#</span> New channel
+        </button>
+        <button id="new-assistant-btn" class="btn btn-secondary btn-block" type="button">
+          <span class="btn-glyph">&#10022;</span> New assistant
+        </button>
+        <button id="new-coding-btn" class="btn btn-secondary btn-block" type="button">
+          <span class="btn-glyph">&lt;/&gt;</span> New coding agent
+        </button>
+      </div>
+
+      <div class="sidebar-section-label">Channels</div>
+      <nav id="channel-list" class="channel-list" aria-label="Channels"></nav>
+    </aside>
+
+    <main id="main">
+      <div id="no-channel-state" class="empty-state">
+        <div class="empty-state-mark" aria-hidden="true"></div>
+        <p>Select a channel, or create one to get started.</p>
+      </div>
+
+      <div id="channel-view" class="channel-view hidden">
+        <header id="channel-header" class="channel-header">
+          <div class="channel-header-main">
+            <span id="channel-kind-badge" class="badge"></span>
+            <h2 id="channel-name"></h2>
+          </div>
+          <div id="channel-id-label" class="channel-id mono"></div>
+        </header>
+
+        <div id="coding-strip" class="coding-strip hidden">
+          <div class="coding-strip-info">
+            <span class="pill pill-warn">plan mode</span>
+            <span id="session-status-label" class="session-status"></span>
+          </div>
+          <div class="coding-strip-actions">
+            <button id="grant-execute-btn" class="btn btn-warn" type="button">Grant execute (once)</button>
+          </div>
+          <div id="grant-flash" class="grant-flash hidden" role="status"></div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="composer-form" class="composer" autocomplete="off">
+          <input id="composer-input" type="text" placeholder="Message…" autocomplete="off" />
+          <button id="composer-send" class="btn btn-primary" type="submit">Send</button>
+        </form>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ── Modal (name prompt for New channel / New assistant / New coding agent) ─ -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title">New channel</h3>
+    <p id="modal-desc" class="modal-desc"></p>
+    <input id="modal-input" type="text" class="modal-input" autocomplete="off" />
+    <p id="modal-error" class="form-error hidden"></p>
+    <div class="modal-actions">
+      <button id="modal-cancel" type="button" class="btn btn-ghost">Cancel</button>
+      <button id="modal-confirm" type="button" class="btn btn-primary">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toasts ───────────────────────────────────────────────────────────── -->
+<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

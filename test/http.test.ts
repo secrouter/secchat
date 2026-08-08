@@ -1,14 +1,21 @@
 // Exercises the dependency-injected HTTP layer end-to-end over a real socket (`.listen(0)` +
 // global `fetch`), using fakes for both injected dependencies. Deliberately does NOT import
-// auth/* or store/* — those are separate modules; src/http/server.ts takes its deps by
-// injection specifically so this suite can stay isolated from them.
+// src/auth/* or src/store/* — those are separate modules; src/http/server.ts takes its deps by
+// injection specifically so this suite can stay isolated from them. src/dev/auth.ts IS imported
+// directly below, though: unlike the real JWKS verifier, it's a trivial dependency-free pure
+// function (regex parse in, Principal out), so it's exercised here as a plain unit under test
+// rather than injected into a server.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "node:http";
 import type { AdminOverview, AgentControl, AgentSession, Message, Store, VerifyToken } from "../src/types.ts";
 import { createHttpServer } from "../src/http/server.ts";
+import { devVerifyToken } from "../src/dev/auth.ts";
 
 const verifyToken: VerifyToken = async (token) => {
   if (token === "good") return { sub: "user-1", groups: ["eng"] };
@@ -22,16 +29,27 @@ const verifyToken: VerifyToken = async (token) => {
 };
 
 // MINIMAL fake Store — implements ONLY the methods src/http/server.ts's routes call
-// (createChannel, addMember, appendAudit, isMember, appendMessage, listMessages, listThread,
-// addReaction, removeReaction, listReactions, setLastRead, unreadCount, createWebhook,
-// getWebhookByToken, createAgent, listAgentsByOwner). It intentionally does NOT implement
-// getChannel/listMembers/redactMessage/verifyChains/getAgent/listChannels/listAllAgents, so it's
+// (createChannel, addMember, appendAudit, isMember, listChannels, appendMessage, listMessages,
+// listThread, addReaction, removeReaction, listReactions, setLastRead, unreadCount,
+// createWebhook, getWebhookByToken, createAgent, listAgentsByOwner). It intentionally does NOT
+// implement getChannel/listMembers/redactMessage/verifyChains/getAgent/listAllAgents, so it's
 // cast through `unknown` rather than structurally satisfying the full Store contract.
 let nextChannelId = 1;
 let nextMessageId = 1;
 let nextAgentId = 1;
 let nextWebhookId = 1;
 const knownChannelIds = new Set<string>();
+// channelId -> full channel row, populated by createChannel — backs listChannels (used by GET
+// /channels, which filters this down to the caller's channels via isMember below).
+interface FakeChannel {
+  id: string;
+  workspaceId: string;
+  kind: string;
+  name?: string;
+  createdBy: string;
+  createdAt: string;
+}
+const channelsById = new Map<string, FakeChannel>();
 // channelId -> set of memberRefs (users by sub, agents by id) — populated by addMember, read by
 // isMember. This is the membership-tracking approach the /agents tests below reuse.
 const channelMembers = new Map<string, Set<string>>();
@@ -76,7 +94,9 @@ const store = {
   async createChannel(input: { workspaceId: string; kind: string; name?: string; createdBy: string }) {
     const id = `chan-${nextChannelId++}`;
     knownChannelIds.add(id);
-    return { id, ...input, createdAt: new Date().toISOString() };
+    const channel: FakeChannel = { id, ...input, createdAt: new Date().toISOString() };
+    channelsById.set(id, channel);
+    return channel;
   },
   async addMember(m: { channelId: string; memberRef: string }) {
     const members = channelMembers.get(m.channelId) ?? new Set<string>();
@@ -88,6 +108,9 @@ const store = {
   },
   async isMember(channelId: string, ref: string) {
     return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
+  },
+  async listChannels() {
+    return [...channelsById.values()];
   },
   async appendMessage(input: { channelId: string; authorRef: string; authorType: string; content: string; parentId?: string }) {
     const rows = messagesByChannel.get(input.channelId) ?? [];
@@ -339,6 +362,38 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve) => searchServer.close(() => resolve()));
+});
+
+// ── Fake static web root (src/http/server.ts's `deps.web`) — used ONLY by the static-serving
+// tests below, injected into a SEPARATE server instance (`webServer`/`webBaseUrl`) so the tests
+// above keep proving the no-web path (`server`/`baseUrl`, already built without `web`) still
+// falls through `/` to the normal auth flow. A real temp directory on disk (not a fake/mock) —
+// this route reads actual files via node:fs, so the test has to give it real ones. Deliberately
+// does NOT depend on anything under src/web/ (a parallel effort builds the real SPA build output
+// that a real deployment would point `web.root` at).
+const webRoot = mkdtempSync(join(tmpdir(), "secchat-web-"));
+writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>shell</title>");
+mkdirSync(join(webRoot, "assets"));
+writeFileSync(join(webRoot, "assets", "app.js"), "console.log('app');");
+writeFileSync(join(webRoot, "assets", "app.css"), "body { color: red; }");
+// Lives directly under webRoot, OUTSIDE assets/ — the traversal test below asserts this is NOT
+// reachable via /assets/.., even though the file genuinely exists one directory up.
+writeFileSync(join(webRoot, "secret.txt"), "top secret");
+
+let webServer: Server;
+let webBaseUrl: string;
+
+before(async () => {
+  webServer = createHttpServer({ verifyToken, store, web: { root: webRoot } });
+  await new Promise<void>((resolve) => webServer.listen(0, resolve));
+  const address = webServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  webBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => webServer.close(() => resolve()));
+  rmSync(webRoot, { recursive: true, force: true });
 });
 
 test("GET /healthz is 200 with no auth required", async () => {
@@ -851,4 +906,125 @@ test("GET /search with no search dep wired is 404", async () => {
   });
   assert.equal(res.status, 404);
   assert.deepEqual(await res.json(), { error: "search_unavailable" });
+});
+
+// ── GET /channels — the SPA sidebar's channel list, filtered to the caller's membership. A core
+// router route (no optional dep to wire), so this runs against the plain `server`/`baseUrl`. ────
+
+test("GET /channels lists only channels the caller is a member of", async () => {
+  const mineRes = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "user-1's channel" }),
+  });
+  const mine = await mineRes.json() as { id: string };
+
+  const theirsRes = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({ name: "user-2's channel" }),
+  });
+  const theirs = await theirsRes.json() as { id: string };
+
+  const res = await fetch(`${baseUrl}/channels`, {
+    headers: { authorization: "Bearer good" },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as Array<{ id: string }>;
+  assert.ok(Array.isArray(body));
+  assert.ok(body.some((c) => c.id === mine.id), "caller's own channel should be listed");
+  assert.ok(!body.some((c) => c.id === theirs.id), "another user's channel should NOT be listed");
+});
+
+test("GET /channels without a token is 401", async () => {
+  const res = await fetch(`${baseUrl}/channels`);
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { error: "unauthorized" });
+});
+
+// ── Static web asset serving (the SPA shell) — exercised against `webBaseUrl` (the server built
+// WITH `web: { root: webRoot }`, a temp directory built above with a real index.html + assets/*).
+// These routes are PUBLIC: no Authorization header anywhere below, since the shell has to load
+// before a user can log in. The last test in this section proves the feature is opt-in — `baseUrl`
+// (no `web` wired) still falls through `/` to the normal auth flow, unchanged. ───────────────────
+
+test("GET / serves index.html when a web root is wired", async () => {
+  const res = await fetch(`${webBaseUrl}/`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/html"));
+  assert.equal(await res.text(), "<!doctype html><title>shell</title>");
+});
+
+test("GET /index.html also serves the shell", async () => {
+  const res = await fetch(`${webBaseUrl}/index.html`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/html"));
+  assert.equal(await res.text(), "<!doctype html><title>shell</title>");
+});
+
+test("GET /assets/app.js serves the asset as text/javascript", async () => {
+  const res = await fetch(`${webBaseUrl}/assets/app.js`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/javascript"));
+  assert.equal(await res.text(), "console.log('app');");
+});
+
+test("GET /assets/app.css serves the asset as text/css", async () => {
+  const res = await fetch(`${webBaseUrl}/assets/app.css`);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("content-type")?.startsWith("text/css"));
+  assert.equal(await res.text(), "body { color: red; }");
+});
+
+test("GET /assets/<missing file> is 404", async () => {
+  const res = await fetch(`${webBaseUrl}/assets/does-not-exist.js`);
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "not_found" });
+});
+
+test("GET /assets/<path> cannot escape the assets root, even to a file that really exists", async () => {
+  // "%2e%2e%2f" decodes to "../". It's sent percent-encoded (rather than as a literal ".."
+  // path segment) specifically because a literal "/assets/../secret.txt" gets collapsed by the
+  // URL parser itself — on both the fetch() client and the `new URL(req.url, ...)` call in
+  // server.ts — into "/secret.txt" before any handler ever sees an "/assets/" prefix at all, so
+  // it can't exercise this route's own path-safety check. The encoded slash survives that
+  // normalization intact as one opaque "/assets/" segment, decodeURIComponent'd only inside the
+  // handler itself — which is exactly the case the resolve()+startsWith() guard exists for. It
+  // targets secret.txt, which genuinely exists one directory above assets/ (see webRoot setup
+  // above): a 404 here proves the guard is doing the work, not just a missing file.
+  const res = await fetch(`${webBaseUrl}/assets/%2e%2e%2fsecret.txt`);
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "not_found" });
+});
+
+test("GET / without a web root wired falls through to the normal auth flow, unchanged", async () => {
+  const res = await fetch(`${baseUrl}/`);
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { error: "unauthorized" });
+});
+
+// ── src/dev/auth.ts's devVerifyToken — a pure parse, no server involved. DEV ONLY (see that
+// file's header comment); exercised directly here rather than injected, since it's a trivial,
+// dependency-free function. ─────────────────────────────────────────────────────────────────────
+
+test("devVerifyToken parses sub and groups from a well-formed dev token", async () => {
+  const principal = await devVerifyToken("dev.alice.eng,secchat-admins");
+  assert.deepEqual(principal, { sub: "alice", groups: ["eng", "secchat-admins"] });
+});
+
+test("devVerifyToken yields an empty groups array for a token with no groups", async () => {
+  const principal = await devVerifyToken("dev.bob.");
+  assert.deepEqual(principal, { sub: "bob", groups: [] });
+});
+
+test("devVerifyToken parses a single group with no trailing comma", async () => {
+  const principal = await devVerifyToken("dev.carol.eng");
+  assert.deepEqual(principal, { sub: "carol", groups: ["eng"] });
+});
+
+test("devVerifyToken rejects tokens that don't match the dev.<sub>.<groups> shape", async () => {
+  await assert.rejects(() => devVerifyToken("not-a-dev-token"));
+  await assert.rejects(() => devVerifyToken(""));
+  await assert.rejects(() => devVerifyToken("dev.no-trailing-dot"));
+  await assert.rejects(() => devVerifyToken("Bearer good"));
 });

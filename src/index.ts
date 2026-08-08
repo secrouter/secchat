@@ -12,15 +12,20 @@ import { makeControlPlane } from "./agent/control.ts";
 import { makeEchoRunner } from "./agent/echo-runner.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
+import { devVerifyToken } from "./dev/auth.ts";
 import { searchMessages } from "./search/search.ts";
 import { createHttpServer } from "./http/server.ts";
 import { makeLlmClient } from "./secrouter/client.ts";
 import { MemoryStore } from "./store/memory.ts";
 import { attachWsHub } from "./ws/hub.ts";
 import type { Hub } from "./ws/hub.ts";
+import { fileURLToPath } from "node:url";
 
 const config = loadConfig();
-const verifyToken = makeVerifyToken(config);
+// In dev-mode (SECCHAT_DEV_MODE=1) accept `dev.<sub>.<groups>` tokens so the local web client
+// works without a real IdP; production always verifies real SecSSO JWTs via JWKS.
+const verifyToken = config.devMode ? devVerifyToken : makeVerifyToken(config);
+if (config.devMode) console.error("! DEV MODE: dev tokens accepted + /admin open + web client served — never in production");
 // The assistant path: model calls go through SecRouter, delegated to each agent's owner.
 const llm = makeLlmClient(config);
 
@@ -63,6 +68,7 @@ if (config.devMode) {
 const server = createHttpServer({
   verifyToken, store, llm, control, broadcast,
   search: (userSub, q) => searchMessages(store, userSub, q),
+  web: { root: fileURLToPath(new URL("./web", import.meta.url)) }, // serves the SPA at / + /assets/*
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
 });
 hub = attachWsHub(server, { verifyToken });
