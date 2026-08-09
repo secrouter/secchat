@@ -534,7 +534,7 @@ function buildRouter(
     const body = (await readJsonBody(req)) as { emoji?: string };
     const emoji = body.emoji ?? "";
     await store.addReaction(messageId, principal.sub, emoji);
-    broadcast?.(message.channelId, { type: "reaction", op: "add", messageId, userSub: principal.sub, emoji });
+    broadcast?.(message.channelId, { type: "reaction", op: "add", channelId: message.channelId, messageId, userSub: principal.sub, emoji });
     sendJson(res, 201, { ok: true });
   });
 
@@ -547,7 +547,7 @@ function buildRouter(
     }
     const emoji = params.emoji!; // router already decoded the segment
     await store.removeReaction(messageId, principal.sub, emoji);
-    broadcast?.(message.channelId, { type: "reaction", op: "remove", messageId, userSub: principal.sub, emoji });
+    broadcast?.(message.channelId, { type: "reaction", op: "remove", channelId: message.channelId, messageId, userSub: principal.sub, emoji });
     sendJson(res, 200, { ok: true });
   });
 
@@ -593,7 +593,7 @@ function buildRouter(
       return;
     }
     await store.redactMessage(messageId, principal.sub, reason);
-    broadcast?.(message.channelId, { type: "redaction", messageId, by: principal.sub });
+    broadcast?.(message.channelId, { type: "redaction", channelId: message.channelId, messageId, by: principal.sub });
     sendJson(res, 200, { ok: true });
   });
 

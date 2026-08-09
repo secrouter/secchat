@@ -445,22 +445,26 @@ class GrantExecuteResult {
 // isn't yet handled, not a silent no-op at runtime.
 
 sealed class WsEvent {
-  const WsEvent();
+  const WsEvent({required this.channelId});
+
+  /// The channel this event belongs to — stamped into every frame by the hub, so a single global
+  /// (subscribeAll) socket can route any event to the right channel without a per-channel connection.
+  final String channelId;
 }
 
 final class WsMessageEvent extends WsEvent {
-  const WsMessageEvent(this.message);
+  const WsMessageEvent(this.message, {required super.channelId});
   final Message message;
 }
 
 final class WsAssistantDeltaEvent extends WsEvent {
-  const WsAssistantDeltaEvent({required this.agentId, required this.delta});
+  const WsAssistantDeltaEvent({required this.agentId, required this.delta, required super.channelId});
   final String agentId;
   final String delta;
 }
 
 final class WsAgentOutputEvent extends WsEvent {
-  const WsAgentOutputEvent({required this.sessionId, required this.text});
+  const WsAgentOutputEvent({required this.sessionId, required this.text, required super.channelId});
   final String sessionId;
   final String text;
 }
@@ -470,6 +474,7 @@ final class WsToolDecisionEvent extends WsEvent {
     required this.tool,
     required this.allow,
     this.reason,
+    required super.channelId,
   });
   final String tool;
   final bool allow;
@@ -477,17 +482,17 @@ final class WsToolDecisionEvent extends WsEvent {
 }
 
 final class WsSessionEndedEvent extends WsEvent {
-  const WsSessionEndedEvent();
+  const WsSessionEndedEvent({required super.channelId});
 }
 
-/// A reaction was added/removed on a message in the subscribed channel — lets
-/// every viewer's chips update live.
+/// A reaction was added/removed on a message — lets every viewer's chips update live.
 final class WsReactionEvent extends WsEvent {
   const WsReactionEvent({
     required this.op,
     required this.messageId,
     required this.emoji,
     required this.userSub,
+    required super.channelId,
   });
   final String op; // 'add' | 'remove'
   final String messageId;
@@ -498,7 +503,7 @@ final class WsReactionEvent extends WsEvent {
 /// An assistant turn failed (model/egress error) — surfaced as an error tile
 /// instead of being silently dropped.
 final class WsAssistantErrorEvent extends WsEvent {
-  const WsAssistantErrorEvent({required this.agentId, required this.error});
+  const WsAssistantErrorEvent({required this.agentId, required this.error, required super.channelId});
   final String agentId;
   final String error;
 }
@@ -506,7 +511,7 @@ final class WsAssistantErrorEvent extends WsEvent {
 /// A message was redacted (content purged) — every viewer flips it to the
 /// "message redacted" tombstone live.
 final class WsRedactionEvent extends WsEvent {
-  const WsRedactionEvent({required this.messageId, required this.by});
+  const WsRedactionEvent({required this.messageId, required this.by, required super.channelId});
   final String messageId;
   final String by;
 }
@@ -519,6 +524,7 @@ final class WsMessageEditEvent extends WsEvent {
     required this.content,
     required this.editedAt,
     required this.by,
+    required super.channelId,
   });
   final String messageId;
   final String content;
@@ -530,58 +536,65 @@ final class WsMessageEditEvent extends WsEvent {
 /// banner (and the composer's marking lock) live.
 final class WsChannelMarkingEvent extends WsEvent {
   const WsChannelMarkingEvent({
-    required this.channelId,
     required this.marking,
     required this.by,
+    required super.channelId,
   });
-  final String channelId;
   final String marking;
   final String by;
 }
 
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
-/// protocol without breaking older clients.
+/// protocol without breaking older clients. Every frame carries a top-level
+/// `channelId` (stamped by the hub) — the routing key for the global socket.
 WsEvent? parseWsEvent(Map<String, dynamic> json) {
+  final channelId = json['channelId'] as String? ?? '';
   switch (json['type']) {
     case 'message':
       final raw = json['message'];
       if (raw is! Map<String, dynamic>) return null;
-      return WsMessageEvent(Message.fromJson(raw));
+      return WsMessageEvent(Message.fromJson(raw), channelId: channelId);
     case 'assistant_delta':
       return WsAssistantDeltaEvent(
         agentId: json['agentId'] as String? ?? '',
         delta: json['delta'] as String? ?? '',
+        channelId: channelId,
       );
     case 'agent_output':
       return WsAgentOutputEvent(
         sessionId: json['sessionId'] as String? ?? '',
         text: json['text'] as String? ?? '',
+        channelId: channelId,
       );
     case 'tool_decision':
       return WsToolDecisionEvent(
         tool: json['tool'] as String? ?? 'tool',
         allow: json['allow'] as bool? ?? false,
         reason: json['reason'] as String?,
+        channelId: channelId,
       );
     case 'session_ended':
-      return const WsSessionEndedEvent();
+      return WsSessionEndedEvent(channelId: channelId);
     case 'reaction':
       return WsReactionEvent(
         op: json['op'] as String? ?? 'add',
         messageId: json['messageId'] as String? ?? '',
         emoji: json['emoji'] as String? ?? '',
         userSub: json['userSub'] as String? ?? '',
+        channelId: channelId,
       );
     case 'assistant_error':
       return WsAssistantErrorEvent(
         agentId: json['agentId'] as String? ?? '',
         error: json['error'] as String? ?? 'assistant error',
+        channelId: channelId,
       );
     case 'redaction':
       return WsRedactionEvent(
         messageId: json['messageId'] as String? ?? '',
         by: json['by'] as String? ?? '',
+        channelId: channelId,
       );
     case 'message_edit':
       return WsMessageEditEvent(
@@ -591,12 +604,13 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
             DateTime.tryParse(json['editedAt'] as String? ?? '') ??
             DateTime.now(),
         by: json['by'] as String? ?? '',
+        channelId: channelId,
       );
     case 'channel_marking':
       return WsChannelMarkingEvent(
-        channelId: json['channelId'] as String? ?? '',
         marking: json['marking'] as String? ?? '',
         by: json['by'] as String? ?? '',
+        channelId: channelId,
       );
     default:
       return null;

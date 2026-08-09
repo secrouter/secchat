@@ -496,6 +496,42 @@ void main() {
     expect(find.text('3'), findsOneWidget);
   });
 
+  testWidgets('a live message on a BACKGROUND channel bumps its unread badge (global socket)', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [
+        Channel(id: 'c1', kind: ChannelKind.human, name: 'general'),
+        Channel(id: 'c2', kind: ChannelKind.human, name: 'random'),
+      ],
+      messagesByChannel: {
+        'c1': [
+          Message(id: 'm1', seq: 1, authorRef: 'bob', authorType: AuthorType.user, content: 'hi', createdAt: DateTime(2026, 1, 1)),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester, times: 12);
+
+    // c2 starts with no unread.
+    expect(find.text('2'), findsNothing);
+
+    // Two messages arrive for the BACKGROUND channel c2 over the always-open global socket.
+    for (var i = 0; i < 2; i++) {
+      fake.emitWs(WsMessageEvent(
+        Message(id: 'c2-m$i', seq: i + 1, authorRef: 'bob', authorType: AuthorType.user, content: 'ping', createdAt: DateTime(2026, 1, 2, 0, i)),
+        channelId: 'c2',
+      ));
+    }
+    await tester.pump();
+    await tester.pump();
+
+    // Its unread badge appears/updates live — without ever switching to c2.
+    expect(find.text('2'), findsOneWidget);
+    expect(fake.markReadCalls.any((c) => c.channelId == 'c2'), isFalse, reason: 'a background channel is never marked read');
+  });
+
   testWidgets('top-bar search finds a message and opens its channel', (tester) async {
     final fake = FakeApiClient(
       me: _principal,

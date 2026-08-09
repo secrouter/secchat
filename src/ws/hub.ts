@@ -15,9 +15,10 @@
 //    comment), so a frame split across two TCP segments would be silently dropped rather
 //    than reassembled. Acceptable for v1: this hub only exchanges small JSON control/
 //    broadcast messages, which fit in a single segment in practice.
-//  - Text frames only. The one inbound message this hub interprets is a client "subscribe"
-//    message: `{ "type": "subscribe", "channelId": "..." }`; anything else that isn't valid
-//    JSON of that shape is silently ignored rather than erroring the connection.
+//  - Text frames only. The inbound messages this hub interprets are a per-channel `{ "type":
+//    "subscribe", "channelId": "..." }` and an all-my-channels `{ "type": "subscribeAll" }` (the
+//    latter needs deps.channelsForSub); anything else that isn't valid JSON of those shapes is
+//    silently ignored rather than erroring the connection.
 //  - No offline queueing: `subscribe()` only affects connections that are already open for
 //    that `sub`. A client must (re)send its subscriptions after reconnecting.
 
@@ -57,7 +58,17 @@ export interface Hub {
  * auth/bff.ts) is the SAME AuthGateway the HTTP server is wired with — it's optional here too,
  * and behaves identically: unset, or `resolveSession` returning null, just means the cookie
  * fallback below never fires and only `?token=`/subprotocol can authenticate. */
-export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken; auth?: AuthGateway }): Hub {
+export function attachWsHub(
+  server: Server,
+  deps: {
+    verifyToken: VerifyToken;
+    auth?: AuthGateway;
+    /** Membership lookup for `{type:"subscribeAll"}` — the channel ids a principal may receive events
+     * for. Injected (not a Store import) to keep this module store-agnostic. Unset ⇒ subscribeAll is
+     * a no-op and only per-channel `subscribe` works. */
+    channelsForSub?: (sub: string) => Promise<string[]>;
+  },
+): Hub {
   const connections = new Set<Connection>();
   const connectionsBySub = new Map<string, Set<Connection>>(); // principal.sub -> its sockets
   const channelSubscriptions = new Map<string, Set<Connection>>(); // channelId -> subscribers
@@ -130,6 +141,8 @@ export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken; au
     const { type, channelId } = msg as { type?: unknown; channelId?: unknown };
     if (type === "subscribe" && typeof channelId === "string") {
       subscribe(conn.sub, channelId);
+    } else if (type === "subscribeAll") {
+      void subscribeAll(conn);
     }
   }
 
@@ -195,26 +208,46 @@ export function attachWsHub(server: Server, deps: { verifyToken: VerifyToken; au
   }
   server.on("upgrade", onUpgrade);
 
-  function subscribe(sub: string, channelId: string): void {
-    const conns = connectionsBySub.get(sub);
-    if (!conns || conns.size === 0) return;
-
+  /** Subscribe a SINGLE connection to a channel (the shared primitive for both entry points). */
+  function subscribeConn(conn: Connection, channelId: string): void {
     let subs = channelSubscriptions.get(channelId);
     if (!subs) {
       subs = new Set();
       channelSubscriptions.set(channelId, subs);
     }
-    for (const conn of conns) {
-      subs.add(conn);
-      conn.channels.add(channelId);
+    subs.add(conn);
+    conn.channels.add(channelId);
+  }
+
+  function subscribe(sub: string, channelId: string): void {
+    const conns = connectionsBySub.get(sub);
+    if (!conns || conns.size === 0) return;
+    for (const conn of conns) subscribeConn(conn, channelId);
+  }
+
+  /** Subscribe THIS connection to every channel its principal is a member of (via deps.channelsForSub).
+   * Powers the client's single long-lived socket: one `{type:"subscribeAll"}` and it receives events
+   * for all the user's channels — so background channels update unread (and later @mentions) live. */
+  async function subscribeAll(conn: Connection): Promise<void> {
+    if (!deps.channelsForSub) return;
+    let channelIds: string[];
+    try {
+      channelIds = await deps.channelsForSub(conn.sub);
+    } catch {
+      return; // a failed lookup just leaves the connection with no subscriptions
     }
+    for (const channelId of channelIds) subscribeConn(conn, channelId);
   }
 
   function broadcast(channelId: string, payload: unknown): void {
     const subs = channelSubscriptions.get(channelId);
     if (!subs || subs.size === 0) return;
 
-    const frame = encodeTextFrame(JSON.stringify(payload));
+    // Stamp the channel into every frame so a single (subscribeAll) client can route ANY event —
+    // including agent-stream events whose payloads don't otherwise name a channel — by `channelId`.
+    // A payload that already carries `channelId` keeps its own (same value); non-objects pass through.
+    const enriched = payload && typeof payload === "object" ? { channelId, ...(payload as object) } : payload;
+    const frame = encodeTextFrame(JSON.stringify(enriched));
     for (const conn of subs) {
       try {
         conn.socket.write(frame);

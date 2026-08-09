@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:secchat_app/api.dart';
 import 'package:secchat_app/models.dart';
 
@@ -292,6 +294,18 @@ class FakeApiClient implements ApiClient {
   @override
   Stream<WsEvent> subscribeChannel(String channelId) => const Stream.empty();
 
+  /// A controllable global event stream: tests push events with [emitWs] and the
+  /// ChatScreen (subscribed via [subscribeAll]) routes them by `channelId`.
+  final _wsController = StreamController<WsEvent>.broadcast();
+
+  /// Emit a WS event to the subscribed ChatScreen (routed by its `channelId`).
+  void emitWs(WsEvent event) => _wsController.add(event);
+
   @override
-  void dispose() {}
+  Stream<WsEvent> subscribeAll() => _wsController.stream;
+
+  @override
+  void dispose() {
+    unawaited(_wsController.close());
+  }
 }

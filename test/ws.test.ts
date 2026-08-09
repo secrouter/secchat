@@ -180,7 +180,8 @@ test("hub: subscribe + broadcast delivers exactly the broadcast JSON to a connec
     hub.subscribe("user-1", "chan-1");
     hub.broadcast("chan-1", { hello: "world" });
 
-    assert.deepEqual(await messageArrived, { hello: "world" });
+    // The hub stamps the routing `channelId` into every frame (so a subscribeAll client can route it).
+    assert.deepEqual(await messageArrived, { channelId: "chan-1", hello: "world" });
   } finally {
     socket.close();
     hub.close();
@@ -210,6 +211,39 @@ test("hub: broadcasting to a channel with no subscribers is a silent no-op", asy
   try {
     assert.doesNotThrow(() => hub.broadcast("nobody-here", { anything: true }));
   } finally {
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("hub: subscribeAll subscribes a connection to every channel its principal is a member of (background delivery)", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(404).end();
+  });
+  // The principal is a member of two channels; the client will subscribe to ALL of them at once.
+  const hub = attachWsHub(server, {
+    verifyToken,
+    channelsForSub: async (sub) => (sub === "user-1" ? ["chan-A", "chan-B"] : []),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/?token=good`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", () => reject(new Error("errored before open")), { once: true });
+    });
+    const got = new Promise<unknown>((resolve) => {
+      socket.addEventListener("message", (ev) => resolve(JSON.parse(ev.data as string)), { once: true });
+    });
+    // One subscribeAll frame, then a broadcast to a BACKGROUND channel (never explicitly subscribed)
+    // still reaches the socket — the substrate for live background unread.
+    socket.send(JSON.stringify({ type: "subscribeAll" }));
+    await new Promise((r) => setTimeout(r, 40)); // let the async membership lookup register
+    hub.broadcast("chan-B", { type: "message", channelId: "chan-B" });
+    assert.deepEqual(await got, { type: "message", channelId: "chan-B" });
+  } finally {
+    socket.close();
     hub.close();
     await stopServer(server);
   }

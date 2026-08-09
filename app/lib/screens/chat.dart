@@ -94,6 +94,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
     _loadChannels();
     _loadUsers();
   }
@@ -138,10 +139,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _selectChannel(Channel channel) async {
     if (_selected?.id == channel.id) return;
-    await _wsSub?.cancel();
-    _wsSub = null;
-    if (!mounted) return; // could have been disposed during the await
-
+    // The global socket (subscribeAll) stays open across switches — no per-channel teardown.
     final cached = _transcripts[channel.id];
     setState(() {
       _selected = channel;
@@ -170,9 +168,8 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
     }
-    _subscribe(channel.id);
     // Viewing a channel marks it read up to its latest message; then refresh the
-    // other channels' unread counts.
+    // other channels' unread counts. (Events arrive on the always-open global socket.)
     unawaited(_markChannelRead(channel.id).then((_) => _loadUnread()));
   }
 
@@ -264,7 +261,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _cursors[channel.id] = page.nextCursor;
         _loadingMessages = false;
       });
-      _subscribe(channel.id);
+      if (_wsSub == null) _subscribeAll(); // re-establish the socket if it had dropped
     } catch (error) {
       if (!mounted || _selected?.id != channel.id) return;
       setState(() {
@@ -274,59 +271,76 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _subscribe(String channelId) {
+  /// Opens the single long-lived socket delivering events for ALL the user's channels; each event
+  /// carries its `channelId`, routed in [_handleEvent]. Reconnects if it had dropped.
+  void _subscribeAll() {
+    _wsSub?.cancel();
     setState(() => _connStatus = ConnStatus.connecting);
-    _wsSub = widget.api
-        .subscribeChannel(channelId)
-        .listen(
-          (event) => _handleEvent(channelId, event),
-          onError: (Object _) {
-            if (mounted && _selected?.id == channelId) {
-              setState(() => _connStatus = ConnStatus.down);
-            }
-          },
-          onDone: () {
-            if (mounted && _selected?.id == channelId) {
-              setState(() => _connStatus = ConnStatus.down);
-            }
-          },
-        );
+    _wsSub = widget.api.subscribeAll().listen(
+      _handleEvent,
+      onError: (Object _) {
+        if (mounted) setState(() => _connStatus = ConnStatus.down);
+        _wsSub = null;
+      },
+      onDone: () {
+        if (mounted) setState(() => _connStatus = ConnStatus.down);
+        _wsSub = null;
+      },
+    );
   }
 
-  void _handleEvent(String channelId, WsEvent event) {
-    if (!mounted || _selected?.id != channelId) return;
+  void _handleEvent(WsEvent event) {
+    if (!mounted) return;
+    final channelId = event.channelId;
+    final isOpen = _selected?.id == channelId;
     setState(() {
       _connStatus = ConnStatus.connected;
       switch (event) {
         case WsMessageEvent(:final message):
-          _typing = null;
-          _appendMessageUnlessDuplicate(channelId, message);
-          // You're viewing this channel (events only fire for the open one), so
-          // advance the read marker to include the new message.
-          unawaited(_markChannelRead(channelId));
-        case WsAssistantDeltaEvent(:final agentId, :final delta):
-          _typing = _typing?.agentId == agentId
-              ? TypingState(agentId, _typing!.text + delta)
-              : TypingState(agentId, delta);
-        case WsAgentOutputEvent(:final sessionId, :final text):
-          _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
-        case WsToolDecisionEvent(:final tool, :final allow, :final reason):
-          _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
-        case WsSessionEndedEvent():
-          final sessionId = _sessionIdByChannel[channelId];
-          if (sessionId != null) _endedSessionIds.add(sessionId);
-          _append(channelId, const SystemEntry('Session ended'));
+          // Append to the OPEN channel, or to a background channel we've already loaded (so switching
+          // back is current); never seed an unloaded channel here (that would skip its history load).
+          if (isOpen || _transcripts.containsKey(channelId)) {
+            _appendMessageUnlessDuplicate(channelId, message);
+          }
+          if (isOpen) {
+            _typing = null;
+            unawaited(_markChannelRead(channelId)); // viewing it → advance the read marker
+          } else {
+            // A BACKGROUND channel got a new message → bump its unread badge live.
+            _unreadByChannel[channelId] = (_unreadByChannel[channelId] ?? 0) + 1;
+          }
+        // Content/social updates apply to any channel's cached transcript (no-op if unloaded), so a
+        // background channel stays consistent when re-opened; they don't change unread.
         case WsReactionEvent(:final op, :final messageId, :final emoji, :final userSub):
           _applyReaction(channelId, messageId, emoji, userSub, add: op == 'add');
-        case WsAssistantErrorEvent(:final error):
-          _typing = null;
-          _append(channelId, ErrorEntry(error));
         case WsRedactionEvent(:final messageId):
           _applyRedaction(channelId, messageId);
         case WsMessageEditEvent(:final messageId, :final content, :final editedAt):
           _applyEdit(channelId, messageId, content, editedAt);
         case WsChannelMarkingEvent(:final marking):
           _applyChannelMarking(channelId, marking);
+        // Agent-stream / typing events drive the OPEN channel's ephemeral UI only.
+        case WsAssistantDeltaEvent(:final agentId, :final delta):
+          if (isOpen) {
+            _typing = _typing?.agentId == agentId
+                ? TypingState(agentId, _typing!.text + delta)
+                : TypingState(agentId, delta);
+          }
+        case WsAgentOutputEvent(:final sessionId, :final text):
+          if (isOpen) _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
+        case WsToolDecisionEvent(:final tool, :final allow, :final reason):
+          if (isOpen) _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
+        case WsSessionEndedEvent():
+          if (isOpen) {
+            final sessionId = _sessionIdByChannel[channelId];
+            if (sessionId != null) _endedSessionIds.add(sessionId);
+            _append(channelId, const SystemEntry('Session ended'));
+          }
+        case WsAssistantErrorEvent(:final error):
+          if (isOpen) {
+            _typing = null;
+            _append(channelId, ErrorEntry(error));
+          }
       }
     });
   }

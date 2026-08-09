@@ -129,6 +129,10 @@ abstract class ApiClient {
   /// user switches channels.
   Stream<WsEvent> subscribeChannel(String channelId);
 
+  /// A single long-lived socket delivering events for ALL the user's channels
+  /// (each carries its `channelId`), so background channels update unread live.
+  Stream<WsEvent> subscribeAll();
+
   /// Releases any resources (HTTP client, any still-open sockets). Owned by
   /// whoever constructed this client -- typically the app root, on sign-out.
   void dispose();
@@ -408,7 +412,15 @@ class HttpApiClient implements ApiClient {
   );
 
   @override
-  Stream<WsEvent> subscribeChannel(String channelId) {
+  Stream<WsEvent> subscribeChannel(String channelId) =>
+      _openSocket({'type': 'subscribe', 'channelId': channelId});
+
+  @override
+  Stream<WsEvent> subscribeAll() => _openSocket({'type': 'subscribeAll'});
+
+  /// Opens one authenticated WebSocket, sends [firstFrame] on ready (a per-channel
+  /// `subscribe` or an all-channels `subscribeAll`), and streams parsed events.
+  Stream<WsEvent> _openSocket(Map<String, dynamic> firstFrame) {
     final token = this.token;
     // Bearer/dev mode carries `?token=`; session mode relies entirely on
     // the cookie riding the WS upgrade, so the query is cleared outright
@@ -434,9 +446,7 @@ class HttpApiClient implements ApiClient {
 
     socket.ready
         .then((_) {
-          socket.sink.add(
-            jsonEncode({'type': 'subscribe', 'channelId': channelId}),
-          );
+          socket.sink.add(jsonEncode(firstFrame));
         })
         .catchError((Object error, StackTrace stackTrace) {
           // Swallowed deliberately: a connection failure here also reaches

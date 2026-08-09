@@ -169,7 +169,18 @@ const server = createHttpServer({
   capabilities: config.capabilities,
   stepUp: config.stepUp,
 });
-hub = attachWsHub(server, { verifyToken, auth });
+hub = attachWsHub(server, {
+  verifyToken,
+  auth,
+  // The channels a principal may receive events for — same membership filter as GET /channels.
+  channelsForSub: async (sub) => {
+    const mine: string[] = [];
+    for (const c of await store.listChannels()) {
+      if (await store.isMember(c.id, sub)) mine.push(c.id);
+    }
+    return mine;
+  },
+});
 
 server.listen(config.port, config.host, () => {
   console.error(`▸ SecChat listening on http://${config.host}:${config.port} (in-memory store)`);

@@ -31,7 +31,7 @@ async function withServer(fn: (base: string, store: Store) => Promise<void>): Pr
 }
 
 interface Page {
-  messages: Array<Message & { reactions: unknown[] }>;
+  messages: Array<Message & { content?: string; reactions: unknown[] }>;
   nextCursor: number | null;
 }
 const getPage = async (base: string, channelId: string, query: string): Promise<Page> =>
