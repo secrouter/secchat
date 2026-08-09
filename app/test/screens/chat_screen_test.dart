@@ -867,4 +867,31 @@ void main() {
     expect(fake.setMarkingCalls.single.channelId, 'c1');
     expect(fake.setMarkingCalls.single.marking, 'CUI');
   });
+
+  testWidgets('a DLP-flagged message shows a spillage warning naming the rule', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [Channel(id: 'c1', kind: ChannelKind.human, name: 'general')],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: 'my ssn is redactable',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+            dlpFlags: const ['us-ssn'],
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(find.textContaining('Possible data spillage'), findsOneWidget);
+    expect(find.textContaining('us-ssn'), findsOneWidget);
+  });
 }

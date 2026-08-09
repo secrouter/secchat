@@ -328,6 +328,13 @@ class _MessageBubble extends StatelessWidget {
                   height: 1.4,
                 ),
               ),
+        // DLP: this message's content tripped a data-loss rule (flag mode). Surfaced as a warning
+        // so it can be reviewed / redacted; the durable record is the audit trail.
+        if (!message.isRedacted && message.dlpFlags.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: _DlpWarning(rules: message.dlpFlags),
+          ),
         if (!message.isRedacted && onToggleReaction != null)
           Padding(
             padding: const EdgeInsets.only(top: 5),
@@ -833,6 +840,39 @@ class _MessageMenu extends StatelessWidget {
                 ],
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A compact DLP warning banner on a flagged message: names the rule(s) it
+/// tripped so a reviewer knows what to look for (and can redact it).
+class _DlpWarning extends StatelessWidget {
+  const _DlpWarning({required this.rules});
+
+  final List<String> rules;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.bad.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: AppColors.bad.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.warning_amber_rounded, size: 14, color: AppColors.bad),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              'Possible data spillage — ${rules.join(", ")}',
+              style: AppFonts.mono(fontSize: 10.5, color: AppColors.bad).copyWith(fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );

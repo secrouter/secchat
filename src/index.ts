@@ -165,6 +165,7 @@ const server = createHttpServer({
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
   marking: config.marking,
+  dlp: config.dlp,
 });
 hub = attachWsHub(server, { verifyToken, auth });
 

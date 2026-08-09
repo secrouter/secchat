@@ -20,6 +20,7 @@ import {
   markRank,
   type MarkingPolicy,
 } from "../marking/policy.ts";
+import { DlpPolicy } from "../dlp/policy.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -173,6 +174,7 @@ async function triggerAssistants(
 function buildRouter(
   store: Store,
   marking: MarkingPolicy,
+  dlp: DlpPolicy,
   broadcast?: Broadcast,
   llm?: LlmClient,
   control?: AgentControl,
@@ -385,6 +387,14 @@ function buildRouter(
       // Unmarked channel / DM: per-message marking, defaulting to the policy floor.
       effective = requested ?? marking.default;
     }
+    // Local DLP scan (on-premise; matches only rule NAMES, never the content). In `block` mode a
+    // match refuses the post before anything is written; in `flag` mode the post proceeds but is
+    // recorded as an audited `message.dlp_flag` and the flag rides along for live display.
+    const dlpHits = dlp.scan(content);
+    if (dlpHits.length > 0 && dlp.mode === "block") {
+      sendJson(res, 422, { error: "dlp_blocked", rules: dlpHits });
+      return;
+    }
     const message = await store.appendMessage({
       channelId,
       authorRef: principal.sub,
@@ -393,9 +403,14 @@ function buildRouter(
       parentId: body.parentId,
       marking: effective,
     });
+    if (dlpHits.length > 0) {
+      // flag mode (block already returned): a provable, content-free trail on the audit chain.
+      await store.appendAudit({ actor: principal.sub, action: "message.dlp_flag", target: message.id, detail: dlpHits.join(",") });
+    }
     // Echo the plaintext the client just posted (the Message row carries only the content HASH),
-    // and fan the same shape out to the channel's realtime subscribers.
-    const enriched = { ...message, content };
+    // and fan the same shape out to the channel's realtime subscribers. `dlpFlags` (when present)
+    // drives a live warning indicator; the durable record is the audit event above.
+    const enriched = { ...message, content, ...(dlpHits.length ? { dlpFlags: dlpHits } : {}) };
     broadcast?.(channelId, { type: "message", message: enriched });
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
@@ -744,9 +759,13 @@ export function createHttpServer(deps: {
    * default ladder (UNCLASSIFIED→PROPRIETARY→CUI→CLASSIFIED, default UNCLASSIFIED), so tests and
    * bare deployments still enforce a sane policy. */
   marking?: MarkingPolicy;
+  /** Local DLP scanner (a deployment setting). Unset ⇒ an OFF policy (no scanning), so tests and
+   * bare deployments are unaffected until DLP is deliberately configured. */
+  dlp?: DlpPolicy;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING);
-  const router = buildRouter(deps.store, marking, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
+  const dlp = deps.dlp ?? new DlpPolicy("off", []);
+  const router = buildRouter(deps.store, marking, dlp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

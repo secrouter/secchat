@@ -185,6 +185,7 @@ class Message {
     this.parentId,
     this.editedAt,
     this.marking = 'UNCLASSIFIED',
+    this.dlpFlags = const [],
     this.reactions = const [],
   });
 
@@ -199,6 +200,11 @@ class Message {
   /// Shown as a per-message chip when the channel is unmarked; in a marked
   /// channel it equals the channel level and the banner carries it instead.
   final String marking;
+
+  /// DLP rule names this message's content tripped (from `flag`-mode scanning),
+  /// delivered live on the message — drives a warning indicator. Empty normally;
+  /// the durable record is the audit trail (not persisted on the message row).
+  final List<String> dlpFlags;
 
   /// For an agent message, the human whose prompt triggered this turn — shown
   /// as an attribution line (decision #2: an agent acts as its owner's delegate).
@@ -229,6 +235,7 @@ class Message {
     parentId: parentId,
     editedAt: editedAt,
     marking: marking,
+    dlpFlags: dlpFlags,
     reactions: reactions,
   );
 
@@ -245,6 +252,7 @@ class Message {
     parentId: parentId,
     editedAt: editedAt,
     marking: marking,
+    dlpFlags: dlpFlags,
     reactions: reactions,
   );
 
@@ -261,6 +269,7 @@ class Message {
     parentId: parentId,
     editedAt: editedAt,
     marking: marking,
+    dlpFlags: dlpFlags,
     reactions: reactions,
   );
 
@@ -277,6 +286,9 @@ class Message {
     parentId: json['parentId'] as String?,
     editedAt: DateTime.tryParse(json['editedAt'] as String? ?? ''),
     marking: json['marking'] as String? ?? 'UNCLASSIFIED',
+    dlpFlags: (json['dlpFlags'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => e.toString())
+        .toList(),
     reactions: (json['reactions'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => Reaction.fromJson(e as Map<String, dynamic>))
         .toList(),

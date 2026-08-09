@@ -7,6 +7,7 @@ import {
   type MarkingPolicy,
   parseMarkingLevels,
 } from "./marking/policy.ts";
+import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
 
 export interface Config {
   host: string;
@@ -59,6 +60,11 @@ export interface Config {
    * UNCLASSIFIED → PROPRIETARY → CUI → CLASSIFIED with UNCLASSIFIED as the fail-safe default.
    * Set `SECCHAT_MARKING_LEVELS` (comma-separated, low→high) and `SECCHAT_MARKING_DEFAULT`. */
   marking: MarkingPolicy;
+
+  /** Local DLP: an on-premise content scanner run on every message post. `SECCHAT_DLP_MODE`
+   * (off|flag|block, default flag) and an optional `SECCHAT_DLP_RULES` JSON override. Fails closed
+   * at startup on a bad mode or malformed rule. */
+  dlp: DlpPolicy;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -84,6 +90,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const markingLevelsRaw = env.SECCHAT_MARKING_LEVELS?.trim();
   const markingLevels = markingLevelsRaw ? parseMarkingLevels(markingLevelsRaw) : [...DEFAULT_MARKING_LEVELS];
   const marking = makeMarkingPolicy(markingLevels, opt(env, "SECCHAT_MARKING_DEFAULT", markingLevels[0] ?? ""));
+  // Local DLP: default to `flag` (detect + record, never block legitimate work); a bad mode or
+  // malformed rule override throws here, at startup.
+  const dlp = new DlpPolicy(
+    opt(env, "SECCHAT_DLP_MODE", "flag") as DlpMode,
+    parseDlpRules(env.SECCHAT_DLP_RULES),
+  );
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -102,5 +114,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionTtl: Number(opt(env, "SECCHAT_SESSION_TTL", "28800")),
     ssoEnabled: Boolean(oidcClientSecret && publicUrl && sessionSecret),
     marking,
+    dlp,
   };
 }
