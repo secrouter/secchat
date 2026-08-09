@@ -283,6 +283,10 @@ before(async () => {
   const address = controlServer.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
   controlBaseUrl = `http://127.0.0.1:${port}`;
+  // POST /sessions/:id/input now gates on membership of the session's channel:
+  // register the fake session's channel with user-1 (the "good" token) as a member.
+  knownChannelIds.add(fakeSession.channelId);
+  await store.addMember({ channelId: fakeSession.channelId, memberRef: "user-1", memberType: "user", role: "member" });
 });
 
 after(async () => {
@@ -613,6 +617,25 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.equal(res.status, 202);
   assert.deepEqual(await res.json(), { status: "accepted" });
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
+});
+
+test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {
+  // "good2" (user-2) is authenticated but not a member of the session's channel.
+  const res = await fetch(`${controlBaseUrl}/sessions/sess-1/input`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({ text: "sneaking input into a session I can't see" }),
+  });
+  assert.equal(res.status, 403);
+});
+
+test("POST /sessions/:id/input is 404 for an unknown session", async () => {
+  const res = await fetch(`${controlBaseUrl}/sessions/unknown/input`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ text: "x" }),
+  });
+  assert.equal(res.status, 404);
 });
 
 test("GET /sessions/:id returns the session", async () => {

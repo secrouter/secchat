@@ -510,14 +510,23 @@ function buildRouter(
     sendJson(res, decision.allow ? 200 : 403, decision);
   });
 
-  router.add("POST", "/sessions/:id/input", async ({ req, res, params }) => {
+  router.add("POST", "/sessions/:id/input", async ({ req, res, params, principal }) => {
     if (!control) {
       sendJson(res, 404, { error: "sessions_unavailable" });
       return;
     }
+    // Only a participant of the session's channel may drive it: resolve the session to its channel
+    // and apply the same membership gate as every channel-scoped route (a missing session is 404).
+    const session = await control.getSession(params.id!);
+    if (!session) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(session.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
     const body = (await readJsonBody(req)) as { text?: string };
-    // TODO(Sprint 4 follow-up): verify the caller is a participant in this session's channel
-    // before accepting input — for now, any authenticated caller can send input.
     await control.sendInput(params.id!, body.text ?? "");
     sendJson(res, 202, { status: "accepted" });
   });
