@@ -172,6 +172,61 @@ ${body}
         </section>`;
 }
 
+// ── Governance & CUI controls ────────────────────────────────────────────────────────────────
+// The compliance headline: the CUI-lifecycle events an assessor cares about, lifted out of the
+// full trail into a counted summary + a filtered table. Every one is a link in the SAME
+// tamper-evident audit chain the badge above verifies, so these counts are provable, not advisory.
+
+interface GovCategory {
+  action: string;
+  label: string;
+  tone: "bad" | "warn" | "info";
+  blurb: string;
+}
+
+const GOV_CATEGORIES: readonly GovCategory[] = [
+  { action: "message.redact", label: "Redactions", tone: "bad", blurb: "governed content purges (spillage / incident response)" },
+  { action: "message.dlp_flag", label: "DLP spillage flags", tone: "warn", blurb: "posts a data-loss rule matched" },
+  { action: "channel.mark", label: "Classification changes", tone: "info", blurb: "a channel's marking was set or changed" },
+  { action: "message.edit", label: "Message edits", tone: "info", blurb: "tracked revisions (originals retained)" },
+];
+
+const GOV_ACTIONS = new Set(GOV_CATEGORIES.map((c) => c.action));
+
+function renderGovernancePanel(audit: readonly AuditEvent[]): string {
+  const tiles = GOV_CATEGORIES.map((c) => {
+    const count = audit.reduce((n, e) => (e.action === c.action ? n + 1 : n), 0);
+    return `          <div class="gov-tile gov-${c.tone}">
+            <div class="gov-count">${esc(count)}</div>
+            <div class="gov-label">${esc(c.label)}</div>
+            <div class="gov-blurb">${esc(c.blurb)}</div>
+          </div>`;
+  }).join("\n");
+
+  // Newest first — an assessor reads the most recent governance actions at a glance.
+  const events = audit.filter((e) => GOV_ACTIONS.has(e.action)).slice().reverse();
+  const rows = events.length ? events.map(auditRow).join("\n") : `              ${emptyRow(7)}`;
+
+  return `        <section class="panel gov-panel">
+          <h2>Governance &amp; CUI controls</h2>
+          <p class="panel-note">Every marking change, message edit, redaction, and DLP flag — the CUI
+            lifecycle — recorded in the tamper-evident audit chain verified above.</p>
+          <div class="gov-tiles">
+${tiles}
+          </div>
+          <div class="table-wrap">
+            <table class="audit-table">
+              <thead>
+                <tr><th scope="col">Seq</th><th scope="col">At</th><th scope="col">Actor</th><th scope="col">Act As</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Detail</th></tr>
+              </thead>
+              <tbody>
+${rows}
+              </tbody>
+            </table>
+          </div>
+        </section>`;
+}
+
 function renderAuditPanel(audit: readonly AuditEvent[]): string {
   const body = audit.length ? audit.map(auditRow).join("\n") : `              ${emptyRow(7)}`;
   return `        <section class="panel">
@@ -297,6 +352,16 @@ const STYLE = `
     .pill-muted { border-color: var(--border); background: var(--surface-alt); color: var(--text-faint); }
     code.action { font-family: var(--mono); color: var(--accent); background: var(--accent-soft); padding: 2px 6px; border-radius: 4px; font-size: 12.5px; }
 
+    .panel-note { margin: -6px 0 16px; color: var(--text-muted); font-size: 13px; max-width: 70ch; }
+    .gov-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .gov-tile { border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius); padding: 14px 16px; background: var(--surface-alt); }
+    .gov-count { font-size: 30px; font-weight: 680; line-height: 1; letter-spacing: -0.02em; }
+    .gov-label { margin-top: 6px; font-size: 13.5px; font-weight: 600; }
+    .gov-blurb { margin-top: 3px; font-size: 11.5px; color: var(--text-faint); line-height: 1.35; }
+    .gov-bad { border-left-color: var(--bad); } .gov-bad .gov-count { color: var(--bad); }
+    .gov-warn { border-left-color: var(--warn); } .gov-warn .gov-count { color: var(--warn); }
+    .gov-info { border-left-color: var(--accent); } .gov-info .gov-count { color: var(--accent); }
+
     footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 12px; }
 
     @media (max-width: 560px) {
@@ -352,6 +417,8 @@ ${badge}
       <div class="card"><div class="card-label">Sessions</div><div class="card-value">${esc(overview.sessions.length)}</div></div>
       <div class="card"><div class="card-label">Audit Events</div><div class="card-value">${esc(overview.audit.length)}</div></div>
     </section>
+
+${renderGovernancePanel(overview.audit)}
 
 ${renderChannelsPanel(overview.channels)}
 
