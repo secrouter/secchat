@@ -14,6 +14,7 @@ import '../widgets/composer.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
+import '../widgets/redact_dialog.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/user_picker.dart';
@@ -285,8 +286,44 @@ class _ChatScreenState extends State<ChatScreen> {
         case WsAssistantErrorEvent(:final error):
           _typing = null;
           _append(channelId, ErrorEntry(error));
+        case WsRedactionEvent(:final messageId):
+          _applyRedaction(channelId, messageId);
       }
     });
+  }
+
+  /// Flips a message to its redacted tombstone in the transcript. Idempotent
+  /// (a message already redacted is left as-is). Must be called inside setState.
+  void _applyRedaction(String channelId, String messageId) {
+    final existing = _transcripts[channelId];
+    if (existing == null) return;
+    var changed = false;
+    final updated = existing.map((entry) {
+      if (entry is MessageEntry &&
+          entry.message.id == messageId &&
+          !entry.message.isRedacted) {
+        changed = true;
+        return MessageEntry(entry.message.redactedCopy());
+      }
+      return entry;
+    }).toList();
+    if (changed) _transcripts[channelId] = updated;
+  }
+
+  /// Redacts [message] after confirmation — a governed content purge. The live
+  /// `redaction` echo is idempotent; a failure surfaces an error.
+  Future<void> _redactMessage(Message message) async {
+    final channel = _selected;
+    if (channel == null) return;
+    final reason = await showRedactDialog(context);
+    if (reason == null || !mounted) return;
+    try {
+      await widget.api.redactMessage(message.id, reason);
+      if (!mounted) return;
+      setState(() => _applyRedaction(channel.id, message.id));
+    } catch (error) {
+      _showError(error);
+    }
   }
 
   /// Applies a reaction add/remove to the matching message in the transcript.
@@ -763,6 +800,9 @@ class _ChatScreenState extends State<ChatScreen> {
       onToggleReaction: _toggleReaction,
       replyCounts: replyCounts,
       onOpenThread: canThread ? _openThread : null,
+      isAdmin: widget.principal.isAdmin,
+      // Coding-channel messages are local echoes (no server id) — not redactable.
+      onRedact: canThread ? _redactMessage : null,
     );
   }
 
@@ -784,6 +824,8 @@ class _ChatScreenState extends State<ChatScreen> {
             entries: [MessageEntry(parent), ...replies.map(MessageEntry.new)],
             currentUserSub: widget.principal.sub,
             onToggleReaction: _toggleReaction,
+            isAdmin: widget.principal.isAdmin,
+            onRedact: _redactMessage,
             // one level deep — no nested thread affordance inside a thread
           ),
         ),

@@ -31,6 +31,8 @@ class MessageList extends StatefulWidget {
     this.onToggleReaction,
     this.replyCounts = const {},
     this.onOpenThread,
+    this.isAdmin = false,
+    this.onRedact,
   });
 
   final List<TranscriptEntry> entries;
@@ -47,6 +49,14 @@ class MessageList extends StatefulWidget {
   /// Open a message's thread (null disables threading, e.g. in coding channels
   /// or the thread view itself — one level deep).
   final void Function(Message message)? onOpenThread;
+
+  /// Whether the current user is an admin — with the author check, decides who
+  /// sees the Redact action.
+  final bool isAdmin;
+
+  /// Redact a message (null disables the affordance). Shown to the message's
+  /// author or an admin, on non-redacted messages.
+  final void Function(Message message)? onRedact;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -112,6 +122,8 @@ class _MessageListState extends State<MessageList> {
               onToggleReaction: widget.onToggleReaction,
               replyCounts: widget.replyCounts,
               onOpenThread: widget.onOpenThread,
+              isAdmin: widget.isAdmin,
+              onRedact: widget.onRedact,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -128,6 +140,8 @@ class _TranscriptTile extends StatelessWidget {
     this.onToggleReaction,
     this.replyCounts = const {},
     this.onOpenThread,
+    this.isAdmin = false,
+    this.onRedact,
   });
 
   final TranscriptEntry entry;
@@ -135,6 +149,8 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message, String emoji)? onToggleReaction;
   final Map<String, int> replyCounts;
   final void Function(Message message)? onOpenThread;
+  final bool isAdmin;
+  final void Function(Message message)? onRedact;
 
   @override
   Widget build(BuildContext context) {
@@ -148,6 +164,8 @@ class _TranscriptTile extends StatelessWidget {
         onToggleReaction: onToggleReaction,
         replyCount: replyCounts[message.id] ?? 0,
         onOpenThread: onOpenThread,
+        isAdmin: isAdmin,
+        onRedact: onRedact,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
@@ -166,6 +184,8 @@ class _MessageBubble extends StatelessWidget {
     this.onToggleReaction,
     this.replyCount = 0,
     this.onOpenThread,
+    this.isAdmin = false,
+    this.onRedact,
   });
 
   final Message message;
@@ -174,6 +194,14 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message, String emoji)? onToggleReaction;
   final int replyCount;
   final void Function(Message message)? onOpenThread;
+  final bool isAdmin;
+  final void Function(Message message)? onRedact;
+
+  // Redaction is offered to the message's author or an admin, on live messages.
+  bool get _canRedact =>
+      onRedact != null &&
+      !message.isRedacted &&
+      (isAdmin || message.authorRef == currentUserSub);
 
   @override
   Widget build(BuildContext context) {
@@ -250,15 +278,22 @@ class _MessageBubble extends StatelessWidget {
               onToggle: (emoji) => onToggleReaction!(message, emoji),
             ),
           ),
-        if (!message.isRedacted && onOpenThread != null)
+        if (!message.isRedacted && (onOpenThread != null || _canRedact))
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Align(
-              alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
-              child: _ThreadChip(
-                replyCount: replyCount,
-                onTap: () => onOpenThread!(message),
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (onOpenThread != null)
+                  _ThreadChip(
+                    replyCount: replyCount,
+                    onTap: () => onOpenThread!(message),
+                  ),
+                if (onOpenThread != null && _canRedact)
+                  const SizedBox(width: 8),
+                if (_canRedact)
+                  _MessageMenu(onRedact: () => onRedact!(message)),
+              ],
             ),
           ),
       ],
@@ -664,6 +699,44 @@ class _ThreadChip extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The per-message overflow menu (⋮). Currently just Redact — a governed
+/// content purge — shown to a message's author or an admin.
+class _MessageMenu extends StatelessWidget {
+  const _MessageMenu({required this.onRedact});
+
+  final VoidCallback onRedact;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 22,
+      child: PopupMenuButton<String>(
+        tooltip: 'Message actions',
+        padding: EdgeInsets.zero,
+        iconSize: 15,
+        position: PopupMenuPosition.under,
+        icon: const Icon(Icons.more_horiz, color: AppColors.textFaint),
+        color: AppColors.surfaceRaised,
+        onSelected: (value) {
+          if (value == 'redact') onRedact();
+        },
+        itemBuilder: (_) => const [
+          PopupMenuItem<String>(
+            value: 'redact',
+            child: Row(
+              children: [
+                Icon(Icons.gpp_bad_outlined, size: 15, color: AppColors.bad),
+                SizedBox(width: 8),
+                Text('Redact…', style: TextStyle(color: AppColors.bad, fontSize: 13)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

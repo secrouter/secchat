@@ -158,6 +158,15 @@ class FakeApiClient implements ApiClient {
     return List.of(searchResults);
   }
 
+  /// Every `redactMessage` call, in order.
+  final List<({String messageId, String reason})> redactCalls = [];
+
+  @override
+  Future<void> redactMessage(String messageId, String reason) async {
+    _maybeThrow('redactMessage');
+    redactCalls.add((messageId: messageId, reason: reason));
+  }
+
   @override
   Future<List<User>> getUsers() async {
     _maybeThrow('getUsers');

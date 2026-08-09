@@ -173,6 +173,20 @@ class Message {
 
   bool get isRedacted => content == null;
 
+  /// A copy with the content purged (redacted) — everything else preserved, so
+  /// the row renders as the "message redacted" tombstone.
+  Message redactedCopy() => Message(
+    id: id,
+    seq: seq,
+    authorRef: authorRef,
+    authorType: authorType,
+    content: null,
+    createdAt: createdAt,
+    promptedBy: promptedBy,
+    parentId: parentId,
+    reactions: reactions,
+  );
+
   /// A copy with [reactions] replaced — used to apply live reaction events /
   /// optimistic toggles without mutating the original row.
   Message withReactions(List<Reaction> reactions) => Message(
@@ -379,6 +393,14 @@ final class WsAssistantErrorEvent extends WsEvent {
   final String error;
 }
 
+/// A message was redacted (content purged) — every viewer flips it to the
+/// "message redacted" tombstone live.
+final class WsRedactionEvent extends WsEvent {
+  const WsRedactionEvent({required this.messageId, required this.by});
+  final String messageId;
+  final String by;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients.
@@ -417,6 +439,11 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsAssistantErrorEvent(
         agentId: json['agentId'] as String? ?? '',
         error: json['error'] as String? ?? 'assistant error',
+      );
+    case 'redaction':
+      return WsRedactionEvent(
+        messageId: json['messageId'] as String? ?? '',
+        by: json['by'] as String? ?? '',
       );
     default:
       return null;

@@ -74,6 +74,11 @@ abstract class ApiClient {
   /// in channels the caller belongs to, newest first.
   Future<List<SearchHit>> search(String query);
 
+  /// Redacts a message — a governed content purge (author or admin). [reason]
+  /// is required (the audit record). The change is reflected live via a
+  /// `redaction` WS event.
+  Future<void> redactMessage(String messageId, String reason);
+
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
@@ -282,6 +287,11 @@ class HttpApiClient implements ApiClient {
     final data =
         await _get('/search?q=${Uri.encodeQueryComponent(query)}') as List<dynamic>;
     return data.map((e) => SearchHit.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<void> redactMessage(String messageId, String reason) async {
+    await _post('/messages/$messageId/redact', {'reason': reason});
   }
 
   @override

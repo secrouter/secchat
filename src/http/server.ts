@@ -374,6 +374,45 @@ function buildRouter(
     sendJson(res, 200, await store.listReactions(params.id!));
   });
 
+  // ── Redaction: a governed content PURGE (CUI-spillage / incident response), NOT a casual delete.
+  // `redactMessage` drops the plaintext while keeping the row + content HASH + chain links, stamps
+  // redactedAt, and appends an audited `message.redact` event carrying the reason — so the chain
+  // still verifies and the purge is provable (who/when/why) WITHOUT retaining the content (decision
+  // #9). Authorized for the message's AUTHOR or an admin; membership-gated; reason required; once
+  // (409 if already redacted). Broadcasts a `redaction` event so every viewer's copy updates live.
+  router.add("POST", "/messages/:id/redact", async ({ req, res, params, principal }) => {
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const authorized =
+      message.authorRef === principal.sub ||
+      (admin != null && isAdmin(principal, admin.adminGroup));
+    if (!authorized) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (message.redactedAt) {
+      sendJson(res, 409, { error: "already_redacted" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { reason?: string };
+    const reason = (body.reason ?? "").trim();
+    if (!reason) {
+      sendJson(res, 400, { error: "reason required" });
+      return;
+    }
+    await store.redactMessage(messageId, principal.sub, reason);
+    broadcast?.(message.channelId, { type: "redaction", messageId, by: principal.sub });
+    sendJson(res, 200, { ok: true });
+  });
+
   // ── Per-user read markers → unread counts. Same membership gate as the routes above.
   router.add("GET", "/channels/:id/unread", async ({ res, params, principal }) => {
     const channelId = params.id!;

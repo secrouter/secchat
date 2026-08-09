@@ -594,4 +594,80 @@ void main() {
     expect(fake.postMessageCalls.single.parentId, 'p1');
     expect(fake.postMessageCalls.single.content, 'my threaded reply');
   });
+
+  testWidgets('the author can redact their own message via the menu + reason dialog', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'dev.alice',
+            authorType: AuthorType.user,
+            content: 'oops, CUI in the wrong place',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(find.textContaining('oops, CUI in the wrong place'), findsOneWidget);
+
+    // Open the message overflow menu → Redact (pumpAndSettle so the menu/dialog
+    // route transitions finish — no repeating animations in this test).
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Redact…'));
+    await tester.pumpAndSettle();
+
+    // The confirm dialog requires a reason.
+    expect(find.text('Redact message'), findsOneWidget);
+    final reasonField = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(reasonField, 'CUI spillage — wrong channel');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Redact'));
+    await tester.pumpAndSettle();
+
+    expect(fake.redactCalls, hasLength(1));
+    expect(fake.redactCalls.single.messageId, 'm1');
+    expect(fake.redactCalls.single.reason, 'CUI spillage — wrong channel');
+    // The message flips to the redacted tombstone.
+    expect(find.text('message redacted'), findsOneWidget);
+    expect(find.textContaining('oops, CUI'), findsNothing);
+  });
+
+  testWidgets('a non-author, non-admin user sees no redact affordance', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice — not an admin
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: "bob's message",
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(find.textContaining("bob's message"), findsOneWidget);
+    expect(find.byTooltip('Message actions'), findsNothing);
+  });
 }
