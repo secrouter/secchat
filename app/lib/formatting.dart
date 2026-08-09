@@ -10,6 +10,16 @@ String formatClockTime(DateTime dt) {
   return '$h:$m';
 }
 
+/// Formats a [DateTime] as a local `YYYY-MM-DD HH:mm` stamp — unambiguous and
+/// assessor-legible, for places that can span days (e.g. edit history).
+String formatTimestamp(DateTime dt) {
+  final local = dt.toLocal();
+  final y = local.year.toString().padLeft(4, '0');
+  final mo = local.month.toString().padLeft(2, '0');
+  final d = local.day.toString().padLeft(2, '0');
+  return '$y-$mo-$d ${formatClockTime(dt)}';
+}
+
 /// Truncates an id/hash to a short, glanceable prefix for mono-styled UI
 /// chrome (channel ids, session ids).
 String shortId(String id, {int length = 10}) =>

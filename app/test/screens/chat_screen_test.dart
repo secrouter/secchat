@@ -670,4 +670,119 @@ void main() {
     expect(find.textContaining("bob's message"), findsOneWidget);
     expect(find.byTooltip('Message actions'), findsNothing);
   });
+
+  testWidgets('the author edits their own message via the menu + edit dialog', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'dev.alice',
+            authorType: AuthorType.user,
+            content: 'the orignal, with a typo',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit…'));
+    await tester.pumpAndSettle();
+
+    // The edit dialog is pre-filled with the current text; change it and save.
+    expect(find.text('Edit message'), findsOneWidget);
+    final field = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(field, 'the original, typo fixed');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Save changes'));
+    await tester.pumpAndSettle();
+
+    expect(fake.editCalls, hasLength(1));
+    expect(fake.editCalls.single.messageId, 'm1');
+    expect(fake.editCalls.single.content, 'the original, typo fixed');
+    // The bubble now shows the new text + an "(edited)" marker.
+    expect(find.textContaining('the original, typo fixed'), findsOneWidget);
+    expect(find.textContaining('the orignal, with a typo'), findsNothing);
+    expect(find.text('(edited)'), findsOneWidget);
+  });
+
+  testWidgets('a non-author sees no edit affordance', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: "bob's message",
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // No overflow menu at all on someone else's un-edited message (alice isn't an admin).
+    expect(find.byTooltip('Message actions'), findsNothing);
+  });
+
+  testWidgets('an edited message shows "(edited)" and View history opens the revision list', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob', // someone else's edited message — alice can still view history
+            authorType: AuthorType.user,
+            content: 'current text',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+            editedAt: DateTime(2026, 1, 1, 9, 45),
+          ),
+        ],
+      },
+    );
+    fake.revisionsByMessage['m1'] = [
+      MessageRevision(revision: 1, authorRef: 'bob', content: 'first text', at: DateTime(2026, 1, 1, 9, 30)),
+      MessageRevision(revision: 2, authorRef: 'bob', content: 'current text', at: DateTime(2026, 1, 1, 9, 45)),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(find.text('(edited)'), findsOneWidget);
+
+    // Open history via the overflow menu (alice isn't the author, so no Edit item).
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Edit…'), findsNothing);
+    await tester.tap(find.text('View history'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit history'), findsOneWidget);
+    expect(find.text('Original'), findsOneWidget);
+    expect(find.text('Revision 2'), findsOneWidget);
+    expect(find.textContaining('first text'), findsOneWidget);
+  });
 }

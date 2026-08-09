@@ -33,6 +33,8 @@ class MessageList extends StatefulWidget {
     this.onOpenThread,
     this.isAdmin = false,
     this.onRedact,
+    this.onEdit,
+    this.onViewHistory,
   });
 
   final List<TranscriptEntry> entries;
@@ -57,6 +59,14 @@ class MessageList extends StatefulWidget {
   /// Redact a message (null disables the affordance). Shown to the message's
   /// author or an admin, on non-redacted messages.
   final void Function(Message message)? onRedact;
+
+  /// Edit a message (null disables the affordance). Author-only, on non-redacted
+  /// user messages — deliberately narrower than redaction (no admin override).
+  final void Function(Message message)? onEdit;
+
+  /// View a message's edit history (null disables it). Offered on any edited
+  /// message, to anyone who can see the message.
+  final void Function(Message message)? onViewHistory;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -124,6 +134,8 @@ class _MessageListState extends State<MessageList> {
               onOpenThread: widget.onOpenThread,
               isAdmin: widget.isAdmin,
               onRedact: widget.onRedact,
+              onEdit: widget.onEdit,
+              onViewHistory: widget.onViewHistory,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -142,6 +154,8 @@ class _TranscriptTile extends StatelessWidget {
     this.onOpenThread,
     this.isAdmin = false,
     this.onRedact,
+    this.onEdit,
+    this.onViewHistory,
   });
 
   final TranscriptEntry entry;
@@ -151,6 +165,8 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onOpenThread;
   final bool isAdmin;
   final void Function(Message message)? onRedact;
+  final void Function(Message message)? onEdit;
+  final void Function(Message message)? onViewHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -166,6 +182,8 @@ class _TranscriptTile extends StatelessWidget {
         onOpenThread: onOpenThread,
         isAdmin: isAdmin,
         onRedact: onRedact,
+        onEdit: onEdit,
+        onViewHistory: onViewHistory,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
@@ -186,6 +204,8 @@ class _MessageBubble extends StatelessWidget {
     this.onOpenThread,
     this.isAdmin = false,
     this.onRedact,
+    this.onEdit,
+    this.onViewHistory,
   });
 
   final Message message;
@@ -196,12 +216,27 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onOpenThread;
   final bool isAdmin;
   final void Function(Message message)? onRedact;
+  final void Function(Message message)? onEdit;
+  final void Function(Message message)? onViewHistory;
 
   // Redaction is offered to the message's author or an admin, on live messages.
   bool get _canRedact =>
       onRedact != null &&
       !message.isRedacted &&
       (isAdmin || message.authorRef == currentUserSub);
+
+  // Editing is AUTHOR-ONLY (no admin override), on a live user message.
+  bool get _canEdit =>
+      onEdit != null &&
+      !message.isRedacted &&
+      message.authorType == AuthorType.user &&
+      message.authorRef == currentUserSub;
+
+  // Anyone who can see an edited message can view its history.
+  bool get _canViewHistory =>
+      onViewHistory != null && message.isEdited && !message.isRedacted;
+
+  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -238,6 +273,13 @@ class _MessageBubble extends StatelessWidget {
               formatClockTime(message.createdAt),
               style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
             ),
+            // "(edited)" marker — tapping it opens the version history when available.
+            if (message.isEdited && !message.isRedacted) ...[
+              const SizedBox(width: 6),
+              _EditedMarker(
+                onTap: _canViewHistory ? () => onViewHistory!(message) : null,
+              ),
+            ],
           ],
         ),
         // Agent messages are attributed to the human whose prompt drove the turn
@@ -278,7 +320,7 @@ class _MessageBubble extends StatelessWidget {
               onToggle: (emoji) => onToggleReaction!(message, emoji),
             ),
           ),
-        if (!message.isRedacted && (onOpenThread != null || _canRedact))
+        if (!message.isRedacted && (onOpenThread != null || _hasMenu))
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Row(
@@ -289,10 +331,15 @@ class _MessageBubble extends StatelessWidget {
                     replyCount: replyCount,
                     onTap: () => onOpenThread!(message),
                   ),
-                if (onOpenThread != null && _canRedact)
+                if (onOpenThread != null && _hasMenu)
                   const SizedBox(width: 8),
-                if (_canRedact)
-                  _MessageMenu(onRedact: () => onRedact!(message)),
+                if (_hasMenu)
+                  _MessageMenu(
+                    onEdit: _canEdit ? () => onEdit!(message) : null,
+                    onViewHistory:
+                        _canViewHistory ? () => onViewHistory!(message) : null,
+                    onRedact: _canRedact ? () => onRedact!(message) : null,
+                  ),
               ],
             ),
           ),
@@ -707,9 +754,11 @@ class _ThreadChip extends StatelessWidget {
 /// The per-message overflow menu (⋮). Currently just Redact — a governed
 /// content purge — shown to a message's author or an admin.
 class _MessageMenu extends StatelessWidget {
-  const _MessageMenu({required this.onRedact});
+  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact});
 
-  final VoidCallback onRedact;
+  final VoidCallback? onEdit;
+  final VoidCallback? onViewHistory;
+  final VoidCallback? onRedact;
 
   @override
   Widget build(BuildContext context) {
@@ -723,21 +772,76 @@ class _MessageMenu extends StatelessWidget {
         icon: const Icon(Icons.more_horiz, color: AppColors.textFaint),
         color: AppColors.surfaceRaised,
         onSelected: (value) {
-          if (value == 'redact') onRedact();
+          switch (value) {
+            case 'edit':
+              onEdit?.call();
+            case 'history':
+              onViewHistory?.call();
+            case 'redact':
+              onRedact?.call();
+          }
         },
-        itemBuilder: (_) => const [
-          PopupMenuItem<String>(
-            value: 'redact',
-            child: Row(
-              children: [
-                Icon(Icons.gpp_bad_outlined, size: 15, color: AppColors.bad),
-                SizedBox(width: 8),
-                Text('Redact…', style: TextStyle(color: AppColors.bad, fontSize: 13)),
-              ],
+        itemBuilder: (_) => [
+          if (onEdit != null)
+            const PopupMenuItem<String>(
+              value: 'edit',
+              child: Row(
+                children: [
+                  Icon(Icons.edit_outlined, size: 15, color: AppColors.text),
+                  SizedBox(width: 8),
+                  Text('Edit…', style: TextStyle(color: AppColors.text, fontSize: 13)),
+                ],
+              ),
             ),
-          ),
+          if (onViewHistory != null)
+            const PopupMenuItem<String>(
+              value: 'history',
+              child: Row(
+                children: [
+                  Icon(Icons.history, size: 15, color: AppColors.text),
+                  SizedBox(width: 8),
+                  Text('View history', style: TextStyle(color: AppColors.text, fontSize: 13)),
+                ],
+              ),
+            ),
+          if (onRedact != null)
+            const PopupMenuItem<String>(
+              value: 'redact',
+              child: Row(
+                children: [
+                  Icon(Icons.gpp_bad_outlined, size: 15, color: AppColors.bad),
+                  SizedBox(width: 8),
+                  Text('Redact…', style: TextStyle(color: AppColors.bad, fontSize: 13)),
+                ],
+              ),
+            ),
         ],
       ),
+    );
+  }
+}
+
+/// The small "(edited)" affordance next to a message's timestamp. Tappable when
+/// [onTap] is set (opens version history); otherwise a plain faint label.
+class _EditedMarker extends StatelessWidget {
+  const _EditedMarker({this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = Text(
+      '(edited)',
+      style: AppFonts.mono(
+        fontSize: 10.5,
+        color: AppColors.textFaint,
+      ).copyWith(decoration: onTap != null ? TextDecoration.underline : null),
+    );
+    if (onTap == null) return label;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: label),
     );
   }
 }

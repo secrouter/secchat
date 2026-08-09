@@ -79,6 +79,16 @@ abstract class ApiClient {
   /// `redaction` WS event.
   Future<void> redactMessage(String messageId, String reason);
 
+  /// Edits a message's text (author only) — a tracked revision, not an in-place
+  /// rewrite. History is preserved and the change is audited; every viewer sees
+  /// the new text + an "(edited)" marker live via a `message_edit` WS event.
+  Future<void> editMessage(String messageId, String content);
+
+  /// The full version history of a message (original + every edit), newest
+  /// revision last. Content is null on every revision once the message is
+  /// redacted.
+  Future<List<MessageRevision>> revisions(String messageId);
+
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
@@ -292,6 +302,19 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> redactMessage(String messageId, String reason) async {
     await _post('/messages/$messageId/redact', {'reason': reason});
+  }
+
+  @override
+  Future<void> editMessage(String messageId, String content) async {
+    await _post('/messages/$messageId/edit', {'content': content});
+  }
+
+  @override
+  Future<List<MessageRevision>> revisions(String messageId) async {
+    final data = await _get('/messages/$messageId/revisions') as Map<String, dynamic>;
+    return (data['revisions'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => MessageRevision.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   @override

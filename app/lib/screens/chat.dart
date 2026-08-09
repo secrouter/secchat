@@ -11,7 +11,9 @@ import '../widgets/app_topbar.dart';
 import '../widgets/badges.dart';
 import '../widgets/coding_strip.dart';
 import '../widgets/composer.dart';
+import '../widgets/edit_dialog.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/history_dialog.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
@@ -288,6 +290,8 @@ class _ChatScreenState extends State<ChatScreen> {
           _append(channelId, ErrorEntry(error));
         case WsRedactionEvent(:final messageId):
           _applyRedaction(channelId, messageId);
+        case WsMessageEditEvent(:final messageId, :final content, :final editedAt):
+          _applyEdit(channelId, messageId, content, editedAt);
       }
     });
   }
@@ -321,6 +325,54 @@ class _ChatScreenState extends State<ChatScreen> {
       await widget.api.redactMessage(message.id, reason);
       if (!mounted) return;
       setState(() => _applyRedaction(channel.id, message.id));
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
+  /// Swaps a message's text to [content] and stamps [editedAt] in the
+  /// transcript (so it renders the new text + an "(edited)" marker). Redacted
+  /// messages are left alone. Idempotent — a live echo of an optimistic local
+  /// edit re-applies the same text harmlessly. Must be called inside setState.
+  void _applyEdit(String channelId, String messageId, String content, DateTime editedAt) {
+    final existing = _transcripts[channelId];
+    if (existing == null) return;
+    var changed = false;
+    final updated = existing.map((entry) {
+      if (entry is MessageEntry &&
+          entry.message.id == messageId &&
+          !entry.message.isRedacted) {
+        changed = true;
+        return MessageEntry(entry.message.withEdit(content, editedAt));
+      }
+      return entry;
+    }).toList();
+    if (changed) _transcripts[channelId] = updated;
+  }
+
+  /// Edits [message] (author only) via a dialog. The new text is applied
+  /// optimistically; the live `message_edit` echo reconciles the exact server
+  /// timestamp. A failure surfaces an error.
+  Future<void> _editMessage(Message message) async {
+    final channel = _selected;
+    if (channel == null || message.content == null) return;
+    final next = await showEditDialog(context, message.content!);
+    if (next == null || !mounted) return;
+    try {
+      await widget.api.editMessage(message.id, next);
+      if (!mounted) return;
+      setState(() => _applyEdit(channel.id, message.id, next, DateTime.now()));
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
+  /// Loads and shows [message]'s full version history (original + every edit).
+  Future<void> _openHistory(Message message) async {
+    try {
+      final revisions = await widget.api.revisions(message.id);
+      if (!mounted) return;
+      await showHistoryDialog(context, revisions);
     } catch (error) {
       _showError(error);
     }
@@ -803,6 +855,8 @@ class _ChatScreenState extends State<ChatScreen> {
       isAdmin: widget.principal.isAdmin,
       // Coding-channel messages are local echoes (no server id) — not redactable.
       onRedact: canThread ? _redactMessage : null,
+      onEdit: canThread ? _editMessage : null,
+      onViewHistory: canThread ? _openHistory : null,
     );
   }
 
@@ -826,6 +880,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onToggleReaction: _toggleReaction,
             isAdmin: widget.principal.isAdmin,
             onRedact: _redactMessage,
+            onEdit: _editMessage,
+            onViewHistory: _openHistory,
             // one level deep — no nested thread affordance inside a thread
           ),
         ),

@@ -413,6 +413,61 @@ function buildRouter(
     sendJson(res, 200, { ok: true });
   });
 
+  // ── Trackable edit: a revision, never an in-place rewrite. `editMessage` leaves the original row
+  // (and the hash chain, which binds the ORIGINAL content) untouched, appends the new version to the
+  // message's history, and records an audited `message.edit` event — so "who edited when" is provable
+  // and every prior version is retained (until redaction purges them). AUTHOR-ONLY, deliberately
+  // narrower than redaction: an admin's remedy for bad content is a visible redaction tombstone, never
+  // a silent rewrite of someone else's words. Membership-gated; non-empty content required; 409 on a
+  // redacted message. Broadcasts a `message_edit` event so every viewer's copy updates live.
+  router.add("POST", "/messages/:id/edit", async ({ req, res, params, principal }) => {
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (message.authorRef !== principal.sub) {
+      sendJson(res, 403, { error: "forbidden" }); // author-only — no admin override (see comment above)
+      return;
+    }
+    if (message.redactedAt) {
+      sendJson(res, 409, { error: "already_redacted" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { content?: string };
+    const content = (body.content ?? "").trim();
+    if (!content) {
+      sendJson(res, 400, { error: "content required" });
+      return;
+    }
+    const updated = await store.editMessage(messageId, principal.sub, content);
+    broadcast?.(message.channelId, {
+      type: "message_edit",
+      messageId,
+      channelId: message.channelId,
+      content,
+      editedAt: updated.editedAt,
+      by: principal.sub,
+    });
+    sendJson(res, 200, { message: updated, content });
+  });
+
+  // The full version history of a message (original + every edit), for the "edited · view history"
+  // affordance. Any channel member may read it; content is omitted on every revision once redacted.
+  router.add("GET", "/messages/:id/revisions", async ({ res, params, principal }) => {
+    const message = await store.getMessage(params.id!);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, message ? 403 : 404, { error: message ? "forbidden" : "not_found" });
+      return;
+    }
+    sendJson(res, 200, { revisions: await store.listRevisions(params.id!) });
+  });
+
   // ── Per-user read markers → unread counts. Same membership gate as the routes above.
   router.add("GET", "/channels/:id/unread", async ({ res, params, principal }) => {
     const channelId = params.id!;

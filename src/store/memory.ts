@@ -59,6 +59,7 @@ import type {
   Id,
   Member,
   Message,
+  MessageRevision,
   Reaction,
   SessionStatus,
   SessionStore,
@@ -73,7 +74,8 @@ export class MemoryStore implements Store, SessionStore {
   #agents = new Map<Id, Agent>();
   #messagesByChannel = new Map<Id, Message[]>(); // channelId -> messages, seq order
   #messagesById = new Map<Id, Message>(); // same row objects as #messagesByChannel's arrays
-  #content = new Map<Id, string>(); // message id -> plaintext; absent once redacted
+  #content = new Map<Id, string>(); // message id -> CURRENT plaintext; absent once redacted
+  #revisions = new Map<Id, MessageRevision[]>(); // message id -> full history INCL. revision 1; only for edited messages
   #auditLog: AuditEvent[] = []; // one global chain
   #sessions = new Map<Id, AgentSession>(); // insertion order == creation order
   #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
@@ -236,6 +238,65 @@ export class MemoryStore implements Store, SessionStore {
       .map((m) => (m.redactedAt ? { ...m } : { ...m, content: this.#content.get(m.id) }));
   }
 
+  /** Appends a revision (capturing the original as revision 1 on the first edit), overwrites the
+   * current plaintext, stamps `editedAt`, and records a `message.edit` audit event. The message
+   * row's `contentSha256`/`hash` (the original) are untouched, so the chain still verifies — the
+   * edit lives entirely out-of-band. Author-only is enforced by the route; a redacted message has
+   * no plaintext to revise, so it throws (the route maps this to 409). */
+  async editMessage(id: Id, by: string, content: string): Promise<Message> {
+    const message = this.#messagesById.get(id);
+    if (!message) throw new Error(`MemoryStore.editMessage: unknown message ${id}`);
+    if (message.redactedAt) throw new Error(`MemoryStore.editMessage: ${id} is redacted`);
+
+    let revisions = this.#revisions.get(id);
+    if (!revisions) {
+      // First edit — seed history with the original (still in #content) as revision 1.
+      revisions = [{
+        messageId: id,
+        revision: 1,
+        authorRef: message.authorRef,
+        content: this.#content.get(id),
+        contentSha256: message.contentSha256,
+        at: message.createdAt,
+      }];
+      this.#revisions.set(id, revisions);
+    }
+    const at = new Date().toISOString();
+    revisions.push({
+      messageId: id,
+      revision: revisions[revisions.length - 1]!.revision + 1,
+      authorRef: message.authorRef,
+      content,
+      contentSha256: hashContent(content),
+      at,
+    });
+    this.#content.set(id, content); // current text listMessages returns
+    message.editedAt = at; // metadata only — NOT a hash input, so the chain is unaffected
+    await this.appendAudit({ actor: by, action: "message.edit", target: id, detail: `rev ${revisions.length}` });
+    return message;
+  }
+
+  /** Full history, revision order. Un-edited messages synthesize their single original revision on
+   * the fly; a redacted message returns its revisions as tombstones (metadata, no content). */
+  async listRevisions(id: Id): Promise<MessageRevision[]> {
+    const message = this.#messagesById.get(id);
+    if (!message) return [];
+    const revisions = this.#revisions.get(id);
+    if (!revisions) {
+      // Never edited — the one revision is the original on the row.
+      return [{
+        messageId: id,
+        revision: 1,
+        authorRef: message.authorRef,
+        ...(message.redactedAt ? {} : { content: this.#content.get(id) }),
+        contentSha256: message.contentSha256,
+        at: message.createdAt,
+      }];
+    }
+    // Edited — drop content on every revision once redacted (the stored plaintext is already gone).
+    return revisions.map((r) => (message.redactedAt ? { ...r, content: undefined } : { ...r }));
+  }
+
   // ── Reactions (mutable; NOT chained) ──────────────────────────────────────────────────────
 
   /** Idempotent per (messageId, userSub, emoji): reacting twice with the same emoji is a no-op. */
@@ -322,6 +383,9 @@ export class MemoryStore implements Store, SessionStore {
     if (message.redactedAt) throw new Error(`MemoryStore.redactMessage: ${id} is already redacted`);
 
     this.#content.delete(id);
+    // Purge every revision's plaintext too — an edited message's prior versions are just as
+    // sensitive. The revision metadata (hashes, timestamps) stays as a tombstone trail.
+    for (const r of this.#revisions.get(id) ?? []) r.content = undefined;
     message.redactedAt = new Date().toISOString();
     await this.appendAudit({ actor: by, action: "message.redact", target: id, detail: reason });
   }

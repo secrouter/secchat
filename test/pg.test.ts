@@ -153,6 +153,48 @@ if (!DATABASE_URL) {
     await assert.rejects(() => store.redactMessage(m2.id, "admin-1", "again"));
   });
 
+  test("editMessage keeps history + leaves the chain untouched; listRevisions is ordered; redaction purges every version", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    const m = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "the orignal" });
+    const originalHash = m.hash;
+    const originalSha = m.contentSha256;
+
+    // Un-edited: exactly one synthesized revision (the original) and no editedAt.
+    const rev0 = await store.listRevisions(m.id);
+    assert.deepEqual(rev0.map((r) => [r.revision, r.content]), [[1, "the orignal"]]);
+    assert.equal((await store.listMessages(channel.id)).find((x) => x.id === m.id)!.editedAt, undefined);
+
+    const updated = await store.editMessage(m.id, "user-alice", "the original, fixed");
+    assert.ok(updated.editedAt, "editMessage stamps editedAt");
+    await store.editMessage(m.id, "user-alice", "the original, fixed again");
+
+    // The row (and thus the message chain) is byte-identical; only the out-of-band history grew.
+    const listed = await store.listMessages(channel.id);
+    const row = listed.find((x) => x.id === m.id)!;
+    assert.equal(row.content, "the original, fixed again", "listMessages shows the CURRENT text");
+    assert.ok(row.editedAt, "listMessages carries editedAt once edited");
+    assert.equal(row.hash, originalHash, "the message hash is unchanged");
+    assert.equal(row.contentSha256, originalSha, "contentSha256 still binds the ORIGINAL");
+    assert.equal((await store.verifyChains()).messagesOk, true);
+
+    const revs = await store.listRevisions(m.id);
+    assert.deepEqual(
+      revs.map((r) => [r.revision, r.content]),
+      [[1, "the orignal"], [2, "the original, fixed"], [3, "the original, fixed again"]],
+    );
+    // Each edit chained a message.edit audit event.
+    const audit = await store.listAudit();
+    assert.equal(audit.filter((a) => a.action === "message.edit" && a.target === m.id).length, 2);
+
+    // Editing a redacted message is refused, and redaction purges plaintext from EVERY revision.
+    await store.redactMessage(m.id, "admin-1", "CUI in an old version");
+    await assert.rejects(() => store.editMessage(m.id, "user-alice", "too late"));
+    const afterRedact = await store.listRevisions(m.id);
+    assert.equal(afterRedact.length, 3, "revision metadata is retained as a tombstone trail");
+    for (const r of afterRedact) assert.equal(r.content, undefined, "no plaintext survives redaction");
+    assert.equal((await store.verifyChains()).messagesOk, true);
+  });
+
   test("listThread returns only the replies to that parent, seq order; redacted replies omit content too", async () => {
     const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
 

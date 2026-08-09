@@ -111,6 +111,25 @@ export interface Message {
   hash: Sha256Hex;
   createdAt: string;
   redactedAt?: string; // set when plaintext is purged (tombstone); chain still verifies
+  /** Set to the latest edit time once the author has revised this message. Metadata (like
+   * promptedBy/parentId/redactedAt) — NOT bound into the message hash, so edits never touch the
+   * chain: the row stays anchored to `contentSha256` (the original) while revisions accrue
+   * out-of-band and each edit is recorded as an audited `message.edit` event. */
+  editedAt?: string;
+}
+
+/** One version of a message's text. Revision 1 is the original (held on the Message row itself);
+ * an edit appends revision 2, 3, … Each revision keeps its own content hash so the history is
+ * self-describing; `content` is dropped (tombstoned) if the message is later redacted. Revisions
+ * are NOT a separate chain — the tamper-evident record of an edit is its `message.edit` audit
+ * event; the message chain stays bound to the original `contentSha256`. */
+export interface MessageRevision {
+  messageId: Id;
+  revision: number; // 1 = original, ascending
+  authorRef: string; // who wrote this revision (always the original author — edit is author-only)
+  content?: string; // omitted for a redacted message
+  contentSha256: Sha256Hex;
+  at: string; // createdAt for revision 1, the edit time thereafter
 }
 
 /** Metadata-only audit event (the SecRouter pattern — NEVER content). Its own global chain. */
@@ -195,6 +214,15 @@ export interface Store {
   /** Replies to `parentId` in `channelId`, seq order; `content` omitted for redacted rows. */
   listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>>;
   redactMessage(id: Id, by: string, reason: string): Promise<void>;
+  /** Revise a message's text, preserving history. Appends a revision, stamps `editedAt`, and
+   * records an audited `message.edit` event; the original row (and the message chain) is
+   * untouched. Author-only is enforced at the route — an admin's remedy for bad content is
+   * redaction, not a silent rewrite. Throws on a redacted message (no plaintext to revise).
+   * Returns the updated message (with `editedAt` set). */
+  editMessage(id: Id, by: string, content: string): Promise<Message>;
+  /** Full version history for a message, revision order (1 = original). `content` is omitted on
+   * every revision once the message is redacted. */
+  listRevisions(id: Id): Promise<MessageRevision[]>;
 
   // Reactions (mutable; not chained).
   addReaction(messageId: Id, userSub: string, emoji: string): Promise<void>; // idempotent per (user,emoji)

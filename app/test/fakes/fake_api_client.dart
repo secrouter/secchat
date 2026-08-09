@@ -167,6 +167,24 @@ class FakeApiClient implements ApiClient {
     redactCalls.add((messageId: messageId, reason: reason));
   }
 
+  /// Every `editMessage` call, in order.
+  final List<({String messageId, String content})> editCalls = [];
+
+  @override
+  Future<void> editMessage(String messageId, String content) async {
+    _maybeThrow('editMessage');
+    editCalls.add((messageId: messageId, content: content));
+  }
+
+  /// Canned revision history returned by [revisions], keyed by message id.
+  final Map<String, List<MessageRevision>> revisionsByMessage = {};
+
+  @override
+  Future<List<MessageRevision>> revisions(String messageId) async {
+    _maybeThrow('revisions');
+    return List.of(revisionsByMessage[messageId] ?? const []);
+  }
+
   @override
   Future<List<User>> getUsers() async {
     _maybeThrow('getUsers');

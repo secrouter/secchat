@@ -153,6 +153,7 @@ class Message {
     required this.createdAt,
     this.promptedBy,
     this.parentId,
+    this.editedAt,
     this.reactions = const [],
   });
 
@@ -168,10 +169,16 @@ class Message {
   final String? promptedBy;
   final String? parentId;
 
+  /// Set once the author has revised this message — drives the "(edited)"
+  /// marker and the "view history" affordance. The original content hash (and
+  /// thus the server-side chain) is untouched; edits are tracked out-of-band.
+  final DateTime? editedAt;
+
   /// Reactions on this message, attached by the message-history endpoint.
   final List<Reaction> reactions;
 
   bool get isRedacted => content == null;
+  bool get isEdited => editedAt != null;
 
   /// A copy with the content purged (redacted) — everything else preserved, so
   /// the row renders as the "message redacted" tombstone.
@@ -184,6 +191,7 @@ class Message {
     createdAt: createdAt,
     promptedBy: promptedBy,
     parentId: parentId,
+    editedAt: editedAt,
     reactions: reactions,
   );
 
@@ -198,6 +206,22 @@ class Message {
     createdAt: createdAt,
     promptedBy: promptedBy,
     parentId: parentId,
+    editedAt: editedAt,
+    reactions: reactions,
+  );
+
+  /// A copy with new [content] and an [editedAt] stamp — applies an edit (live
+  /// event or optimistic) without mutating the original row.
+  Message withEdit(String content, DateTime editedAt) => Message(
+    id: id,
+    seq: seq,
+    authorRef: authorRef,
+    authorType: authorType,
+    content: content,
+    createdAt: createdAt,
+    promptedBy: promptedBy,
+    parentId: parentId,
+    editedAt: editedAt,
     reactions: reactions,
   );
 
@@ -212,9 +236,33 @@ class Message {
         DateTime.now(),
     promptedBy: json['promptedBy'] as String?,
     parentId: json['parentId'] as String?,
+    editedAt: DateTime.tryParse(json['editedAt'] as String? ?? ''),
     reactions: (json['reactions'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => Reaction.fromJson(e as Map<String, dynamic>))
         .toList(),
+  );
+}
+
+/// One version of a message's text, from `GET /messages/:id/revisions`.
+/// Revision 1 is the original; `content` is null once the message is redacted.
+class MessageRevision {
+  const MessageRevision({
+    required this.revision,
+    required this.authorRef,
+    required this.content,
+    required this.at,
+  });
+
+  final int revision;
+  final String authorRef;
+  final String? content;
+  final DateTime at;
+
+  factory MessageRevision.fromJson(Map<String, dynamic> json) => MessageRevision(
+    revision: (json['revision'] as num?)?.toInt() ?? 0,
+    authorRef: json['authorRef'] as String? ?? '',
+    content: json['content'] as String?,
+    at: DateTime.tryParse(json['at'] as String? ?? '') ?? DateTime.now(),
   );
 }
 
@@ -401,6 +449,21 @@ final class WsRedactionEvent extends WsEvent {
   final String by;
 }
 
+/// A message was edited — every viewer swaps in the new text and shows the
+/// "(edited)" marker live.
+final class WsMessageEditEvent extends WsEvent {
+  const WsMessageEditEvent({
+    required this.messageId,
+    required this.content,
+    required this.editedAt,
+    required this.by,
+  });
+  final String messageId;
+  final String content;
+  final DateTime editedAt;
+  final String by;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients.
@@ -443,6 +506,15 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
     case 'redaction':
       return WsRedactionEvent(
         messageId: json['messageId'] as String? ?? '',
+        by: json['by'] as String? ?? '',
+      );
+    case 'message_edit':
+      return WsMessageEditEvent(
+        messageId: json['messageId'] as String? ?? '',
+        content: json['content'] as String? ?? '',
+        editedAt:
+            DateTime.tryParse(json['editedAt'] as String? ?? '') ??
+            DateTime.now(),
         by: json['by'] as String? ?? '',
       );
     default:

@@ -69,6 +69,7 @@ import type {
   Member,
   MemberType,
   Message,
+  MessageRevision,
   Reaction,
   SessionStatus,
   SessionStore,
@@ -149,10 +150,22 @@ interface MessageRow {
   hash: string;
   created_at: Date;
   redacted_at: Date | null;
+  // Derived (not a stored column): MAX(at) over this message's revisions, present only once
+  // edited. getMessage doesn't select it, so it's optional — absent there means editedAt undefined.
+  edited_at?: Date | null;
 }
 
 interface MessageJoinRow extends MessageRow {
   content: string | null; // from message_content via LEFT JOIN; null once redacted (or never set)
+}
+
+interface MessageRevisionRow {
+  message_id: string;
+  revision: number;
+  author_ref: string;
+  content: string | null; // null once the message is redacted (tombstone)
+  content_sha256: string;
+  at: Date;
 }
 
 interface ReactionRow {
@@ -262,6 +275,20 @@ function rowToMessage(row: MessageRow): Message {
     hash: row.hash,
     createdAt: iso(row.created_at),
     redactedAt: row.redacted_at ? iso(row.redacted_at) : undefined,
+    editedAt: row.edited_at ? iso(row.edited_at) : undefined,
+  });
+}
+
+/** A single row from message_revisions. `content` is dropped (compacted out) once redacted,
+ * matching MemoryStore.listRevisions' shape. */
+function rowToMessageRevision(row: MessageRevisionRow): MessageRevision {
+  return compact({
+    messageId: row.message_id,
+    revision: row.revision,
+    authorRef: row.author_ref,
+    content: row.content ?? undefined,
+    contentSha256: row.content_sha256,
+    at: iso(row.at),
   });
 }
 
@@ -567,9 +594,12 @@ export class PgStore implements Store, SessionStore {
   async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
+              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
+       LEFT JOIN (SELECT message_id, MAX(at) AS edited_at FROM message_revisions GROUP BY message_id) rev
+              ON rev.message_id = m.id
        WHERE m.channel_id = $1
        ORDER BY m.seq`,
       [channelId],
@@ -583,14 +613,106 @@ export class PgStore implements Store, SessionStore {
   async listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
+              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
+       LEFT JOIN (SELECT message_id, MAX(at) AS edited_at FROM message_revisions GROUP BY message_id) rev
+              ON rev.message_id = m.id
        WHERE m.channel_id = $1 AND m.parent_id = $2
        ORDER BY m.seq`,
       [channelId, parentId],
     );
     return rows.map(rowToMessageWithContent);
+  }
+
+  /** Revise a message's text, preserving history — in ONE transaction (revision rows + current
+   * plaintext + audit event land together or not at all). The messages row is never touched, so
+   * the hash chain is untouched: the tamper-evident record of the edit is its `message.edit` audit
+   * event. FOR UPDATE on the row serializes concurrent edits (so revision numbers can't collide)
+   * and fails closed on an unknown/redacted message (author-only is enforced at the route). */
+  async editMessage(id: Id, by: string, content: string): Promise<Message> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const { rows: mrows } = await client.query<MessageRow>(
+        `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
+                content_sha256, prev_hash, hash, created_at, redacted_at
+         FROM messages WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      const row = mrows[0];
+      if (!row) throw new Error(`PgStore.editMessage: unknown message ${id}`);
+      if (row.redacted_at) throw new Error(`PgStore.editMessage: ${id} is redacted`);
+
+      const { rows: maxRows } = await client.query<{ maxrev: number | null }>(
+        `SELECT MAX(revision) AS maxrev FROM message_revisions WHERE message_id = $1`,
+        [id],
+      );
+      let nextRevision = (maxRows[0]?.maxrev ?? 0) + 1;
+      if (nextRevision === 1) {
+        // First edit — seed revision 1 with the original (still the current text in message_content).
+        const { rows: crows } = await client.query<{ content: string | null }>(
+          `SELECT content FROM message_content WHERE message_id = $1`,
+          [id],
+        );
+        await client.query(
+          `INSERT INTO message_revisions (message_id, revision, author_ref, content, content_sha256, at)
+           VALUES ($1, 1, $2, $3, $4, $5)`,
+          [id, row.author_ref, crows[0]?.content ?? "", row.content_sha256, iso(row.created_at)],
+        );
+        nextRevision = 2;
+      }
+
+      const at = new Date().toISOString();
+      await client.query(
+        `INSERT INTO message_revisions (message_id, revision, author_ref, content, content_sha256, at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, nextRevision, row.author_ref, content, hashContent(content), at],
+      );
+      await client.query(`UPDATE message_content SET content = $2 WHERE message_id = $1`, [id, content]);
+      await this.#appendAuditWithClient(client, { actor: by, action: "message.edit", target: id, detail: `rev ${nextRevision}` });
+
+      await client.query("COMMIT");
+      return { ...rowToMessage(row), editedAt: at };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Full history, revision order. An un-edited message synthesizes its single original revision
+   * from messages + message_content; a redacted message returns tombstones (content dropped). */
+  async listRevisions(id: Id): Promise<MessageRevision[]> {
+    const { rows } = await this.#pool.query<MessageRevisionRow>(
+      `SELECT message_id, revision, author_ref, content, content_sha256, at
+       FROM message_revisions WHERE message_id = $1 ORDER BY revision`,
+      [id],
+    );
+    if (rows.length > 0) return rows.map(rowToMessageRevision);
+
+    // Never edited — the one revision is the original on the row (content omitted if redacted).
+    const { rows: orows } = await this.#pool.query<MessageJoinRow>(
+      `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
+              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
+       FROM messages m
+       LEFT JOIN message_content mc ON mc.message_id = m.id
+       WHERE m.id = $1`,
+      [id],
+    );
+    const o = orows[0];
+    if (!o) return [];
+    return [rowToMessageRevision({
+      message_id: o.id,
+      revision: 1,
+      author_ref: o.author_ref,
+      content: o.redacted_at ? null : o.content,
+      content_sha256: o.content_sha256,
+      at: o.created_at,
+    })];
   }
 
   // ── Reactions (mutable; NOT chained) ────────────────────────────────────────────────────────
@@ -707,6 +829,9 @@ export class PgStore implements Store, SessionStore {
       if (row.redacted_at) throw new Error(`PgStore.redactMessage: ${id} is already redacted`);
 
       await client.query(`DELETE FROM message_content WHERE message_id = $1`, [id]);
+      // Purge every prior version's plaintext too — an edited message's revisions are just as
+      // sensitive; keep the revision metadata (hashes/timestamps) as a tombstone trail.
+      await client.query(`UPDATE message_revisions SET content = NULL WHERE message_id = $1`, [id]);
       await client.query(`UPDATE messages SET redacted_at = $1 WHERE id = $2`, [new Date().toISOString(), id]);
       await this.#appendAuditWithClient(client, { actor: by, action: "message.redact", target: id, detail: reason });
 
