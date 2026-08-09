@@ -112,6 +112,21 @@ class FakeApiClient implements ApiClient {
     sendInputCalls.add((sessionId: sessionId, text: text));
   }
 
+  /// Every reaction call, in order (`add: false` for a remove).
+  final List<({String messageId, String emoji, bool add})> reactionCalls = [];
+
+  @override
+  Future<void> addReaction(String messageId, String emoji) async {
+    _maybeThrow('addReaction');
+    reactionCalls.add((messageId: messageId, emoji: emoji, add: true));
+  }
+
+  @override
+  Future<void> removeReaction(String messageId, String emoji) async {
+    _maybeThrow('removeReaction');
+    reactionCalls.add((messageId: messageId, emoji: emoji, add: false));
+  }
+
   @override
   Future<List<User>> getUsers() async {
     _maybeThrow('getUsers');

@@ -162,6 +162,24 @@ const store = {
     }
     return out;
   },
+  async getMessage(id: string) {
+    for (const rows of messagesByChannel.values()) {
+      const found = rows.find((m) => m.id === id);
+      if (found) return found;
+    }
+    return null;
+  },
+  async listReactionsForChannel(channelId: string) {
+    const out: Array<{ messageId: string; userSub: string; emoji: string; at: string }> = [];
+    for (const m of messagesByChannel.get(channelId) ?? []) {
+      const byEmoji = reactionsByMessage.get(m.id);
+      if (!byEmoji) continue;
+      for (const [emoji, users] of byEmoji) {
+        for (const userSub of users) out.push({ messageId: m.id, userSub, emoji, at: new Date().toISOString() });
+      }
+    }
+    return out;
+  },
   async setLastRead(channelId: string, userSub: string, seq: number) {
     lastReadByChannelUser.set(`${channelId}:${userSub}`, seq);
   },

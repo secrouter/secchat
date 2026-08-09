@@ -54,6 +54,12 @@ abstract class ApiClient {
   /// fire-and-forget beyond surfacing a thrown [ApiException].
   Future<void> sendInput(String sessionId, String text);
 
+  /// Add / remove an emoji reaction on a message. Fire-and-forget beyond a
+  /// thrown [ApiException]: the change is reflected in message history and
+  /// streamed to every viewer as a `reaction` WS event.
+  Future<void> addReaction(String messageId, String emoji);
+  Future<void> removeReaction(String messageId, String emoji);
+
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
@@ -162,6 +168,11 @@ class HttpApiClient implements ApiClient {
     return _decode(res);
   }
 
+  Future<dynamic> _delete(String path) async {
+    final res = await _http.delete(_uri(path), headers: _headers);
+    return _decode(res);
+  }
+
   @override
   Future<Principal> getMe() async =>
       Principal.fromJson(await _get('/me') as Map<String, dynamic>);
@@ -227,6 +238,16 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> sendInput(String sessionId, String text) async {
     await _post('/sessions/$sessionId/input', {'text': text});
+  }
+
+  @override
+  Future<void> addReaction(String messageId, String emoji) async {
+    await _post('/messages/$messageId/reactions', {'emoji': emoji});
+  }
+
+  @override
+  Future<void> removeReaction(String messageId, String emoji) async {
+    await _delete('/messages/$messageId/reactions/${Uri.encodeComponent(emoji)}');
   }
 
   @override

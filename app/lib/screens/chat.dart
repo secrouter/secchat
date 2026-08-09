@@ -205,8 +205,68 @@ class _ChatScreenState extends State<ChatScreen> {
           final sessionId = _sessionIdByChannel[channelId];
           if (sessionId != null) _endedSessionIds.add(sessionId);
           _append(channelId, const SystemEntry('Session ended'));
+        case WsReactionEvent(:final op, :final messageId, :final emoji, :final userSub):
+          _applyReaction(channelId, messageId, emoji, userSub, add: op == 'add');
+        case WsAssistantErrorEvent(:final error):
+          _typing = null;
+          _append(channelId, ErrorEntry(error));
       }
     });
+  }
+
+  /// Applies a reaction add/remove to the matching message in the transcript.
+  /// Idempotent — adding a reaction already present (or removing an absent one)
+  /// is a no-op — so a live event echoing an optimistic local toggle is safe.
+  /// Must be called inside `setState`.
+  void _applyReaction(
+    String channelId,
+    String messageId,
+    String emoji,
+    String userSub, {
+    required bool add,
+  }) {
+    final existing = _transcripts[channelId];
+    if (existing == null) return;
+    var changed = false;
+    final updated = existing.map((entry) {
+      if (entry is! MessageEntry || entry.message.id != messageId) return entry;
+      final reactions = [...entry.message.reactions];
+      final index = reactions.indexWhere(
+        (r) => r.userSub == userSub && r.emoji == emoji,
+      );
+      if (add) {
+        if (index >= 0) return entry;
+        reactions.add(Reaction(messageId: messageId, userSub: userSub, emoji: emoji));
+      } else {
+        if (index < 0) return entry;
+        reactions.removeAt(index);
+      }
+      changed = true;
+      return MessageEntry(entry.message.withReactions(reactions));
+    }).toList();
+    if (changed) _transcripts[channelId] = updated;
+  }
+
+  /// Toggles the current user's [emoji] reaction on [message], optimistically,
+  /// then calls the API; a live `reaction` echo is idempotent, and a failure
+  /// reverts the optimistic change.
+  Future<void> _toggleReaction(Message message, String emoji) async {
+    final channel = _selected;
+    if (channel == null) return;
+    final me = widget.principal.sub;
+    final had = message.reactions.any((r) => r.userSub == me && r.emoji == emoji);
+    setState(() => _applyReaction(channel.id, message.id, emoji, me, add: !had));
+    try {
+      if (had) {
+        await widget.api.removeReaction(message.id, emoji);
+      } else {
+        await widget.api.addReaction(message.id, emoji);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _applyReaction(channel.id, message.id, emoji, me, add: had));
+      _showError(error);
+    }
   }
 
   /// Replaces `_transcripts[channelId]` with a new list (never mutates the
@@ -579,6 +639,7 @@ class _ChatScreenState extends State<ChatScreen> {
       entries: _transcripts[selected.id] ?? const [],
       typing: _typing,
       currentUserSub: widget.principal.sub,
+      onToggleReaction: _toggleReaction,
     );
   }
 }

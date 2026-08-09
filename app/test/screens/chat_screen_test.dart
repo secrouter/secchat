@@ -399,4 +399,65 @@ void main() {
       expect(find.text('Bob Reyes'), findsWidgets);
     },
   );
+
+  testWidgets('a reaction chip renders and tapping it toggles the reaction via the API', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: 'hi',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+            reactions: const [Reaction(messageId: 'm1', userSub: 'bob', emoji: '👍')],
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // The existing 👍 reaction renders as a chip.
+    expect(find.text('👍'), findsOneWidget);
+    await tester.tap(find.text('👍'));
+    await pumpSettled(tester);
+
+    // alice had not reacted with 👍, so tapping adds it.
+    expect(fake.reactionCalls, hasLength(1));
+    expect(fake.reactionCalls.single.messageId, 'm1');
+    expect(fake.reactionCalls.single.emoji, '👍');
+    expect(fake.reactionCalls.single.add, isTrue);
+  });
+
+  testWidgets('an agent message shows its prompted-by attribution', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'a1',
+            seq: 1,
+            authorRef: 'assistant-1',
+            authorType: AuthorType.agent,
+            content: 'here you go',
+            createdAt: DateTime(2026, 1, 1, 9, 31),
+            promptedBy: 'dev.alice',
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(find.textContaining('prompted by dev.alice'), findsOneWidget);
+  });
 }

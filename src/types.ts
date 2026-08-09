@@ -187,6 +187,9 @@ export interface Store {
   listAgentsByOwner(ownerSub: string): Promise<Agent[]>;
 
   appendMessage(input: AppendMessageInput): Promise<Message>;
+  /** One message by id (metadata only — no content), or null. Used to resolve a message's channel
+   * for an access-control check on message-scoped routes (e.g. reactions). */
+  getMessage(id: Id): Promise<Message | null>;
   /** Messages in seq order; `content` is omitted for redacted rows. */
   listMessages(channelId: Id): Promise<Array<Message & { content?: string }>>;
   /** Replies to `parentId` in `channelId`, seq order; `content` omitted for redacted rows. */
@@ -197,6 +200,9 @@ export interface Store {
   addReaction(messageId: Id, userSub: string, emoji: string): Promise<void>; // idempotent per (user,emoji)
   removeReaction(messageId: Id, userSub: string, emoji: string): Promise<void>;
   listReactions(messageId: Id): Promise<Reaction[]>;
+  /** All reactions on any message in `channelId` — lets the message-history route attach reactions
+   * to each message in one read instead of N per-message calls. */
+  listReactionsForChannel(channelId: Id): Promise<Reaction[]>;
 
   // Per-user read markers → unread counts.
   setLastRead(channelId: Id, userSub: string, seq: number): Promise<void>;

@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../commands.dart';
-import '../emoji.dart';
 import '../theme.dart';
+import 'emoji_picker.dart';
 import 'markdown_text.dart';
 
 /// The message composer: a formatting toolbar, a multiline text field with a
@@ -298,7 +298,7 @@ class _MessageComposerState extends State<MessageComposer> {
         padding: const WidgetStatePropertyAll(EdgeInsets.zero),
       ),
       menuChildren: [
-        _EmojiPicker(
+        EmojiPickerBody(
           onPick: (emoji) {
             _insertText(emoji);
             _emojiMenu.close();
@@ -480,57 +480,5 @@ class _SuggestionStrip extends StatelessWidget {
   }
 }
 
-/// The emoji picker body shown inside the toolbar's [MenuAnchor]: curated
-/// groups (see `lib/emoji.dart`) in a scrollable grid.
-class _EmojiPicker extends StatelessWidget {
-  const _EmojiPicker({required this.onPick});
-
-  final void Function(String emoji) onPick;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 320,
-      height: 260,
-      child: SingleChildScrollView(
-        primary: false,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final group in kEmojiGroups) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(2, 6, 2, 4),
-                child: Text(
-                  group.label.toUpperCase(),
-                  style: AppFonts.mono(
-                    fontSize: 9.5,
-                    color: AppColors.textFaint,
-                    letterSpacing: 0.6,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              Wrap(
-                children: [
-                  for (final emoji in group.emoji)
-                    InkWell(
-                      onTap: () => onPick(emoji),
-                      borderRadius: BorderRadius.circular(6),
-                      child: Padding(
-                        padding: const EdgeInsets.all(5),
-                        child: Text(
-                          emoji,
-                          style: const TextStyle(fontSize: 20),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
+// The emoji picker body moved to `lib/widgets/emoji_picker.dart` (EmojiPickerBody)
+// so message reactions can reuse it too.

@@ -153,6 +153,7 @@ class Message {
     required this.createdAt,
     this.promptedBy,
     this.parentId,
+    this.reactions = const [],
   });
 
   final String id;
@@ -161,10 +162,30 @@ class Message {
   final AuthorType authorType;
   final String? content;
   final DateTime createdAt;
+
+  /// For an agent message, the human whose prompt triggered this turn — shown
+  /// as an attribution line (decision #2: an agent acts as its owner's delegate).
   final String? promptedBy;
   final String? parentId;
 
+  /// Reactions on this message, attached by the message-history endpoint.
+  final List<Reaction> reactions;
+
   bool get isRedacted => content == null;
+
+  /// A copy with [reactions] replaced — used to apply live reaction events /
+  /// optimistic toggles without mutating the original row.
+  Message withReactions(List<Reaction> reactions) => Message(
+    id: id,
+    seq: seq,
+    authorRef: authorRef,
+    authorType: authorType,
+    content: content,
+    createdAt: createdAt,
+    promptedBy: promptedBy,
+    parentId: parentId,
+    reactions: reactions,
+  );
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
     id: json['id'] as String,
@@ -177,6 +198,28 @@ class Message {
         DateTime.now(),
     promptedBy: json['promptedBy'] as String?,
     parentId: json['parentId'] as String?,
+    reactions: (json['reactions'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => Reaction.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
+}
+
+/// One emoji reaction a user placed on a message.
+class Reaction {
+  const Reaction({
+    required this.messageId,
+    required this.userSub,
+    required this.emoji,
+  });
+
+  final String messageId;
+  final String userSub;
+  final String emoji;
+
+  factory Reaction.fromJson(Map<String, dynamic> json) => Reaction(
+    messageId: json['messageId'] as String? ?? '',
+    userSub: json['userSub'] as String? ?? '',
+    emoji: json['emoji'] as String? ?? '',
   );
 }
 
@@ -286,6 +329,29 @@ final class WsSessionEndedEvent extends WsEvent {
   const WsSessionEndedEvent();
 }
 
+/// A reaction was added/removed on a message in the subscribed channel — lets
+/// every viewer's chips update live.
+final class WsReactionEvent extends WsEvent {
+  const WsReactionEvent({
+    required this.op,
+    required this.messageId,
+    required this.emoji,
+    required this.userSub,
+  });
+  final String op; // 'add' | 'remove'
+  final String messageId;
+  final String emoji;
+  final String userSub;
+}
+
+/// An assistant turn failed (model/egress error) — surfaced as an error tile
+/// instead of being silently dropped.
+final class WsAssistantErrorEvent extends WsEvent {
+  const WsAssistantErrorEvent({required this.agentId, required this.error});
+  final String agentId;
+  final String error;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients.
@@ -313,6 +379,18 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'session_ended':
       return const WsSessionEndedEvent();
+    case 'reaction':
+      return WsReactionEvent(
+        op: json['op'] as String? ?? 'add',
+        messageId: json['messageId'] as String? ?? '',
+        emoji: json['emoji'] as String? ?? '',
+        userSub: json['userSub'] as String? ?? '',
+      );
+    case 'assistant_error':
+      return WsAssistantErrorEvent(
+        agentId: json['agentId'] as String? ?? '',
+        error: json['error'] as String? ?? 'assistant error',
+      );
     default:
       return null;
   }
@@ -348,6 +426,13 @@ final class ToolDecisionEntry extends TranscriptEntry {
   final String tool;
   final bool allow;
   final String? reason;
+}
+
+/// A failed assistant turn (from a `assistant_error` WS event) — rendered as an
+/// error tile so the failure is visible instead of silently dropped.
+final class ErrorEntry extends TranscriptEntry {
+  const ErrorEntry(this.text);
+  final String text;
 }
 
 final class SystemEntry extends TranscriptEntry {

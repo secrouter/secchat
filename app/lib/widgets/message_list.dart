@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../formatting.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'emoji_picker.dart';
 import 'empty_state.dart';
 import 'markdown_text.dart';
 
@@ -27,11 +28,16 @@ class MessageList extends StatefulWidget {
     required this.entries,
     required this.currentUserSub,
     this.typing,
+    this.onToggleReaction,
   });
 
   final List<TranscriptEntry> entries;
   final String currentUserSub;
   final TypingState? typing;
+
+  /// Toggle an emoji reaction on a message (null disables the affordance, e.g.
+  /// in tests that don't wire it).
+  final void Function(Message message, String emoji)? onToggleReaction;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -94,6 +100,7 @@ class _MessageListState extends State<MessageList> {
             return _TranscriptTile(
               entry: widget.entries[index],
               currentUserSub: widget.currentUserSub,
+              onToggleReaction: widget.onToggleReaction,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -104,38 +111,54 @@ class _MessageListState extends State<MessageList> {
 }
 
 class _TranscriptTile extends StatelessWidget {
-  const _TranscriptTile({required this.entry, required this.currentUserSub});
+  const _TranscriptTile({
+    required this.entry,
+    required this.currentUserSub,
+    this.onToggleReaction,
+  });
 
   final TranscriptEntry entry;
   final String currentUserSub;
+  final void Function(Message message, String emoji)? onToggleReaction;
 
   @override
   Widget build(BuildContext context) {
     return switch (entry) {
       MessageEntry(:final message) => _MessageBubble(
         message: message,
+        currentUserSub: currentUserSub,
         isOwn:
             message.authorType == AuthorType.user &&
             message.authorRef == currentUserSub,
+        onToggleReaction: onToggleReaction,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
         _DecisionTile(tool: tool, allow: allow, reason: reason),
       SystemEntry(:final text) => _SystemDivider(text: text),
+      ErrorEntry(:final text) => _ErrorTile(text: text),
     };
   }
 }
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.isOwn});
+  const _MessageBubble({
+    required this.message,
+    required this.isOwn,
+    required this.currentUserSub,
+    this.onToggleReaction,
+  });
 
   final Message message;
   final bool isOwn;
+  final String currentUserSub;
+  final void Function(Message message, String emoji)? onToggleReaction;
 
   @override
   Widget build(BuildContext context) {
     final isAgent = message.authorType == AuthorType.agent;
     final authorColor = isAgent || isOwn ? AppColors.accent : AppColors.text;
+    final promptedBy = message.promptedBy;
 
     // Your own messages sit on the right in a filled bubble (avatar on the
     // right); an agent keeps its left accent-bar treatment; everyone else is
@@ -168,6 +191,16 @@ class _MessageBubble extends StatelessWidget {
             ),
           ],
         ),
+        // Agent messages are attributed to the human whose prompt drove the turn
+        // (an agent acts as its owner's delegate).
+        if (isAgent && promptedBy != null && promptedBy.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(
+              'prompted by $promptedBy',
+              style: AppFonts.mono(fontSize: 10.5, color: AppColors.textFaint),
+            ),
+          ),
         const SizedBox(height: 2),
         message.isRedacted
             ? const Text(
@@ -186,6 +219,16 @@ class _MessageBubble extends StatelessWidget {
                   height: 1.4,
                 ),
               ),
+        if (!message.isRedacted && onToggleReaction != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: _Reactions(
+              reactions: message.reactions,
+              currentUserSub: currentUserSub,
+              alignEnd: isOwn,
+              onToggle: (emoji) => onToggleReaction!(message, emoji),
+            ),
+          ),
       ],
     );
 
@@ -363,6 +406,186 @@ class _DecisionTile extends StatelessWidget {
                 color: AppColors.textMuted,
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The reaction chips under a message plus an "add reaction" affordance.
+/// Reactions are grouped by emoji; a chip is highlighted when the current user
+/// is one of its reactors, and tapping it toggles that emoji.
+class _Reactions extends StatelessWidget {
+  const _Reactions({
+    required this.reactions,
+    required this.currentUserSub,
+    required this.alignEnd,
+    required this.onToggle,
+  });
+
+  final List<Reaction> reactions;
+  final String currentUserSub;
+  final bool alignEnd;
+  final void Function(String emoji) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final order = <String>[];
+    final byEmoji = <String, List<String>>{};
+    for (final reaction in reactions) {
+      byEmoji.putIfAbsent(reaction.emoji, () {
+        order.add(reaction.emoji);
+        return <String>[];
+      }).add(reaction.userSub);
+    }
+    return Wrap(
+      alignment: alignEnd ? WrapAlignment.end : WrapAlignment.start,
+      spacing: 4,
+      runSpacing: 4,
+      children: [
+        for (final emoji in order)
+          _ReactionChip(
+            emoji: emoji,
+            count: byEmoji[emoji]!.length,
+            mine: byEmoji[emoji]!.contains(currentUserSub),
+            onTap: () => onToggle(emoji),
+          ),
+        _AddReactionButton(onPick: onToggle),
+      ],
+    );
+  }
+}
+
+class _ReactionChip extends StatelessWidget {
+  const _ReactionChip({
+    required this.emoji,
+    required this.count,
+    required this.mine,
+    required this.onTap,
+  });
+
+  final String emoji;
+  final int count;
+  final bool mine;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: mine ? AppColors.accentSoft : AppColors.surfaceAlt,
+            border: Border.all(
+              color: mine ? AppColors.accentBorder : AppColors.border,
+            ),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(emoji, style: const TextStyle(fontSize: 13)),
+              const SizedBox(width: 4),
+              Text(
+                '$count',
+                style: AppFonts.mono(
+                  fontSize: 11.5,
+                  color: mine ? AppColors.accent : AppColors.textMuted,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AddReactionButton extends StatefulWidget {
+  const _AddReactionButton({required this.onPick});
+
+  final void Function(String emoji) onPick;
+
+  @override
+  State<_AddReactionButton> createState() => _AddReactionButtonState();
+}
+
+class _AddReactionButtonState extends State<_AddReactionButton> {
+  final _menu = MenuController();
+
+  @override
+  Widget build(BuildContext context) {
+    return MenuAnchor(
+      controller: _menu,
+      style: MenuStyle(
+        backgroundColor: const WidgetStatePropertyAll(AppColors.surfaceRaised),
+        side: const WidgetStatePropertyAll(BorderSide(color: AppColors.border)),
+        shape: WidgetStatePropertyAll(
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+        ),
+        padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+      ),
+      menuChildren: [
+        EmojiPickerBody(
+          onPick: (emoji) {
+            widget.onPick(emoji);
+            _menu.close();
+          },
+        ),
+      ],
+      builder: (context, controller, _) => InkWell(
+        onTap: () => controller.isOpen ? controller.close() : controller.open(),
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: const Icon(
+            Icons.add_reaction_outlined,
+            size: 14,
+            color: AppColors.textFaint,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A failed assistant turn (`assistant_error`), so a model/egress failure is
+/// visible instead of silently dropped.
+class _ErrorTile extends StatelessWidget {
+  const _ErrorTile({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: const BoxDecoration(
+        color: AppColors.badBg,
+        border: Border(left: BorderSide(color: AppColors.badBorder, width: 2)),
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(AppRadius.sm)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.error_outline, size: 14, color: AppColors.bad),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: AppFonts.mono(fontSize: 12.5, color: AppColors.bad),
+            ),
+          ),
         ],
       ),
     );

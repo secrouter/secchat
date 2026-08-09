@@ -215,6 +215,12 @@ export class MemoryStore implements Store, SessionStore {
     return message;
   }
 
+  /** One message by id (metadata only — no content), or null. Same row objects the channel arrays
+   * hold, so it reflects redactions immediately. */
+  async getMessage(id: Id): Promise<Message | null> {
+    return this.#messagesById.get(id) ?? null;
+  }
+
   /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. */
   async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
     const messages = this.#messagesByChannel.get(channelId) ?? [];
@@ -255,6 +261,17 @@ export class MemoryStore implements Store, SessionStore {
 
   async listReactions(messageId: Id): Promise<Reaction[]> {
     return [...(this.#reactions.get(messageId) ?? [])];
+  }
+
+  /** Every reaction on any message in `channelId`, in message-then-append order. */
+  async listReactionsForChannel(channelId: Id): Promise<Reaction[]> {
+    const messages = this.#messagesByChannel.get(channelId) ?? [];
+    const out: Reaction[] = [];
+    for (const message of messages) {
+      const reactions = this.#reactions.get(message.id);
+      if (reactions) out.push(...reactions);
+    }
+    return out;
   }
 
   // ── Per-user read markers → unread counts ─────────────────────────────────────────────────

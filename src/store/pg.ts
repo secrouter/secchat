@@ -552,6 +552,17 @@ export class PgStore implements Store, SessionStore {
     }
   }
 
+  /** One message by id (metadata only — no content), or null. */
+  async getMessage(id: Id): Promise<Message | null> {
+    const { rows } = await this.#pool.query<MessageRow>(
+      `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
+              content_sha256, prev_hash, hash, created_at, redacted_at
+       FROM messages WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? rowToMessage(rows[0]) : null;
+  }
+
   /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. */
   async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
@@ -606,6 +617,18 @@ export class PgStore implements Store, SessionStore {
     const { rows } = await this.#pool.query<ReactionRow>(
       `SELECT message_id, user_sub, emoji, at FROM reactions WHERE message_id = $1 ORDER BY at`,
       [messageId],
+    );
+    return rows.map(rowToReaction);
+  }
+
+  /** Every reaction on any message in `channelId`, joined through messages, in message-seq order. */
+  async listReactionsForChannel(channelId: Id): Promise<Reaction[]> {
+    const { rows } = await this.#pool.query<ReactionRow>(
+      `SELECT r.message_id, r.user_sub, r.emoji, r.at
+       FROM reactions r JOIN messages m ON m.id = r.message_id
+       WHERE m.channel_id = $1
+       ORDER BY m.seq, r.at`,
+      [channelId],
     );
     return rows.map(rowToReaction);
   }

@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -287,7 +287,16 @@ function buildRouter(
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    sendJson(res, 200, await store.listMessages(channelId));
+    const messages = await store.listMessages(channelId);
+    // Attach each message's reactions in ONE read (not N per-message calls) so the client renders
+    // reaction chips straight from history without a follow-up request per message.
+    const byMessage = new Map<string, Reaction[]>();
+    for (const reaction of await store.listReactionsForChannel(channelId)) {
+      const list = byMessage.get(reaction.messageId);
+      if (list) list.push(reaction);
+      else byMessage.set(reaction.messageId, [reaction]);
+    }
+    sendJson(res, 200, messages.map((m) => ({ ...m, reactions: byMessage.get(m.id) ?? [] })));
   });
 
   router.add("POST", "/channels/:id/messages", async ({ req, res, params, principal }) => {
@@ -326,21 +335,42 @@ function buildRouter(
   });
 
   // ── Reactions: a mutable per-(message,user,emoji) social signal — never chained (see Store).
-  // v1 only requires the caller to be authenticated; it does not check that they can see the
-  // message's channel (TODO below), unlike every other route in this file.
+  // Access-controlled by the reacted-to message's channel: you must be a member of the channel the
+  // message lives in (resolved via getMessage). Add/remove broadcast a `reaction` event so peers
+  // update live. A missing message is treated as forbidden (don't leak which ids exist).
   router.add("POST", "/messages/:id/reactions", async ({ req, res, params, principal }) => {
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
     const body = (await readJsonBody(req)) as { emoji?: string };
-    // TODO: verify the caller can see the message's channel
-    await store.addReaction(params.id!, principal.sub, body.emoji ?? "");
+    const emoji = body.emoji ?? "";
+    await store.addReaction(messageId, principal.sub, emoji);
+    broadcast?.(message.channelId, { type: "reaction", op: "add", messageId, userSub: principal.sub, emoji });
     sendJson(res, 201, { ok: true });
   });
 
   router.add("DELETE", "/messages/:id/reactions/:emoji", async ({ res, params, principal }) => {
-    await store.removeReaction(params.id!, principal.sub, params.emoji!); // router already decoded the segment
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const emoji = params.emoji!; // router already decoded the segment
+    await store.removeReaction(messageId, principal.sub, emoji);
+    broadcast?.(message.channelId, { type: "reaction", op: "remove", messageId, userSub: principal.sub, emoji });
     sendJson(res, 200, { ok: true });
   });
 
-  router.add("GET", "/messages/:id/reactions", async ({ res, params }) => {
+  router.add("GET", "/messages/:id/reactions", async ({ res, params, principal }) => {
+    const message = await store.getMessage(params.id!);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
     sendJson(res, 200, await store.listReactions(params.id!));
   });
 
