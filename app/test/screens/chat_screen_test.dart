@@ -4,6 +4,7 @@ import 'package:secchat_app/commands.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/screens/chat.dart';
 import 'package:secchat_app/widgets/composer.dart';
+import 'package:secchat_app/widgets/marking_banner.dart';
 
 import '../fakes/fake_api_client.dart';
 
@@ -538,6 +539,11 @@ void main() {
   });
 
   testWidgets('replies fold into a thread: count shows, opening reveals the reply, replying posts with parentId', (tester) async {
+    // A taller viewport so the thread's (lazily-built) reply is within the build
+    // range once the classification banners frame the pane.
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
     final fake = FakeApiClient(
       me: _principal,
       channels: [_channels[0]],
@@ -784,5 +790,81 @@ void main() {
     expect(find.text('Original'), findsOneWidget);
     expect(find.text('Revision 2'), findsOneWidget);
     expect(find.textContaining('first text'), findsOneWidget);
+  });
+
+  testWidgets('a MARKED channel frames the view with banners and locks the composer to its level', (tester) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [Channel(id: 'c1', kind: ChannelKind.human, name: 'cui-room', cuiMarking: 'CUI')],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'dev.alice',
+            authorType: AuthorType.user,
+            content: 'sensitive',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+            marking: 'CUI',
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // Top + bottom classification banners both read CUI.
+    expect(find.widgetWithText(MarkingBanner, 'CUI'), findsNWidgets(2));
+
+    // Posting takes the channel level (the channel is the portion), whatever the composer shows.
+    await tester.enterText(find.byType(TextField), 'hello');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+    expect(fake.postMessageCalls.single.marking, 'CUI');
+  });
+
+  testWidgets('an UNMARKED channel shows per-message marking chips and marking it calls the API', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [Channel(id: 'c1', kind: ChannelKind.human, name: 'general')],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: 'a proprietary note',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+            marking: 'PROPRIETARY',
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // The message carries its own classification chip (channel is unmarked).
+    expect(find.widgetWithText(MarkingChip, 'PROPRIETARY'), findsOneWidget);
+    // The banner reflects the highest marking present (PROPRIETARY > default UNCLASSIFIED).
+    expect(find.widgetWithText(MarkingBanner, 'PROPRIETARY'), findsNWidgets(2));
+
+    // Mark the channel via the header control → the classification picker → pick CUI.
+    await tester.tap(find.text('MARK…'));
+    await tester.pumpAndSettle();
+    expect(find.text('Channel classification'), findsOneWidget);
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('CUI')));
+    await tester.pumpAndSettle();
+
+    expect(fake.setMarkingCalls.single.channelId, 'c1');
+    expect(fake.setMarkingCalls.single.marking, 'CUI');
   });
 }

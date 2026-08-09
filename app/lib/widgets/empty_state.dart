@@ -13,8 +13,10 @@ class EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Scrollable so it centers when there's room but never overflows a short
+    // pane (e.g. a narrow window once the classification banners are present).
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,

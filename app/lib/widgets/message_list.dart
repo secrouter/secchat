@@ -7,6 +7,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'empty_state.dart';
+import 'marking_banner.dart';
 import 'markdown_text.dart';
 
 /// The assistant's in-flight response for a channel: accumulated
@@ -35,6 +36,7 @@ class MessageList extends StatefulWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.showMarking = false,
   });
 
   final List<TranscriptEntry> entries;
@@ -67,6 +69,11 @@ class MessageList extends StatefulWidget {
   /// View a message's edit history (null disables it). Offered on any edited
   /// message, to anyone who can see the message.
   final void Function(Message message)? onViewHistory;
+
+  /// Render a per-message classification chip on each bubble — set only when the
+  /// channel is unmarked (per-message marking); a marked channel's banner
+  /// carries the level for everything, so the chip would be redundant.
+  final bool showMarking;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -136,6 +143,7 @@ class _MessageListState extends State<MessageList> {
               onRedact: widget.onRedact,
               onEdit: widget.onEdit,
               onViewHistory: widget.onViewHistory,
+              showMarking: widget.showMarking,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -156,6 +164,7 @@ class _TranscriptTile extends StatelessWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.showMarking = false,
   });
 
   final TranscriptEntry entry;
@@ -167,6 +176,7 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onRedact;
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
+  final bool showMarking;
 
   @override
   Widget build(BuildContext context) {
@@ -184,6 +194,7 @@ class _TranscriptTile extends StatelessWidget {
         onRedact: onRedact,
         onEdit: onEdit,
         onViewHistory: onViewHistory,
+        showMarking: showMarking,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
@@ -206,6 +217,7 @@ class _MessageBubble extends StatelessWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.showMarking = false,
   });
 
   final Message message;
@@ -218,6 +230,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onRedact;
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
+  final bool showMarking;
 
   // Redaction is offered to the message's author or an admin, on live messages.
   bool get _canRedact =>
@@ -273,6 +286,11 @@ class _MessageBubble extends StatelessWidget {
               formatClockTime(message.createdAt),
               style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
             ),
+            // Per-message classification chip (only when the channel is unmarked).
+            if (showMarking && !message.isRedacted) ...[
+              const SizedBox(width: 6),
+              MarkingChip(level: message.marking),
+            ],
             // "(edited)" marker — tapping it opens the version history when available.
             if (message.isEdited && !message.isRedacted) ...[
               const SizedBox(width: 6),

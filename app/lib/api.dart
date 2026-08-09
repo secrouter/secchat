@@ -30,7 +30,13 @@ abstract class ApiClient {
 
   Future<List<Channel>> getChannels();
 
-  Future<Channel> createChannel(String name);
+  Future<Channel> createChannel(String name, {String? marking});
+
+  /// Sets (or changes) a channel's classification level (`POST
+  /// /channels/:id/marking`). Any member may set or raise it; only an admin may
+  /// downgrade. Returns the updated channel; broadcasts a `channel_marking`
+  /// event to every viewer.
+  Future<Channel> setChannelMarking(String channelId, String marking);
 
   /// The user directory (`GET /users`): real users seen via SSO, with their
   /// group claims. Powers the DM picker + roster.
@@ -44,8 +50,9 @@ abstract class ApiClient {
   Future<List<Message>> getMessages(String channelId);
 
   /// Posts a message to a channel. A non-null [parentId] makes it a reply in
-  /// that message's thread.
-  Future<Message> postMessage(String channelId, String content, {String? parentId});
+  /// that message's thread. [marking] is the requested per-message
+  /// classification (ignored server-side when the channel is itself marked).
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking});
 
   /// Feeds free-text input to a running coding-agent *session* (as opposed
   /// to [postMessage], which posts a chat message to a *channel*). A coding
@@ -234,8 +241,16 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
-  Future<Channel> createChannel(String name) async => Channel.fromJson(
-    await _post('/channels', {'name': name}) as Map<String, dynamic>,
+  Future<Channel> createChannel(String name, {String? marking}) async => Channel.fromJson(
+    await _post('/channels', {
+      'name': name,
+      if (marking != null) 'marking': marking,
+    }) as Map<String, dynamic>,
+  );
+
+  @override
+  Future<Channel> setChannelMarking(String channelId, String marking) async => Channel.fromJson(
+    await _post('/channels/$channelId/marking', {'marking': marking}) as Map<String, dynamic>,
   );
 
   @override
@@ -258,11 +273,12 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
-  Future<Message> postMessage(String channelId, String content, {String? parentId}) async =>
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking}) async =>
       Message.fromJson(
         await _post('/channels/$channelId/messages', {
           'content': content,
           if (parentId != null) 'parentId': parentId,
+          if (marking != null) 'marking': marking,
         }) as Map<String, dynamic>,
       );
 

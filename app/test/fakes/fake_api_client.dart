@@ -26,8 +26,14 @@ class FakeApiClient implements ApiClient {
   final Map<String, List<Message>> _messagesByChannel;
   final Map<String, Channel> _dmByPeer = {};
 
-  /// Every `postMessage` call, in order (`parentId` set for a threaded reply).
-  final List<({String channelId, String content, String? parentId})> postMessageCalls = [];
+  /// Every `postMessage` call, in order (`parentId` set for a threaded reply,
+  /// `marking` set when a per-message classification was chosen).
+  final List<({String channelId, String content, String? parentId, String? marking})> postMessageCalls = [];
+
+  /// Every `createChannel` call's requested marking (null when unmarked), and
+  /// every `setChannelMarking` call, in order.
+  final List<String?> createChannelMarkings = [];
+  final List<({String channelId, String marking})> setMarkingCalls = [];
 
   /// Every `sendInput` call, in order, as `(sessionId, text)`.
   final List<({String sessionId, String text})> sendInputCalls = [];
@@ -69,15 +75,27 @@ class FakeApiClient implements ApiClient {
   }
 
   @override
-  Future<Channel> createChannel(String name) async {
+  Future<Channel> createChannel(String name, {String? marking}) async {
     _maybeThrow('createChannel');
+    createChannelMarkings.add(marking);
     final channel = Channel(
       id: 'ch-${channels.length + 1}',
       kind: ChannelKind.human,
       name: name,
+      cuiMarking: marking,
     );
     channels = [...channels, channel];
     return channel;
+  }
+
+  @override
+  Future<Channel> setChannelMarking(String channelId, String marking) async {
+    _maybeThrow('setChannelMarking');
+    setMarkingCalls.add((channelId: channelId, marking: marking));
+    channels = [
+      for (final c in channels) c.id == channelId ? c.withMarking(marking) : c,
+    ];
+    return channels.firstWhere((c) => c.id == channelId);
   }
 
   @override
@@ -88,9 +106,9 @@ class FakeApiClient implements ApiClient {
   }
 
   @override
-  Future<Message> postMessage(String channelId, String content, {String? parentId}) async {
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking}) async {
     _maybeThrow('postMessage');
-    postMessageCalls.add((channelId: channelId, content: content, parentId: parentId));
+    postMessageCalls.add((channelId: channelId, content: content, parentId: parentId, marking: marking));
     final existing = _messagesByChannel[channelId] ?? const [];
     final message =
         postMessageResponder?.call(channelId, content) ??
@@ -102,6 +120,7 @@ class FakeApiClient implements ApiClient {
           content: content,
           createdAt: DateTime(2026, 1, 1),
           parentId: parentId,
+          marking: marking ?? 'UNCLASSIFIED',
         );
     _messagesByChannel[channelId] = [...existing, message];
     return message;

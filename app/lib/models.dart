@@ -6,6 +6,8 @@
 /// deliberately strict about the fields each screen actually depends on.
 library;
 
+import 'marking.dart';
+
 /// The three channel kinds the backend returns from `GET /channels`.
 ///
 /// Note this does *not* distinguish an "assistant" agent channel from a
@@ -59,10 +61,18 @@ enum AgentKind {
 
 /// `GET /me` response -- the signed-in principal.
 class Principal {
-  const Principal({required this.sub, required this.groups});
+  const Principal({
+    required this.sub,
+    required this.groups,
+    this.marking = MarkingPolicy.fallback,
+  });
 
   final String sub;
   final List<String> groups;
+
+  /// The deployment's classification-marking ladder (from `GET /me`) — drives
+  /// the banners, the composer's marking picker, and local rank comparisons.
+  final MarkingPolicy marking;
 
   bool get isAdmin => groups.contains('secchat-admins');
 
@@ -71,6 +81,9 @@ class Principal {
     groups: (json['groups'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => e.toString())
         .toList(),
+    marking: json['marking'] is Map<String, dynamic>
+        ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
+        : MarkingPolicy.fallback,
   );
 }
 
@@ -85,12 +98,28 @@ class Channel {
     required this.kind,
     required this.name,
     this.members = const [],
+    this.cuiMarking,
   });
 
   final String id;
   final ChannelKind kind;
   final String name;
   final List<String> members;
+
+  /// The channel's classification level, when marked. When set, the channel IS
+  /// the portion — every message inherits it — and the composer locks its
+  /// marking picker to this level. Null ⇒ unmarked (per-message marking).
+  final String? cuiMarking;
+
+  bool get isMarked => cuiMarking != null && cuiMarking!.isNotEmpty;
+
+  Channel withMarking(String? marking) => Channel(
+    id: id,
+    kind: kind,
+    name: name,
+    members: members,
+    cuiMarking: marking,
+  );
 
   /// For a DM, the participant sub that isn't [me] (the person you're talking
   /// to); null for a non-DM or a malformed/self-only member list.
@@ -108,6 +137,7 @@ class Channel {
     members: (json['members'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => e.toString())
         .toList(),
+    cuiMarking: json['cuiMarking'] as String?,
   );
 }
 
@@ -154,6 +184,7 @@ class Message {
     this.promptedBy,
     this.parentId,
     this.editedAt,
+    this.marking = 'UNCLASSIFIED',
     this.reactions = const [],
   });
 
@@ -163,6 +194,11 @@ class Message {
   final AuthorType authorType;
   final String? content;
   final DateTime createdAt;
+
+  /// The message's effective classification level (server-stamped, chain-bound).
+  /// Shown as a per-message chip when the channel is unmarked; in a marked
+  /// channel it equals the channel level and the banner carries it instead.
+  final String marking;
 
   /// For an agent message, the human whose prompt triggered this turn — shown
   /// as an attribution line (decision #2: an agent acts as its owner's delegate).
@@ -192,6 +228,7 @@ class Message {
     promptedBy: promptedBy,
     parentId: parentId,
     editedAt: editedAt,
+    marking: marking,
     reactions: reactions,
   );
 
@@ -207,6 +244,7 @@ class Message {
     promptedBy: promptedBy,
     parentId: parentId,
     editedAt: editedAt,
+    marking: marking,
     reactions: reactions,
   );
 
@@ -222,6 +260,7 @@ class Message {
     promptedBy: promptedBy,
     parentId: parentId,
     editedAt: editedAt,
+    marking: marking,
     reactions: reactions,
   );
 
@@ -237,6 +276,7 @@ class Message {
     promptedBy: json['promptedBy'] as String?,
     parentId: json['parentId'] as String?,
     editedAt: DateTime.tryParse(json['editedAt'] as String? ?? ''),
+    marking: json['marking'] as String? ?? 'UNCLASSIFIED',
     reactions: (json['reactions'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => Reaction.fromJson(e as Map<String, dynamic>))
         .toList(),
@@ -464,6 +504,19 @@ final class WsMessageEditEvent extends WsEvent {
   final String by;
 }
 
+/// A channel's classification level was set/changed — every viewer updates the
+/// banner (and the composer's marking lock) live.
+final class WsChannelMarkingEvent extends WsEvent {
+  const WsChannelMarkingEvent({
+    required this.channelId,
+    required this.marking,
+    required this.by,
+  });
+  final String channelId;
+  final String marking;
+  final String by;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients.
@@ -515,6 +568,12 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
         editedAt:
             DateTime.tryParse(json['editedAt'] as String? ?? '') ??
             DateTime.now(),
+        by: json['by'] as String? ?? '',
+      );
+    case 'channel_marking':
+      return WsChannelMarkingEvent(
+        channelId: json['channelId'] as String? ?? '',
+        marking: json['marking'] as String? ?? '',
         by: json['by'] as String? ?? '',
       );
     default:

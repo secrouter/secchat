@@ -10,7 +10,7 @@ Future<List<String>> _pumpComposer(WidgetTester tester) async {
   await tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
-        body: MessageComposer(onSend: (text) async => sent.add(text)),
+        body: MessageComposer(onSend: (text, marking) async => sent.add(text)),
       ),
     ),
   );

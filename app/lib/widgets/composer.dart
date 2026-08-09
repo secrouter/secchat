@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../commands.dart';
+import '../marking.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'markdown_text.dart';
@@ -18,15 +19,34 @@ import 'markdown_text.dart';
 ///    newline like an ordinary editor (Send is then the only way to submit),
 ///    until Ctrl/Cmd+Enter toggles it back off.
 class MessageComposer extends StatefulWidget {
-  const MessageComposer({super.key, required this.onSend, this.enabled = true});
+  const MessageComposer({
+    super.key,
+    required this.onSend,
+    this.enabled = true,
+    this.markingLevels = const [],
+    this.channelMarking,
+    this.initialMarking = 'UNCLASSIFIED',
+  });
 
   /// Invoked with the trimmed message text. May throw -- the composer
   /// surfaces that as a [SnackBar] and leaves the text in place so the user
   /// can retry. Slash commands are passed through verbatim; the chat screen
   /// interprets them (it has the channel/session context).
-  final Future<void> Function(String text) onSend;
+  final Future<void> Function(String text, String marking) onSend;
 
   final bool enabled;
+
+  /// The deployment's marking ladder (for the per-message classification picker).
+  /// Empty ⇒ no picker is shown.
+  final List<String> markingLevels;
+
+  /// When non-null, the channel is itself marked at this level: the picker is
+  /// LOCKED to it (the channel is the portion — every message takes this level).
+  final String? channelMarking;
+
+  /// The per-message level pre-selected when the channel is unmarked (the policy
+  /// default — fail-safe).
+  final String initialMarking;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -40,11 +60,29 @@ class _MessageComposerState extends State<MessageComposer> {
   bool _editMode = false;
   bool _showPreview = false;
 
+  /// The chosen per-message marking (used only when the channel is unmarked).
+  late String _marking = widget.initialMarking;
+
+  /// The classification actually sent: the channel's level when it's marked
+  /// (the channel is the portion), else the per-message choice.
+  String get _effectiveMarking => widget.channelMarking ?? _marking;
+
   @override
   void initState() {
     super.initState();
     _fieldFocus = FocusNode(onKeyEvent: _onKeyEvent);
     _controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant MessageComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reset the per-message choice when the channel (its marked-ness or default)
+    // changes, so a prior channel's selection never leaks across a switch.
+    if (oldWidget.channelMarking != widget.channelMarking ||
+        oldWidget.initialMarking != widget.initialMarking) {
+      _marking = widget.initialMarking;
+    }
   }
 
   @override
@@ -94,7 +132,7 @@ class _MessageComposerState extends State<MessageComposer> {
     setState(() => _sending = true);
     _controller.clear();
     try {
-      await widget.onSend(text);
+      await widget.onSend(text, _effectiveMarking);
     } catch (error) {
       if (!mounted) return;
       _controller.text = text;
@@ -241,6 +279,10 @@ class _MessageComposerState extends State<MessageComposer> {
             ],
           ),
         ),
+        if (widget.markingLevels.isNotEmpty) ...[
+          _markingSelector(),
+          const SizedBox(width: 6),
+        ],
         _toggleButton(
           Icons.visibility_outlined,
           'Toggle preview',
@@ -250,6 +292,65 @@ class _MessageComposerState extends State<MessageComposer> {
         const SizedBox(width: 6),
         _keyboardHint(),
       ],
+    );
+  }
+
+  /// The per-message classification control. When the channel is marked it's a
+  /// locked chip at the channel level (the channel is the portion); otherwise a
+  /// menu over the ladder, defaulting to the fail-safe floor.
+  Widget _markingSelector() {
+    final level = _effectiveMarking;
+    final style = markingStyle(level);
+    final chip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(color: style.bg, borderRadius: BorderRadius.circular(4)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            level.toUpperCase(),
+            style: AppFonts.mono(fontSize: 10.5, color: style.fg).copyWith(fontWeight: FontWeight.w700),
+          ),
+          Icon(
+            widget.channelMarking != null ? Icons.lock_outline : Icons.arrow_drop_down,
+            size: 13,
+            color: style.fg,
+          ),
+        ],
+      ),
+    );
+    if (widget.channelMarking != null) {
+      return Tooltip(message: 'Channel is marked $level — every message inherits it', child: chip);
+    }
+    return PopupMenuButton<String>(
+      tooltip: 'Message classification',
+      padding: EdgeInsets.zero,
+      color: AppColors.surfaceRaised,
+      position: PopupMenuPosition.under,
+      onSelected: (m) => setState(() => _marking = m),
+      itemBuilder: (_) => [
+        for (final l in widget.markingLevels)
+          PopupMenuItem<String>(
+            value: l,
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(color: markingStyle(l).bg, borderRadius: BorderRadius.circular(3)),
+                  child: Text(
+                    l.toUpperCase(),
+                    style: AppFonts.mono(fontSize: 10, color: markingStyle(l).fg).copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                if (l == _marking) ...[
+                  const Spacer(),
+                  const Icon(Icons.check, size: 15, color: AppColors.accent),
+                ],
+              ],
+            ),
+          ),
+      ],
+      child: chip,
     );
   }
 

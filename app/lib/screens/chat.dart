@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../commands.dart';
 import '../formatting.dart';
+import '../marking.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
@@ -14,6 +15,8 @@ import '../widgets/composer.dart';
 import '../widgets/edit_dialog.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/history_dialog.dart';
+import '../widgets/marking_banner.dart';
+import '../widgets/marking_picker.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
@@ -292,6 +295,8 @@ class _ChatScreenState extends State<ChatScreen> {
           _applyRedaction(channelId, messageId);
         case WsMessageEditEvent(:final messageId, :final content, :final editedAt):
           _applyEdit(channelId, messageId, content, editedAt);
+        case WsChannelMarkingEvent(:final marking):
+          _applyChannelMarking(channelId, marking);
       }
     });
   }
@@ -378,6 +383,51 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Replaces the channel's marking in [_channels] (and [_selected]) — used by
+  /// the live `channel_marking` event and the optimistic set. Must be inside setState.
+  void _applyChannelMarking(String channelId, String marking) {
+    _channels = [
+      for (final c in _channels) c.id == channelId ? c.withMarking(marking) : c,
+    ];
+    if (_selected?.id == channelId) _selected = _selected!.withMarking(marking);
+  }
+
+  /// Sets/changes the selected channel's classification level via a picker. The
+  /// server enforces the set/raise-vs-downgrade authz; a refusal surfaces an error.
+  Future<void> _markChannel(Channel channel) async {
+    final policy = widget.principal.marking;
+    final next = await showMarkingPicker(
+      context,
+      levels: policy.levels,
+      current: channel.cuiMarking,
+      // Only an admin may pick a level below the channel's current one (server-enforced too).
+      allowDowngrade: widget.principal.isAdmin,
+      policy: policy,
+    );
+    if (next == null || !mounted || next == channel.cuiMarking) return;
+    try {
+      final updated = await widget.api.setChannelMarking(channel.id, next);
+      if (!mounted) return;
+      setState(() => _applyChannelMarking(channel.id, updated.cuiMarking ?? next));
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
+  /// The classification to show in the channel banner: a marked channel's level,
+  /// else the HIGHEST marking present among visible messages, else the default.
+  String _bannerMarking(Channel channel, List<TranscriptEntry> entries) {
+    if (channel.isMarked) return channel.cuiMarking!;
+    final policy = widget.principal.marking;
+    var best = policy.defaultLevel;
+    for (final e in entries) {
+      if (e is MessageEntry && policy.rank(e.message.marking) > policy.rank(best)) {
+        best = e.message.marking;
+      }
+    }
+    return best;
+  }
+
   /// Applies a reaction add/remove to the matching message in the transcript.
   /// Idempotent — adding a reaction already present (or removing an absent one)
   /// is a no-op — so a live event echoing an optimistic local toggle is safe.
@@ -461,22 +511,22 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _sessionIdByChannel[channelId]
           : null;
 
-  Future<void> _handleSend(String text) async {
+  Future<void> _handleSend(String text, String marking) async {
     final channel = _selected;
     if (channel == null) return;
     // A leading "/<known-command>" is a slash command; everything else
     // (including a "/" that doesn't spell a command) is ordinary text.
     final command = parseSlashCommand(text);
     if (command != null) {
-      await _runCommand(channel, command);
+      await _runCommand(channel, command, marking);
       return;
     }
-    await _sendPlain(channel, text);
+    await _sendPlain(channel, text, marking);
   }
 
   /// Sends ordinary (non-command) text: to the coding-agent session when this
-  /// channel has one, otherwise as a chat message.
-  Future<void> _sendPlain(Channel channel, String text) async {
+  /// channel has one, otherwise as a chat message at classification [marking].
+  Future<void> _sendPlain(Channel channel, String text, String marking) async {
     final sessionId = _codingSessionIdFor(channel.id);
     if (sessionId != null) {
       // A coding agent is driven by its runner, not chat history: input
@@ -487,21 +537,21 @@ class _ChatScreenState extends State<ChatScreen> {
       // would simply vanish from the transcript.
       await widget.api.sendInput(sessionId, text);
       if (!mounted) return;
-      setState(() => _append(channel.id, MessageEntry(_localEcho(text))));
+      setState(() => _append(channel.id, MessageEntry(_localEcho(text, marking))));
       return;
     }
     // Append straight from the POST response rather than waiting for a WS
     // echo (some backends don't echo the sender's own message back to
     // them); `_appendMessageUnlessDuplicate` dedupes by id in case the
     // socket *does* also deliver it.
-    final message = await widget.api.postMessage(channel.id, text);
+    final message = await widget.api.postMessage(channel.id, text, marking: marking);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
   }
 
-  /// Posts a threaded reply to [parentId] and appends it locally.
-  Future<void> _sendReply(Channel channel, String parentId, String text) async {
-    final message = await widget.api.postMessage(channel.id, text, parentId: parentId);
+  /// Posts a threaded reply to [parentId] at classification [marking].
+  Future<void> _sendReply(Channel channel, String parentId, String text, String marking) async {
+    final message = await widget.api.postMessage(channel.id, text, parentId: parentId, marking: marking);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
   }
@@ -524,13 +574,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// where such a session exists (there is nothing to pass through to
   /// otherwise -- the "technical issue" the feature degrades on). `/shrug`
   /// appends the shrug and sends via the normal path; `/help` opens a dialog.
-  Future<void> _runCommand(Channel channel, ParsedCommand command) async {
+  Future<void> _runCommand(Channel channel, ParsedCommand command, String marking) async {
     switch (command.command.name) {
       case 'help':
         _showCommandHelp();
       case 'shrug':
         final base = command.args.trim();
-        await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug');
+        await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug', marking);
       case 'pi':
         final input = command.args;
         if (input.trim().isEmpty) {
@@ -633,13 +683,14 @@ class _ChatScreenState extends State<ChatScreen> {
   /// message ids (server ids are never expected to collide with it), so it
   /// can't be mistaken for a duplicate by `_appendMessageUnlessDuplicate`
   /// elsewhere.
-  Message _localEcho(String text) => Message(
+  Message _localEcho(String text, [String marking = 'UNCLASSIFIED']) => Message(
     id: 'local-${_localEchoSeq++}',
     seq: 0,
     authorRef: widget.principal.sub,
     authorType: AuthorType.user,
     content: text,
     createdAt: DateTime.now(),
+    marking: marking,
   );
 
   Future<void> _handleNewChannel() async {
@@ -800,20 +851,34 @@ class _ChatScreenState extends State<ChatScreen> {
         ? null
         : _messageById(selected.id, _threadParentId!);
 
+    final policy = widget.principal.marking;
+    final entries = _transcripts[selected.id] ?? const <TranscriptEntry>[];
+    final bannerLevel = _bannerMarking(selected, entries);
+
     return Column(
       children: [
         _ChannelHeader(
           channel: selected,
           title: _channelTitle(selected),
           agentKind: _agentKindByChannel[selected.id],
+          onMarkChannel: () => _markChannel(selected),
         ),
+        // Classification banners frame the whole channel view, top and bottom
+        // (DoDI 5200.48 marking practice).
+        MarkingBanner(level: bannerLevel),
         if (codingStrip != null && threadParent == null) codingStrip,
         if (threadParent != null)
           Expanded(child: _buildThread(selected, threadParent))
         else ...[
           Expanded(child: _buildTranscript(selected)),
-          MessageComposer(onSend: _handleSend),
+          MessageComposer(
+            onSend: _handleSend,
+            markingLevels: policy.levels,
+            channelMarking: selected.isMarked ? selected.cuiMarking : null,
+            initialMarking: policy.defaultLevel,
+          ),
         ],
+        MarkingBanner(level: bannerLevel),
       ],
     );
   }
@@ -857,6 +922,8 @@ class _ChatScreenState extends State<ChatScreen> {
       onRedact: canThread ? _redactMessage : null,
       onEdit: canThread ? _editMessage : null,
       onViewHistory: canThread ? _openHistory : null,
+      // Per-message marking chips only when the channel isn't itself the portion.
+      showMarking: !selected.isMarked,
     );
   }
 
@@ -882,10 +949,16 @@ class _ChatScreenState extends State<ChatScreen> {
             onRedact: _redactMessage,
             onEdit: _editMessage,
             onViewHistory: _openHistory,
+            showMarking: !channel.isMarked,
             // one level deep — no nested thread affordance inside a thread
           ),
         ),
-        MessageComposer(onSend: (text) => _sendReply(channel, parent.id, text)),
+        MessageComposer(
+          onSend: (text, marking) => _sendReply(channel, parent.id, text, marking),
+          markingLevels: widget.principal.marking.levels,
+          channelMarking: channel.isMarked ? channel.cuiMarking : null,
+          initialMarking: widget.principal.marking.defaultLevel,
+        ),
       ],
     );
   }
@@ -941,11 +1014,16 @@ class _ChannelHeader extends StatelessWidget {
     required this.channel,
     required this.title,
     required this.agentKind,
+    this.onMarkChannel,
   });
 
   final Channel channel;
   final String title;
   final AgentKind? agentKind;
+
+  /// Opens the channel-classification picker (set/raise for members, downgrade
+  /// for admins). Null disables the control.
+  final VoidCallback? onMarkChannel;
 
   @override
   Widget build(BuildContext context) {
@@ -977,11 +1055,56 @@ class _ChannelHeader extends StatelessWidget {
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
           const Spacer(),
+          if (onMarkChannel != null) ...[
+            _ChannelMarkingButton(channel: channel, onTap: onMarkChannel!),
+            const SizedBox(width: 10),
+          ],
           Text(
             shortId(channel.id),
             style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The channel-classification control in the header: shows the channel's level
+/// (or "MARK…" when unmarked) and opens the picker on tap.
+class _ChannelMarkingButton extends StatelessWidget {
+  const _ChannelMarkingButton({required this.channel, required this.onTap});
+
+  final Channel channel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final marked = channel.isMarked;
+    final style = marked ? markingStyle(channel.cuiMarking!) : (bg: AppColors.surfaceRaised, fg: AppColors.textMuted);
+    return Tooltip(
+      message: marked ? 'Channel classification — tap to change' : 'Mark this channel',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+          decoration: BoxDecoration(
+            color: style.bg,
+            borderRadius: BorderRadius.circular(4),
+            border: marked ? null : Border.all(color: AppColors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.shield_outlined, size: 13, color: style.fg),
+              const SizedBox(width: 5),
+              Text(
+                marked ? channel.cuiMarking!.toUpperCase() : 'MARK…',
+                style: AppFonts.mono(fontSize: 10.5, color: style.fg).copyWith(fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
