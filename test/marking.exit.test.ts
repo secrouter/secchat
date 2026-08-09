@@ -37,8 +37,11 @@ const admin = {
   renderConsole: () => "",
 };
 
-// A deployment ladder with UNCLASSIFIED as the fail-safe default.
-const marking = makeMarkingPolicy(["UNCLASSIFIED", "PROPRIETARY", "CUI", "CLASSIFIED"], "UNCLASSIFIED");
+// A deployment ladder with UNCLASSIFIED as the fail-safe default + two CUI categories (caveats).
+const marking = makeMarkingPolicy(["UNCLASSIFIED", "PROPRIETARY", "CUI", "CLASSIFIED"], "UNCLASSIFIED", [
+  { kind: "category", level: "CUI", code: "SP-PRVCY", name: "Privacy" },
+  { kind: "category", level: "CUI", code: "SP-EXPT", name: "Export Controlled" },
+]);
 
 const h = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
 
@@ -75,13 +78,19 @@ const post = (base: string, token: string, channelId: string, body: unknown) =>
 const setMarking = (base: string, token: string, channelId: string, mk: unknown) =>
   fetch(`${base}/channels/${channelId}/marking`, { method: "POST", headers: h(token), body: JSON.stringify({ marking: mk }) });
 
-test("GET /me carries the deployment marking ladder + default", async () => {
+test("GET /me carries the deployment marking ladder + default + enabled categories", async () => {
   await withServer(async (base) => {
     const me = (await (await fetch(`${base}/me`, { headers: h("alice") })).json()) as {
-      marking: { levels: string[]; default: string };
+      marking: { levels: string[]; default: string; categories: { code: string; name: string; level: string }[] };
     };
     assert.deepEqual(me.marking.levels, ["UNCLASSIFIED", "PROPRIETARY", "CUI", "CLASSIFIED"]);
     assert.equal(me.marking.default, "UNCLASSIFIED");
+    assert.deepEqual(
+      me.marking.categories.map((c) => c.code).sort(),
+      ["SP-EXPT", "SP-PRVCY"],
+      "the enabled CUI categories are offered to the client",
+    );
+    assert.ok(me.marking.categories.every((c) => c.level === "CUI"));
   });
 });
 
@@ -207,5 +216,62 @@ test("PORTION marking in a MARKED channel: a portion within the ceiling is fine;
     const res = await post(base, "alice", channel.id, { content: "(CUI) this is above the channel" });
     assert.equal(res.status, 422);
     assert.equal(((await res.json()) as { error: string }).error, "marking_exceeds_channel");
+  });
+});
+
+test("CATEGORY on a per-message marking: a requested CUI//SP-PRVCY is stored canonical + chain-bound", async () => {
+  await withServer(async (base, store) => {
+    const channel = (await (await createChannel(base, "alice", { name: "general" })).json()) as Channel;
+    // Legal category on CUI → stored in canonical banner form.
+    const m = (await (await post(base, "alice", channel.id, { content: "pii here", marking: "cui//sp-prvcy" })).json()) as Message;
+    assert.equal(m.marking, "CUI//SP-PRVCY", "canonical upper, category preserved");
+    assert.equal((await store.verifyChains()).messagesOk, true);
+    // A category illegal at the requested level → 400 (SP-PRVCY attaches to CUI, not UNCLASSIFIED).
+    assert.equal((await post(base, "alice", channel.id, { content: "x", marking: "UNCLASSIFIED//SP-PRVCY" })).status, 400);
+    // An unknown category → 400.
+    assert.equal((await post(base, "alice", channel.id, { content: "x", marking: "CUI//SP-BOGUS" })).status, 400);
+  });
+});
+
+test("CATEGORY ceiling (lattice dominance): a channel category holds a subset, blocks a DISJOINT category (422)", async () => {
+  await withServer(async (base) => {
+    // A channel marked CUI//SP-PRVCY is the container.
+    const channel = (await (await createChannel(base, "alice", { name: "privacy-room", marking: "CUI//SP-PRVCY" })).json()) as Channel;
+    assert.equal(channel.cuiMarking, "CUI//SP-PRVCY");
+    // Plain CUI (no caveats ⊆ {PRVCY}) is fine → the message INHERITS the channel marking.
+    const inherit = (await (await post(base, "alice", channel.id, { content: "a plain note" })).json()) as Message;
+    assert.equal(inherit.marking, "CUI//SP-PRVCY", "the channel is the portion; the message inherits its full marking");
+    // A CUI//SP-EXPT message carries a caveat the channel does NOT hold → spillage block.
+    const blocked = await post(base, "alice", channel.id, { content: "export stuff", marking: "CUI//SP-EXPT" });
+    assert.equal(blocked.status, 422);
+    assert.equal(((await blocked.json()) as { error: string }).error, "marking_exceeds_channel");
+    // An inline (CUI//SP-EXPT) PORTION is the same disjoint-caveat spillage → also blocked.
+    assert.equal((await post(base, "alice", channel.id, { content: "(CUI//SP-EXPT) leak" })).status, 422);
+  });
+});
+
+test("CATEGORY inline portion RAISES an unmarked-channel message to the categorized marking", async () => {
+  await withServer(async (base, store) => {
+    const channel = (await (await createChannel(base, "alice", { name: "general" })).json()) as Channel;
+    // No per-message marking, but a (CUI//SP-PRVCY) portion drives the overall marking (level + caveat).
+    const m = (await (await post(base, "alice", channel.id, { content: "(U) intro\n(CUI//SP-PRVCY) the controlled part" })).json()) as Message;
+    assert.equal(m.marking, "CUI//SP-PRVCY");
+    assert.equal((await store.verifyChains()).messagesOk, true);
+  });
+});
+
+test("DROPPING a category is a downgrade (privileged); ADDING one is an ordinary member act", async () => {
+  await withServer(async (base, store) => {
+    const channel = (await (await createChannel(base, "alice", { name: "cui-room", marking: "CUI" })).json()) as Channel;
+    // A member may ADD a category (raises/lateral — the new marking dominates the current).
+    let res = await setMarking(base, "alice", channel.id, "CUI//SP-PRVCY");
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as Channel).cuiMarking, "CUI//SP-PRVCY");
+    // The security officer must be a member to act on the (membership-gated) marking route.
+    await store.addMember({ channelId: channel.id, memberRef: "carol", memberType: "user", role: "member" });
+    // Dropping the category (loosening) is a downgrade → a plain member is refused (403)…
+    assert.equal((await setMarking(base, "alice", channel.id, "CUI")).status, 403);
+    // …but the admin may.
+    assert.equal((await setMarking(base, "carol", channel.id, "CUI")).status, 200);
   });
 });

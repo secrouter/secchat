@@ -24,6 +24,7 @@ class MessageComposer extends StatefulWidget {
     required this.onSend,
     this.enabled = true,
     this.markingLevels = const [],
+    this.markingCategories = const [],
     this.channelMarking,
     this.initialMarking = 'UNCLASSIFIED',
   });
@@ -39,6 +40,11 @@ class MessageComposer extends StatefulWidget {
   /// The deployment's marking ladder (for the per-message classification picker).
   /// Empty ⇒ no picker is shown.
   final List<String> markingLevels;
+
+  /// The deployment's enabled CUI categories (optional caveats). When the selected
+  /// per-message level has categories, they're offered as a multi-select; the sent
+  /// marking is the canonical banner `LEVEL//CAT1/CAT2`. Empty ⇒ no category chips.
+  final List<MarkingCategory> markingCategories;
 
   /// When non-null, the channel is itself marked at this level: the picker is
   /// LOCKED to it (the channel is the portion — every message takes this level).
@@ -60,12 +66,25 @@ class _MessageComposerState extends State<MessageComposer> {
   bool _editMode = false;
   bool _showPreview = false;
 
-  /// The chosen per-message marking (used only when the channel is unmarked).
+  /// The chosen per-message level (used only when the channel is unmarked).
   late String _marking = widget.initialMarking;
 
-  /// The classification actually sent: the channel's level when it's marked
-  /// (the channel is the portion), else the per-message choice.
-  String get _effectiveMarking => widget.channelMarking ?? _marking;
+  /// The chosen per-message category codes (only those legal at [_marking] are
+  /// sent). Cleared whenever the level changes.
+  final Set<String> _categories = {};
+
+  /// The categories the deployment offers for the currently-selected level.
+  List<MarkingCategory> get _availableCategories =>
+      widget.markingCategories.where((c) => c.level == _marking.toUpperCase()).toList();
+
+  /// The classification actually sent: the channel's marking when it's marked
+  /// (the channel is the portion), else the per-message level plus any selected
+  /// categories, in canonical banner form (`CUI//SP-EXPT/SP-PRVCY`).
+  String get _effectiveMarking {
+    if (widget.channelMarking != null) return widget.channelMarking!;
+    final codes = _availableCategories.map((c) => c.code).where(_categories.contains).toList()..sort();
+    return codes.isEmpty ? _marking : '$_marking//${codes.join('/')}';
+  }
 
   @override
   void initState() {
@@ -82,6 +101,7 @@ class _MessageComposerState extends State<MessageComposer> {
     if (oldWidget.channelMarking != widget.channelMarking ||
         oldWidget.initialMarking != widget.initialMarking) {
       _marking = widget.initialMarking;
+      _categories.clear();
     }
   }
 
@@ -235,6 +255,7 @@ class _MessageComposerState extends State<MessageComposer> {
             onPick: _applySuggestion,
           ),
           _toolbar(),
+          _categoryBar(),
           const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -331,12 +352,14 @@ class _MessageComposerState extends State<MessageComposer> {
   /// locked chip at the channel level (the channel is the portion); otherwise a
   /// menu over the ladder, defaulting to the fail-safe floor.
   Widget _markingSelector() {
-    final level = _effectiveMarking;
+    final eff = _effectiveMarking;
+    final level = markingLevelOf(eff);
     // Baseline (the default/floor) is displayed muted as "UNMARKED" — its marking is suppressed
-    // everywhere; only an above-baseline choice gets the solid classification color.
-    final isBaseline = level == widget.initialMarking;
+    // everywhere; only an above-baseline choice gets the solid classification color. A categorized
+    // marking (e.g. CUI//SP-PRVCY) shows its full banner string.
+    final isBaseline = eff == widget.initialMarking;
     final style = isBaseline ? (bg: AppColors.surfaceRaised, fg: AppColors.textMuted) : markingStyle(level);
-    final label = isBaseline ? 'UNMARKED' : level.toUpperCase();
+    final label = isBaseline ? 'UNMARKED' : eff.toUpperCase();
     final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -360,14 +383,17 @@ class _MessageComposerState extends State<MessageComposer> {
       ),
     );
     if (widget.channelMarking != null) {
-      return Tooltip(message: 'Channel is marked $level — every message inherits it', child: chip);
+      return Tooltip(message: 'Channel is marked $eff — every message inherits it', child: chip);
     }
     return PopupMenuButton<String>(
       tooltip: 'Message classification',
       padding: EdgeInsets.zero,
       color: AppColors.surfaceRaised,
       position: PopupMenuPosition.under,
-      onSelected: (m) => setState(() => _marking = m),
+      onSelected: (m) => setState(() {
+        _marking = m;
+        _categories.clear();
+      }),
       itemBuilder: (_) => [
         for (final l in widget.markingLevels)
           PopupMenuItem<String>(
@@ -391,6 +417,60 @@ class _MessageComposerState extends State<MessageComposer> {
           ),
       ],
       child: chip,
+    );
+  }
+
+  /// A compact multi-select of the CUI categories available for the currently-
+  /// selected level (only when the channel is unmarked and the level has any).
+  /// Toggling a chip adds/removes its caveat from the sent marking.
+  Widget _categoryBar() {
+    final available = _availableCategories;
+    if (available.isEmpty || widget.channelMarking != null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Text(
+            'CATEGORIES',
+            style: AppFonts.mono(fontSize: 9, color: AppColors.textFaint)
+                .copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.6),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [for (final c in available) _categoryChip(c)],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _categoryChip(MarkingCategory category) {
+    final on = _categories.contains(category.code);
+    final markStyle = markingStyle(_marking);
+    return Tooltip(
+      message: category.name,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(3),
+        onTap: () => setState(() => on ? _categories.remove(category.code) : _categories.add(category.code)),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+          decoration: BoxDecoration(
+            color: on ? markStyle.bg : AppColors.surfaceRaised,
+            borderRadius: BorderRadius.circular(3),
+            border: Border.all(color: on ? markStyle.bg : AppColors.border),
+          ),
+          child: Text(
+            category.code,
+            style: AppFonts.mono(fontSize: 10, color: on ? markStyle.fg : AppColors.textMuted)
+                .copyWith(fontWeight: FontWeight.w700),
+          ),
+        ),
+      ),
     );
   }
 

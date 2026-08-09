@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/widgets/composer.dart';
 
 /// Pumps a composer wired to a capturing `onSend`; returns the list that
@@ -150,5 +151,49 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_fieldText(tester), '(CUI) the controlled part');
+  });
+
+  testWidgets('selecting a level and toggling a category sends the composite banner marking', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    String? sentMarking;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking) async => sentMarking = marking,
+            markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
+            markingCategories: const [
+              MarkingCategory(code: 'SP-PRVCY', name: 'Privacy', level: 'CUI'),
+              MarkingCategory(code: 'SP-EXPT', name: 'Export Controlled', level: 'CUI'),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // No category chips at the baseline level (categories attach to CUI).
+    expect(find.text('SP-PRVCY'), findsNothing);
+
+    // Raise the per-message level to CUI via the marking selector.
+    await tester.tap(find.byTooltip('Message classification'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CUI').last);
+    await tester.pumpAndSettle();
+
+    // The CUI categories now appear; toggle Privacy on.
+    expect(find.text('SP-PRVCY'), findsOneWidget);
+    await tester.tap(find.text('SP-PRVCY'));
+    await tester.pump();
+
+    // Compose + send → the marking is the canonical banner (level//category).
+    await tester.enterText(find.byType(TextField), 'pii here');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await tester.pump();
+
+    expect(sentMarking, 'CUI//SP-PRVCY');
   });
 }

@@ -2,10 +2,12 @@
 // closed at startup (never silently insecure). Kept dependency-free — plain process.env.
 
 import {
+  DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING_PROFILE,
   makeMarkingPolicy,
   type MarkingPolicy,
   markingProfile,
+  parseCaveatDefs,
   parseMarkingLevels,
 } from "./marking/policy.ts";
 import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
@@ -106,7 +108,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const profile = markingLevelsRaw ? null : markingProfile(opt(env, "SECCHAT_MARKING_PROFILE", DEFAULT_MARKING_PROFILE));
   const markingLevels = markingLevelsRaw ? parseMarkingLevels(markingLevelsRaw) : [...profile!.levels];
   const markingDefault = opt(env, "SECCHAT_MARKING_DEFAULT", profile?.default ?? markingLevels[0] ?? "");
-  const marking = makeMarkingPolicy(markingLevels, markingDefault);
+  // Optional CUI categories (unranked caveats): an explicit `SECCHAT_MARKING_CATEGORIES` JSON override
+  // wins (throws on malformed); otherwise the profile's set, or the starter set for a custom ladder.
+  // makeMarkingPolicy filters these to the ladder's levels (a category for an absent level is dropped).
+  // NOTE: the built-in set is a reasonable STARTER — verify the exact codes / Basic-vs-Specified (SP-)
+  // prefixes against your agency's ISOO CUI Registry entry and override here as needed. The banner
+  // grammar is forward-compatible (LEVEL//CATEGORIES//DISSEM), so dissemination controls / classified
+  // compartments are a later caveat `kind`, not a schema change.
+  const markingCategories = env.SECCHAT_MARKING_CATEGORIES?.trim()
+    ? parseCaveatDefs(env.SECCHAT_MARKING_CATEGORIES)
+    : [...(profile?.categories ?? DEFAULT_CUI_CATEGORIES)];
+  const marking = makeMarkingPolicy(markingLevels, markingDefault, markingCategories);
   // Local DLP: default to `flag` (detect + record, never block legitimate work); a bad mode or
   // malformed rule override throws here, at startup.
   const dlp = new DlpPolicy(

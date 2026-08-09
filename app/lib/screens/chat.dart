@@ -909,6 +909,7 @@ class _ChatScreenState extends State<ChatScreen> {
           MessageComposer(
             onSend: _handleSend,
             markingLevels: policy.levels,
+            markingCategories: policy.categories,
             channelMarking: selected.isMarked ? selected.cuiMarking : null,
             initialMarking: policy.defaultLevel,
           ),
@@ -997,6 +998,7 @@ class _ChatScreenState extends State<ChatScreen> {
         MessageComposer(
           onSend: (text, marking) => _sendReply(channel, parent.id, text, marking),
           markingLevels: widget.principal.marking.levels,
+          markingCategories: widget.principal.marking.categories,
           channelMarking: channel.isMarked ? channel.cuiMarking : null,
           initialMarking: widget.principal.marking.defaultLevel,
         ),

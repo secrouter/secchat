@@ -12,14 +12,13 @@ import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
 import {
+  DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
   DEFAULT_MARKING_LEVELS,
-  isKnownMarking,
   makeMarkingPolicy,
-  markingAtMost,
-  markRank,
   type MarkingPolicy,
 } from "../marking/policy.ts";
+import { dominates, formatMarking, joinMarking, type Marking, parseMarking } from "../marking/caveats.ts";
 import { overallPortionMarking } from "../marking/portions.ts";
 import { DlpPolicy } from "../dlp/policy.ts";
 import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
@@ -232,7 +231,15 @@ function buildRouter(
     });
     // Carry the deployment's marking ladder + default so the client can render banners, populate
     // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
-    sendJson(res, 200, { ...principal, marking: { levels: marking.levels, default: marking.default } });
+    sendJson(res, 200, {
+      ...principal,
+      marking: {
+        levels: marking.levels,
+        default: marking.default,
+        // The enabled CUI categories (optional caveats) the client offers on the marking picker.
+        categories: marking.caveats.map((c) => ({ code: c.code, name: c.name, level: c.level })),
+      },
+    });
   });
 
   // Establish a step-up proof for NON-INTERACTIVE callers (a bearer/dev/service client presents the
@@ -312,14 +319,16 @@ function buildRouter(
   router.add("POST", "/channels", async ({ req, res, principal }) => {
     const body = (await readJsonBody(req)) as { name?: string; kind?: ChannelKind; workspaceId?: string; marking?: string };
     // An optional INITIAL channel marking (setting it later goes through POST /channels/:id/marking).
-    // A supplied level must be a rung of the ladder; unset ⇒ unmarked (per-message marking applies).
+    // A supplied marking must be a valid level + legal caveats (e.g. "CUI//SP-PRVCY"); it is stored
+    // in canonical banner form. Unset ⇒ unmarked (per-message marking applies).
     let cuiMarking: string | undefined;
     if (body.marking != null && body.marking.trim() !== "") {
-      if (!isKnownMarking(marking, body.marking)) {
+      const parsed = parseMarking(marking, body.marking);
+      if (!parsed) {
         sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
         return;
       }
-      cuiMarking = body.marking.trim().toUpperCase();
+      cuiMarking = formatMarking(parsed);
     }
     const channel = await store.createChannel({
       workspaceId: body.workspaceId ?? "ws-default",
@@ -350,15 +359,18 @@ function buildRouter(
       return;
     }
     const body = (await readJsonBody(req)) as { marking?: string };
-    const next = (body.marking ?? "").trim().toUpperCase();
-    if (!isKnownMarking(marking, next)) {
+    const parsedNext = parseMarking(marking, body.marking ?? "");
+    if (!parsedNext) {
       sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
       return;
     }
-    // Downgrade = lowering the level below the channel's current one → the privileged
-    // `marking.downgrade` capability (group-gated, default the admin group; step-up if configured).
-    const current = channel.cuiMarking;
-    const isDowngrade = current != null && markRank(marking, next) < markRank(marking, current);
+    const next = formatMarking(parsedNext);
+    // Downgrade = LOOSENING the control: lowering the level OR dropping a caveat — i.e. the new
+    // marking does NOT dominate the current one. That is the privileged `marking.downgrade`
+    // capability (group-gated, default the admin group; step-up if configured). Raising the level or
+    // adding a caveat (the new marking dominates the current) is an ordinary member act.
+    const current = channel.cuiMarking ? parseMarking(marking, channel.cuiMarking) : null;
+    const isDowngrade = current != null && !dominates(marking, parsedNext, current);
     if (isDowngrade && !(await enforceCapability(req, res, principal, "marking.downgrade"))) return;
     const updated = await store.setChannelMarking(channelId, next, principal.sub);
     broadcast?.(channelId, { type: "channel_marking", channelId, marking: next, by: principal.sub });
@@ -413,40 +425,45 @@ function buildRouter(
       return;
     }
     const channel = await store.getChannel(channelId);
+    const channelMarking = channel?.cuiMarking ? parseMarking(marking, channel.cuiMarking) : null;
     const body = (await readJsonBody(req)) as { content?: string; parentId?: string; marking?: string };
     const content = body.content ?? "";
-    // Resolve + ENFORCE the classification marking (blocking).
-    const requested =
-      body.marking != null && body.marking.trim() !== "" ? body.marking.trim().toUpperCase() : undefined;
-    if (requested != null && !isKnownMarking(marking, requested)) {
-      sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
-      return;
-    }
-    let effective: string;
-    if (channel?.cuiMarking) {
-      // Marked channel: the channel IS the portion. A message may never EXCEED the channel ceiling
-      // (spillage block); otherwise it simply takes the channel level, whatever was requested.
-      if (requested != null && !markingAtMost(marking, requested, channel.cuiMarking)) {
-        sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel.cuiMarking });
+    // Resolve + ENFORCE the classification marking (blocking). A requested marking is a full banner
+    // (level + optional categories, e.g. "CUI//SP-PRVCY"); an invalid one is a 400.
+    let requested: Marking | null = null;
+    if (body.marking != null && body.marking.trim() !== "") {
+      requested = parseMarking(marking, body.marking);
+      if (!requested) {
+        sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
         return;
       }
-      effective = channel.cuiMarking;
-    } else {
-      // Unmarked channel / DM: per-message marking, defaulting to the policy floor.
-      effective = requested ?? marking.default;
     }
-    // Inline CUI PORTION markings — e.g. "(CUI) a controlled line" — RAISE the message's overall
-    // marking to the highest portion present (the CUI convention). In a marked channel a portion
-    // above the ceiling is spillage; in an unmarked channel it drives the overall up.
+    let effective: Marking;
+    if (channelMarking) {
+      // Marked channel: the channel IS the portion. A message may never EXCEED the channel ceiling —
+      // the channel must DOMINATE it (≥ level AND superset of caveats), else spillage block. Otherwise
+      // the message simply takes the channel marking, whatever was requested.
+      if (requested && !dominates(marking, channelMarking, requested)) {
+        sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel!.cuiMarking });
+        return;
+      }
+      effective = channelMarking;
+    } else {
+      // Unmarked channel / DM: per-message marking, defaulting to the policy floor (bare level).
+      effective = requested ?? { level: marking.default, caveats: [] };
+    }
+    // Inline CUI PORTION markings — e.g. "(CUI) a controlled line", "(CUI//SP-PRVCY) …" — RAISE the
+    // message's overall marking to the join of its portions (the CUI convention). In a marked channel
+    // a portion the channel can't dominate is spillage; in an unmarked channel it drives the overall up.
     const portionMax = overallPortionMarking(marking, content);
     if (portionMax) {
-      if (channel?.cuiMarking) {
-        if (!markingAtMost(marking, portionMax, channel.cuiMarking)) {
-          sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel.cuiMarking });
+      if (channelMarking) {
+        if (!dominates(marking, channelMarking, portionMax)) {
+          sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel!.cuiMarking });
           return;
         }
-      } else if (markRank(marking, portionMax) > markRank(marking, effective)) {
-        effective = portionMax;
+      } else if (!dominates(marking, effective, portionMax)) {
+        effective = joinMarking(marking, effective, portionMax);
       }
     }
     // Local DLP scan (on-premise; matches only rule NAMES, never the content). In `block` mode a
@@ -463,7 +480,7 @@ function buildRouter(
       authorType: "user",
       content,
       parentId: body.parentId,
-      marking: effective,
+      marking: formatMarking(effective),
     });
     if (dlpHits.length > 0) {
       // flag mode (block already returned): a provable, content-free trail on the audit chain.
@@ -838,7 +855,7 @@ export function createHttpServer(deps: {
    * requires step-up fails closed (can't be satisfied). */
   stepUp?: StepUp;
 }): Server {
-  const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING);
+  const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
   const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
