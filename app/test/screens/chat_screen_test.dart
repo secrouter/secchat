@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/commands.dart';
+import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/screens/chat.dart';
 import 'package:secchat_app/widgets/composer.dart';
@@ -863,9 +864,45 @@ void main() {
     expect(find.text('Channel classification'), findsOneWidget);
     await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('CUI')));
     await tester.pumpAndSettle();
+    // Select-then-confirm: the level is chosen, then "Set marking" applies it.
+    await tester.tap(find.text('Set marking'));
+    await tester.pumpAndSettle();
 
     expect(fake.setMarkingCalls.single.channelId, 'c1');
     expect(fake.setMarkingCalls.single.marking, 'CUI');
+  });
+
+  testWidgets('the channel-marking picker adds a CUI category and applies the composite banner', (tester) async {
+    const catPrincipal = Principal(
+      sub: 'dev.alice',
+      groups: ['secchat-admins'],
+      marking: MarkingPolicy(
+        levels: ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
+        defaultLevel: 'UNCLASSIFIED',
+        categories: [MarkingCategory(code: 'SP-PRVCY', name: 'Privacy', level: 'CUI')],
+      ),
+    );
+    final fake = FakeApiClient(
+      me: catPrincipal,
+      channels: const [Channel(id: 'c1', kind: ChannelKind.human, name: 'general')],
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: catPrincipal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.text('MARK…'));
+    await tester.pumpAndSettle();
+    // Choose CUI → its categories appear; toggle Privacy on, then apply.
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('CUI')));
+    await tester.pumpAndSettle();
+    expect(find.text('SP-PRVCY'), findsOneWidget);
+    await tester.tap(find.text('SP-PRVCY'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Set marking'));
+    await tester.pumpAndSettle();
+
+    expect(fake.setMarkingCalls.single.marking, 'CUI//SP-PRVCY');
   });
 
   testWidgets('a DLP-flagged message shows a spillage warning naming the rule', (tester) async {
