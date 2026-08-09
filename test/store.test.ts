@@ -180,6 +180,7 @@ test("an agent message's promptedBy round-trips via listMessages but is NOT boun
     authorType: "agent",
     contentSha256: m1.contentSha256,
     marking: m1.marking,
+    attachmentsSha256: m1.attachmentsSha256,
     createdAt: m1.createdAt,
   });
   assert.equal(m1.hash, expectedHash);

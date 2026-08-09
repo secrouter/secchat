@@ -52,8 +52,10 @@ import { DEFAULT_MARKING } from "../marking/policy.ts";
 import type {
   Agent,
   AgentSession,
+  AddAttachmentInput,
   AppendAuditInput,
   AppendMessageInput,
+  Attachment,
   AuditEvent,
   Channel,
   ExecuteGrant,
@@ -82,6 +84,7 @@ export class MemoryStore implements Store, SessionStore {
   #sessions = new Map<Id, AgentSession>(); // insertion order == creation order
   #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
   #reactions = new Map<Id, Reaction[]>(); // messageId -> reactions, append order
+  #attachments = new Map<Id, Attachment>(); // attachment id -> row (messageId null until claimed); insertion order = upload order
   #lastRead = new Map<Id, Map<string, number>>(); // channelId -> (userSub -> last-read seq)
   #webhooksById = new Map<Id, Webhook>();
   #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
@@ -203,6 +206,7 @@ export class MemoryStore implements Store, SessionStore {
     // Effective marking: a marked channel IS the portion (its level wins); otherwise the author's
     // per-message choice, defaulting to the floor. Bound into the hash below (tamper-evident).
     const marking = this.#channels.get(input.channelId)?.cuiMarking ?? input.marking ?? DEFAULT_MARKING;
+    const attachmentsSha256 = input.attachmentsSha256 ?? ""; // '' when the message has no attachments
     const createdAt = new Date().toISOString();
     const hash = computeMessageHash(prevHash, {
       channelId: input.channelId,
@@ -211,6 +215,7 @@ export class MemoryStore implements Store, SessionStore {
       authorType: input.authorType,
       contentSha256,
       marking,
+      attachmentsSha256,
       createdAt,
     });
 
@@ -224,6 +229,7 @@ export class MemoryStore implements Store, SessionStore {
       parentId: input.parentId, // thread parent — same deal: metadata only, not bound into the hash
       contentSha256,
       marking, // chain-bound (see computeMessageHash) — immutable, tamper-evident
+      attachmentsSha256, // chain-bound manifest digest — immutable
       prevHash,
       hash,
       createdAt,
@@ -353,6 +359,48 @@ export class MemoryStore implements Store, SessionStore {
       if (reactions) out.push(...reactions);
     }
     return out;
+  }
+
+  // ── Attachments (metadata; bytes handled by the HTTP layer) ───────────────────────────────
+
+  async addAttachment(input: AddAttachmentInput): Promise<Attachment> {
+    const attachment: Attachment = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      uploadedBy: input.uploadedBy,
+      filename: input.filename,
+      contentType: input.contentType,
+      byteSize: input.byteSize,
+      sha256: input.sha256,
+      marking: input.marking,
+      createdAt: new Date().toISOString(),
+    };
+    this.#attachments.set(attachment.id, attachment);
+    return { ...attachment };
+  }
+
+  async getAttachment(id: Id): Promise<Attachment | null> {
+    const a = this.#attachments.get(id);
+    return a ? { ...a } : null;
+  }
+
+  async claimAttachments(messageId: Id, attachmentIds: Id[]): Promise<Attachment[]> {
+    for (const id of attachmentIds) {
+      const a = this.#attachments.get(id);
+      if (a && a.messageId == null) a.messageId = messageId; // unclaimed → claimed, once
+    }
+    // Return the message's full set in upload order (matches PgStore) — a re-claim is a no-op.
+    return this.listAttachmentsForMessage(messageId);
+  }
+
+  async listAttachmentsForMessage(messageId: Id): Promise<Attachment[]> {
+    return [...this.#attachments.values()].filter((a) => a.messageId === messageId).map((a) => ({ ...a }));
+  }
+
+  async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {
+    return [...this.#attachments.values()]
+      .filter((a) => a.messageId != null && a.channelId === channelId)
+      .map((a) => ({ ...a }));
   }
 
   // ── Per-user read markers → unread counts ─────────────────────────────────────────────────

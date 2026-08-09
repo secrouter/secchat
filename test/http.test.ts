@@ -67,6 +67,7 @@ interface FakeMessage {
   parentId?: string;
   contentSha256: string;
   marking: string;
+  attachmentsSha256: string;
   prevHash: string;
   hash: string;
   createdAt: string;
@@ -135,6 +136,7 @@ const store = {
       parentId: input.parentId,
       contentSha256: "0".repeat(64),
       marking: "UNCLASSIFIED",
+      attachmentsSha256: "",
       prevHash: "0".repeat(64),
       hash: "0".repeat(64),
       createdAt: new Date().toISOString(),
@@ -371,6 +373,7 @@ const fakeSearchResults: Array<Message & { content?: string }> = [
     authorType: "user",
     contentSha256: "0".repeat(64),
     marking: "UNCLASSIFIED",
+    attachmentsSha256: "",
     prevHash: "0".repeat(64),
     hash: "0".repeat(64),
     createdAt: new Date().toISOString(),

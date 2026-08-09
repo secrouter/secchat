@@ -115,6 +115,10 @@ export interface Message {
    * to the policy default). Bound INTO the hash chain — a marking you could silently alter wouldn't
    * be a control — so it's immutable and tamper-evident like contentSha256. */
   marking: string;
+  /** A digest over the message's attachments (ordered `sha256|filename|byteSize|marking`), or '' when
+   * it has none. Bound INTO the hash chain like `marking` — which files a message carries (and their
+   * content hashes) is tamper-evident. Stamped at write; immutable. */
+  attachmentsSha256: string;
   prevHash: Sha256Hex;
   hash: Sha256Hex;
   createdAt: string;
@@ -172,6 +176,36 @@ export interface AppendMessageInput {
    * level is stamped instead). When the channel is unmarked, this is the message's level, defaulting
    * to the policy default when omitted. The store validates/stamps the EFFECTIVE marking. */
   marking?: string;
+  /** The attachments-manifest digest (see Message.attachmentsSha256). '' / omitted ⇒ no attachments.
+   * Computed by the HTTP layer from the claimed attachments and bound into the message hash. */
+  attachmentsSha256?: string;
+}
+
+/** A file attached to a message. Bytes live content-addressed on the filesystem (by `sha256`), never
+ * on this row. `messageId` is null between upload and the message post that CLAIMS it. */
+export interface Attachment {
+  id: Id;
+  messageId?: Id; // null until claimed by a message post
+  channelId: Id;
+  uploadedBy: string;
+  filename: string;
+  contentType: string;
+  byteSize: number;
+  sha256: Sha256Hex;
+  marking: string;
+  createdAt: string;
+}
+
+/** Create an (unclaimed) attachment row — the HTTP layer has already written the bytes + computed
+ * the sha256. */
+export interface AddAttachmentInput {
+  channelId: Id;
+  uploadedBy: string;
+  filename: string;
+  contentType: string;
+  byteSize: number;
+  sha256: Sha256Hex;
+  marking: string;
 }
 
 /** A reaction (emoji) a user placed on a message. Mutable social signal — NOT in the audit
@@ -249,6 +283,19 @@ export interface Store {
   /** Full version history for a message, revision order (1 = original). `content` is omitted on
    * every revision once the message is redacted. */
   listRevisions(id: Id): Promise<MessageRevision[]>;
+
+  // Attachments (metadata; bytes are content-addressed on the filesystem, handled by the HTTP layer).
+  /** Create an UNCLAIMED attachment (messageId null) after the bytes have been stored. */
+  addAttachment(input: AddAttachmentInput): Promise<Attachment>;
+  getAttachment(id: Id): Promise<Attachment | null>;
+  /** CLAIM the given unclaimed attachments for a message (sets messageId), in the order supplied;
+   * returns the claimed rows. Used at message-post time after the manifest digest is computed. */
+  claimAttachments(messageId: Id, attachmentIds: Id[]): Promise<Attachment[]>;
+  /** A message's attachments in upload order (claimed only). */
+  listAttachmentsForMessage(messageId: Id): Promise<Attachment[]>;
+  /** All CLAIMED attachments in a channel — lets the history route attach files to each message in
+   * one read (like listReactionsForChannel). */
+  listAttachmentsForChannel(channelId: Id): Promise<Attachment[]>;
 
   // Reactions (mutable; not chained).
   addReaction(messageId: Id, userSub: string, emoji: string): Promise<void>; // idempotent per (user,emoji)

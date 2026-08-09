@@ -41,10 +41,23 @@ export function hashContent(plaintext: string): Sha256Hex {
  * function `verifyMessageChain` recomputes. `contentSha256` (not the plaintext) is bound. */
 export function computeMessageHash(
   prevHash: Sha256Hex,
-  m: Pick<Message, "channelId" | "seq" | "authorRef" | "authorType" | "contentSha256" | "marking" | "createdAt">,
+  m: Pick<
+    Message,
+    "channelId" | "seq" | "authorRef" | "authorType" | "contentSha256" | "marking" | "attachmentsSha256" | "createdAt"
+  >,
 ): Sha256Hex {
   return sha256(
-    canonical([prevHash, m.channelId, m.seq, m.authorRef, m.authorType, m.contentSha256, m.marking, m.createdAt]),
+    canonical([
+      prevHash,
+      m.channelId,
+      m.seq,
+      m.authorRef,
+      m.authorType,
+      m.contentSha256,
+      m.marking,
+      m.attachmentsSha256,
+      m.createdAt,
+    ]),
   );
 }
 

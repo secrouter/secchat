@@ -56,11 +56,13 @@ import {
 } from "../audit/chain.ts";
 import { DEFAULT_MARKING } from "../marking/policy.ts";
 import type {
+  AddAttachmentInput,
   Agent,
   AgentKind,
   AgentSession,
   AppendAuditInput,
   AppendMessageInput,
+  Attachment,
   AuditEvent,
   AuthorType,
   Channel,
@@ -149,6 +151,7 @@ interface MessageRow {
   parent_id: string | null;
   content_sha256: string;
   marking: string;
+  attachments_sha256: string;
   prev_hash: string;
   hash: string;
   created_at: Date;
@@ -176,6 +179,19 @@ interface ReactionRow {
   user_sub: string;
   emoji: string;
   at: Date;
+}
+
+interface AttachmentRow {
+  id: string;
+  message_id: string | null;
+  channel_id: string;
+  uploaded_by: string;
+  filename: string;
+  content_type: string;
+  byte_size: string; // bigint → string from `pg` (avoids precision loss); Number()ed on read
+  sha256: string;
+  marking: string;
+  created_at: Date;
 }
 
 interface WebhookRow {
@@ -275,6 +291,7 @@ function rowToMessage(row: MessageRow): Message {
     parentId: row.parent_id ?? undefined,
     contentSha256: row.content_sha256,
     marking: row.marking,
+    attachmentsSha256: row.attachments_sha256,
     prevHash: row.prev_hash,
     hash: row.hash,
     createdAt: iso(row.created_at),
@@ -303,6 +320,21 @@ function rowToMessageWithContent(row: MessageJoinRow): Message & { content?: str
   const message = rowToMessage(row);
   if (row.redacted_at) return message;
   return { ...message, content: row.content ?? "" };
+}
+
+function rowToAttachment(row: AttachmentRow): Attachment {
+  return compact({
+    id: row.id,
+    messageId: row.message_id ?? undefined,
+    channelId: row.channel_id,
+    uploadedBy: row.uploaded_by,
+    filename: row.filename,
+    contentType: row.content_type,
+    byteSize: Number(row.byte_size),
+    sha256: row.sha256,
+    marking: row.marking,
+    createdAt: iso(row.created_at),
+  });
 }
 
 function rowToReaction(row: ReactionRow): Reaction {
@@ -572,6 +604,7 @@ export class PgStore implements Store, SessionStore {
         [input.channelId],
       );
       const marking = chanRows[0]?.cui_marking ?? input.marking ?? DEFAULT_MARKING;
+      const attachmentsSha256 = input.attachmentsSha256 ?? ""; // '' when no attachments
       const createdAt = new Date().toISOString();
       const hash = computeMessageHash(prevHash, {
         channelId: input.channelId,
@@ -580,15 +613,16 @@ export class PgStore implements Store, SessionStore {
         authorType: input.authorType,
         contentSha256,
         marking,
+        attachmentsSha256,
         createdAt,
       });
       const id = randomUUID();
 
       // channel_id's FK makes an unknown channel fail closed here, matching MemoryStore's throw.
       await client.query(
-        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, marking, prev_hash, hash, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, marking, prevHash, hash, createdAt],
+        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, marking, attachments_sha256, prev_hash, hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, marking, attachmentsSha256, prevHash, hash, createdAt],
       );
       await client.query(`INSERT INTO message_content (message_id, content) VALUES ($1, $2)`, [id, input.content]);
 
@@ -604,6 +638,7 @@ export class PgStore implements Store, SessionStore {
         parentId: input.parentId,
         contentSha256,
         marking,
+        attachmentsSha256,
         prevHash,
         hash,
         createdAt,
@@ -620,7 +655,7 @@ export class PgStore implements Store, SessionStore {
   async getMessage(id: Id): Promise<Message | null> {
     const { rows } = await this.#pool.query<MessageRow>(
       `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
-              content_sha256, marking, prev_hash, hash, created_at, redacted_at
+              content_sha256, marking, attachments_sha256, prev_hash, hash, created_at, redacted_at
        FROM messages WHERE id = $1`,
       [id],
     );
@@ -632,7 +667,7 @@ export class PgStore implements Store, SessionStore {
    * DESC+LIMIT query that is then reversed to ascending. Unbounded when both are unset. */
   async listMessages(channelId: Id, opts?: MessagePageOpts): Promise<Array<Message & { content?: string }>> {
     const select = `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              m.content_sha256, m.marking, m.attachments_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
               rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
@@ -662,7 +697,7 @@ export class PgStore implements Store, SessionStore {
   async listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              m.content_sha256, m.marking, m.attachments_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
               rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
@@ -687,7 +722,7 @@ export class PgStore implements Store, SessionStore {
 
       const { rows: mrows } = await client.query<MessageRow>(
         `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
-                content_sha256, marking, prev_hash, hash, created_at, redacted_at
+                content_sha256, marking, attachments_sha256, prev_hash, hash, created_at, redacted_at
          FROM messages WHERE id = $1 FOR UPDATE`,
         [id],
       );
@@ -746,7 +781,7 @@ export class PgStore implements Store, SessionStore {
     // Never edited — the one revision is the original on the row (content omitted if redacted).
     const { rows: orows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
+              m.content_sha256, m.marking, m.attachments_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
        WHERE m.id = $1`,
@@ -802,6 +837,65 @@ export class PgStore implements Store, SessionStore {
       [channelId],
     );
     return rows.map(rowToReaction);
+  }
+
+  // ── Attachments (metadata; bytes are content-addressed on the filesystem) ─────────────────────
+
+  async addAttachment(input: AddAttachmentInput): Promise<Attachment> {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    await this.#pool.query(
+      `INSERT INTO attachments (id, message_id, channel_id, uploaded_by, filename, content_type, byte_size, sha256, marking, created_at)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [id, input.channelId, input.uploadedBy, input.filename, input.contentType, input.byteSize, input.sha256, input.marking, createdAt],
+    );
+    return compact({
+      id,
+      channelId: input.channelId,
+      uploadedBy: input.uploadedBy,
+      filename: input.filename,
+      contentType: input.contentType,
+      byteSize: input.byteSize,
+      sha256: input.sha256,
+      marking: input.marking,
+      createdAt,
+    });
+  }
+
+  #attachmentCols = `id, message_id, channel_id, uploaded_by, filename, content_type, byte_size, sha256, marking, created_at`;
+
+  async getAttachment(id: Id): Promise<Attachment | null> {
+    const { rows } = await this.#pool.query<AttachmentRow>(
+      `SELECT ${this.#attachmentCols} FROM attachments WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? rowToAttachment(rows[0]) : null;
+  }
+
+  async claimAttachments(messageId: Id, attachmentIds: Id[]): Promise<Attachment[]> {
+    if (attachmentIds.length === 0) return [];
+    // Only UNCLAIMED rows are claimed (message_id IS NULL) — a second claim is a no-op.
+    await this.#pool.query(
+      `UPDATE attachments SET message_id = $1 WHERE id = ANY($2::uuid[]) AND message_id IS NULL`,
+      [messageId, attachmentIds],
+    );
+    return this.listAttachmentsForMessage(messageId);
+  }
+
+  async listAttachmentsForMessage(messageId: Id): Promise<Attachment[]> {
+    const { rows } = await this.#pool.query<AttachmentRow>(
+      `SELECT ${this.#attachmentCols} FROM attachments WHERE message_id = $1 ORDER BY ins_seq`,
+      [messageId],
+    );
+    return rows.map(rowToAttachment);
+  }
+
+  async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {
+    const { rows } = await this.#pool.query<AttachmentRow>(
+      `SELECT ${this.#attachmentCols} FROM attachments WHERE channel_id = $1 AND message_id IS NOT NULL ORDER BY ins_seq`,
+      [channelId],
+    );
+    return rows.map(rowToAttachment);
   }
 
   // ── Per-user read markers → unread counts ───────────────────────────────────────────────────

@@ -97,6 +97,29 @@ if (!DATABASE_URL) {
     assert.equal((await store.listMessages(channel.id)).length, 12);
   });
 
+  test("attachments: unclaimed upload → claim → listed in ins_seq order; byte_size round-trips as a number", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
+    const mk = (sha: string, filename: string, size: number) => ({
+      channelId: channel.id, uploadedBy: "user-alice", filename, contentType: "application/pdf",
+      byteSize: size, sha256: sha, marking: "CUI",
+    });
+    const a1 = await store.addAttachment(mk("1".repeat(64), "one.pdf", 1024));
+    const a2 = await store.addAttachment(mk("2".repeat(64), "two.pdf", 2048));
+    assert.equal(a1.messageId, undefined);
+    assert.equal(a1.byteSize, 1024);
+    assert.equal(typeof a1.byteSize, "number", "bigint column read back as a JS number");
+    assert.deepEqual(await store.listAttachmentsForChannel(channel.id), [], "unclaimed → not in the channel list");
+
+    const msg = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "docs", attachmentsSha256: "f".repeat(64) });
+    const claimed = await store.claimAttachments(msg.id, [a1.id, a2.id]);
+    assert.deepEqual(claimed.map((a) => a.filename), ["one.pdf", "two.pdf"], "returned in upload (ins_seq) order");
+    assert.equal(msg.attachmentsSha256, "f".repeat(64));
+    assert.deepEqual((await store.listAttachmentsForMessage(msg.id)).map((a) => a.filename), ["one.pdf", "two.pdf"]);
+    assert.deepEqual((await store.listAttachmentsForChannel(channel.id)).map((a) => a.sha256), ["1".repeat(64), "2".repeat(64)]);
+    assert.equal((await store.verifyChains()).messagesOk, true);
+  });
+
   test("getChannel returns null for an unknown id", async () => {
     assert.equal(await store.getChannel(randomUUID()), null);
   });
