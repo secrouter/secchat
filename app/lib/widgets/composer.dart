@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../clipboard_guard.dart';
 import '../commands.dart';
 import '../marking.dart';
 import '../theme.dart';
@@ -25,6 +28,8 @@ class MessageComposer extends StatefulWidget {
     this.enabled = true,
     this.markingLevels = const [],
     this.markingCategories = const [],
+    this.markingPolicy,
+    this.clipboardGuard,
     this.channelMarking,
     this.initialMarking = 'UNCLASSIFIED',
   });
@@ -45,6 +50,16 @@ class MessageComposer extends StatefulWidget {
   /// per-message level has categories, they're offered as a multi-select; the sent
   /// marking is the canonical banner `LEVEL//CAT1/CAT2`. Empty ⇒ no category chips.
   final List<MarkingCategory> markingCategories;
+
+  /// The full marking policy — used by the clipboard guard for level+category
+  /// dominance. Falls back to [MarkingPolicy.fallback] when absent.
+  final MarkingPolicy? markingPolicy;
+
+  /// Tracks in-app copy provenance so a higher-marked copy can't be pasted into
+  /// a lower-marked destination (spillage block), and pasting elevated content
+  /// into an unmarked channel raises the composer's marking to match. Absent ⇒
+  /// paste is not guarded (native paste).
+  final ClipboardGuard? clipboardGuard;
 
   /// When non-null, the channel is itself marked at this level: the picker is
   /// LOCKED to it (the channel is the portion — every message takes this level).
@@ -127,12 +142,21 @@ class _MessageComposerState extends State<MessageComposer> {
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
+    final keys = HardwareKeyboard.instance;
+    final ctrl = keys.isControlPressed || keys.isMetaPressed;
+
+    // Guarded paste: intercept Ctrl/Cmd+V so a higher-marked in-app copy can't be
+    // pasted into a lower-marked destination, and so pasting elevated content
+    // raises the composer's marking to match (see ClipboardGuard).
+    if (ctrl && key == LogicalKeyboardKey.keyV && widget.clipboardGuard != null) {
+      unawaited(_guardedPaste());
+      return KeyEventResult.handled;
+    }
+
     final isEnter = key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;
 
-    final keys = HardwareKeyboard.instance;
-    final ctrl = keys.isControlPressed || keys.isMetaPressed;
     final shift = keys.isShiftPressed;
 
     if (ctrl) {
@@ -223,6 +247,52 @@ class _MessageComposerState extends State<MessageComposer> {
           TextSelection.collapsed(offset: selection.start + snippet.length),
     );
     _fieldFocus.requestFocus();
+  }
+
+  /// Reads the clipboard and, for tracked in-app marked content, either BLOCKS a
+  /// paste the destination can't hold, RAISES the composer's marking to match, or
+  /// inserts normally. Only invoked when a [ClipboardGuard] is wired.
+  Future<void> _guardedPaste() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text ?? '';
+    if (text.isEmpty || !mounted) return;
+    final decision = widget.clipboardGuard!.decidePaste(
+      pastedText: text,
+      channelMarking: widget.channelMarking,
+      destinationMarking: _effectiveMarking,
+      policy: widget.markingPolicy ?? MarkingPolicy.fallback,
+    );
+    switch (decision.action) {
+      case PasteGuardAction.allow:
+        _insertText(text);
+      case PasteGuardAction.raise:
+        _applyMarking(decision.targetMarking!);
+        _insertText(text);
+        _notify('Marking raised to ${decision.targetMarking} to match pasted content');
+      case PasteGuardAction.block:
+        _notify(
+          '${decision.sourceMarking} content can’t be pasted into this ${widget.channelMarking} channel',
+          isError: true,
+        );
+    }
+  }
+
+  /// Sets the per-message level + categories from a canonical marking string
+  /// (used when a paste propagates its source marking into an unmarked channel).
+  void _applyMarking(String marking) {
+    setState(() {
+      _marking = markingLevelOf(marking);
+      _categories
+        ..clear()
+        ..addAll(markingCategoriesOf(marking));
+    });
+  }
+
+  void _notify(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: isError ? AppColors.bad : null),
+    );
   }
 
   /// Replaces the field with `/<name> ` when a suggestion is chosen.

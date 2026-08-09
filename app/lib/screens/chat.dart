@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../commands.dart';
 import '../formatting.dart';
+import '../clipboard_guard.dart';
 import '../marking.dart';
 import '../models.dart';
 import '../theme.dart';
@@ -463,6 +464,23 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Tracks the classification provenance of in-app copies so a paste into a
+  /// lower-marked destination is guarded (the composer enforces the decision; the
+  /// server still enforces the channel ceiling on post).
+  final _clipboardGuard = ClipboardGuard();
+
+  /// Copies a message's text and records its marking as the clipboard provenance.
+  void _copyMessage(Message message) {
+    final text = message.content ?? '';
+    if (text.isEmpty) return;
+    unawaited(_clipboardGuard.recordCopy(text, message.marking));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Copied ${message.marking} text')),
+      );
+    }
+  }
+
   /// Applies a reaction add/remove to the matching message in the transcript.
   /// Idempotent — adding a reaction already present (or removing an absent one)
   /// is a no-op — so a live event echoing an optimistic local toggle is safe.
@@ -910,6 +928,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onSend: _handleSend,
             markingLevels: policy.levels,
             markingCategories: policy.categories,
+            markingPolicy: policy,
+            clipboardGuard: _clipboardGuard,
             channelMarking: selected.isMarked ? selected.cuiMarking : null,
             initialMarking: policy.defaultLevel,
           ),
@@ -958,6 +978,7 @@ class _ChatScreenState extends State<ChatScreen> {
       onRedact: canThread ? _redactMessage : null,
       onEdit: canThread ? _editMessage : null,
       onViewHistory: canThread ? _openHistory : null,
+      onCopy: _copyMessage,
       // Per-message marking + mask-until-revealed only when the channel isn't itself the portion.
       showMarking: !selected.isMarked,
       markingPolicy: widget.principal.marking,
@@ -988,6 +1009,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onRedact: _redactMessage,
             onEdit: _editMessage,
             onViewHistory: _openHistory,
+            onCopy: _copyMessage,
             showMarking: !channel.isMarked,
             markingPolicy: widget.principal.marking,
             revealedIds: _revealedMessageIds,
@@ -999,6 +1021,8 @@ class _ChatScreenState extends State<ChatScreen> {
           onSend: (text, marking) => _sendReply(channel, parent.id, text, marking),
           markingLevels: widget.principal.marking.levels,
           markingCategories: widget.principal.marking.categories,
+          markingPolicy: widget.principal.marking,
+          clipboardGuard: _clipboardGuard,
           channelMarking: channel.isMarked ? channel.cuiMarking : null,
           initialMarking: widget.principal.marking.defaultLevel,
         ),

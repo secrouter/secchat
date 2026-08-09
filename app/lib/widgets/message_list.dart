@@ -37,6 +37,7 @@ class MessageList extends StatefulWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.onCopy,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -73,6 +74,10 @@ class MessageList extends StatefulWidget {
   /// View a message's edit history (null disables it). Offered on any edited
   /// message, to anyone who can see the message.
   final void Function(Message message)? onViewHistory;
+
+  /// Copy a message's text (null disables it). Records the copy's classification
+  /// provenance so a later paste into a lower-marked destination is guarded.
+  final void Function(Message message)? onCopy;
 
   /// Mark + mask above-baseline messages per-message — set only when the channel
   /// is unmarked (a marked channel's banner carries the level for everything).
@@ -155,6 +160,7 @@ class _MessageListState extends State<MessageList> {
               onRedact: widget.onRedact,
               onEdit: widget.onEdit,
               onViewHistory: widget.onViewHistory,
+              onCopy: widget.onCopy,
               showMarking: widget.showMarking,
               markingPolicy: widget.markingPolicy,
               revealedIds: widget.revealedIds,
@@ -179,6 +185,7 @@ class _TranscriptTile extends StatelessWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.onCopy,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -194,6 +201,7 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onRedact;
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
+  final void Function(Message message)? onCopy;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -215,6 +223,7 @@ class _TranscriptTile extends StatelessWidget {
         onRedact: onRedact,
         onEdit: onEdit,
         onViewHistory: onViewHistory,
+        onCopy: onCopy,
         showMarking: showMarking,
         markingPolicy: markingPolicy,
         revealedIds: revealedIds,
@@ -241,6 +250,7 @@ class _MessageBubble extends StatelessWidget {
     this.onRedact,
     this.onEdit,
     this.onViewHistory,
+    this.onCopy,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -257,6 +267,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onRedact;
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
+  final void Function(Message message)? onCopy;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -284,7 +295,10 @@ class _MessageBubble extends StatelessWidget {
   bool get _canViewHistory =>
       onViewHistory != null && message.isEdited && !message.isRedacted;
 
-  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory;
+  // Copy is offered on any non-redacted message (there's nothing to copy from a tombstone).
+  bool get _canCopy => onCopy != null && !message.isRedacted;
+
+  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory || _canCopy;
 
   @override
   Widget build(BuildContext context) {
@@ -395,6 +409,7 @@ class _MessageBubble extends StatelessWidget {
                     onViewHistory:
                         _canViewHistory ? () => onViewHistory!(message) : null,
                     onRedact: _canRedact ? () => onRedact!(message) : null,
+                    onCopy: _canCopy ? () => onCopy!(message) : null,
                   ),
               ],
             ),
@@ -810,11 +825,12 @@ class _ThreadChip extends StatelessWidget {
 /// The per-message overflow menu (⋮). Currently just Redact — a governed
 /// content purge — shown to a message's author or an admin.
 class _MessageMenu extends StatelessWidget {
-  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact});
+  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact, this.onCopy});
 
   final VoidCallback? onEdit;
   final VoidCallback? onViewHistory;
   final VoidCallback? onRedact;
+  final VoidCallback? onCopy;
 
   @override
   Widget build(BuildContext context) {
@@ -829,6 +845,8 @@ class _MessageMenu extends StatelessWidget {
         color: AppColors.surfaceRaised,
         onSelected: (value) {
           switch (value) {
+            case 'copy':
+              onCopy?.call();
             case 'edit':
               onEdit?.call();
             case 'history':
@@ -838,6 +856,17 @@ class _MessageMenu extends StatelessWidget {
           }
         },
         itemBuilder: (_) => [
+          if (onCopy != null)
+            const PopupMenuItem<String>(
+              value: 'copy',
+              child: Row(
+                children: [
+                  Icon(Icons.copy_outlined, size: 15, color: AppColors.text),
+                  SizedBox(width: 8),
+                  Text('Copy text', style: TextStyle(color: AppColors.text, fontSize: 13)),
+                ],
+              ),
+            ),
           if (onEdit != null)
             const PopupMenuItem<String>(
               value: 'edit',

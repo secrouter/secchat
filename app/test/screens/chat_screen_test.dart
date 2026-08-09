@@ -675,7 +675,12 @@ void main() {
     await pumpSettled(tester);
 
     expect(find.textContaining("bob's message"), findsOneWidget);
-    expect(find.byTooltip('Message actions'), findsNothing);
+    // The actions menu exists for everyone (Copy text), but a non-author/non-admin
+    // gets NO Redact… item in it.
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Copy text'), findsOneWidget);
+    expect(find.text('Redact…'), findsNothing);
   });
 
   testWidgets('the author edits their own message via the menu + edit dialog', (tester) async {
@@ -747,8 +752,12 @@ void main() {
     );
     await pumpSettled(tester);
 
-    // No overflow menu at all on someone else's un-edited message (alice isn't an admin).
-    expect(find.byTooltip('Message actions'), findsNothing);
+    // The menu exists (Copy text is offered to everyone), but there's no Edit… item
+    // on someone else's message (edit is author-only).
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Copy text'), findsOneWidget);
+    expect(find.text('Edit…'), findsNothing);
   });
 
   testWidgets('an edited message shows "(edited)" and View history opens the revision list', (tester) async {

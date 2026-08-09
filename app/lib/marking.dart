@@ -90,6 +90,26 @@ class MarkingPolicy {
   );
 }
 
+/// Client-side lattice DOMINANCE (mirrors the server): does [container] dominate
+/// [content] — at least as high in level AND carrying a SUPERSET of its
+/// categories? Used by the clipboard guard to decide whether a destination can
+/// hold pasted content. (The server enforces this authoritatively on post.)
+bool markingDominates(MarkingPolicy policy, String container, String content) {
+  if (policy.rank(container) < policy.rank(content)) return false;
+  final containerCats = markingCategoriesOf(container).toSet();
+  return markingCategoriesOf(content).every(containerCats.contains);
+}
+
+/// The least marking that dominates BOTH [a] and [b]: the higher level, carrying
+/// the union of that level's categories (a category from the lower marking that
+/// doesn't apply to the joined level is dropped). Canonical banner form.
+String markingJoin(MarkingPolicy policy, String a, String b) {
+  final level = policy.rank(a) >= policy.rank(b) ? markingLevelOf(a) : markingLevelOf(b);
+  final legal = policy.categoriesFor(level).map((c) => c.code).toSet();
+  final cats = <String>{...markingCategoriesOf(a), ...markingCategoriesOf(b)}.where(legal.contains).toList()..sort();
+  return cats.isEmpty ? level : '$level//${cats.join('/')}';
+}
+
 /// The colors for a classification banner/chip at [level] (a bare level or a
 /// composite marking string — the color keys off the LEVEL part). Keyed by the
 /// level NAME so a custom deployment ladder still gets sensible, conventional

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secchat_app/clipboard_guard.dart';
 import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/widgets/composer.dart';
 
@@ -195,5 +196,56 @@ void main() {
     await tester.pump();
 
     expect(sentMarking, 'CUI//SP-PRVCY');
+  });
+
+  testWidgets('Ctrl+V of higher-marked in-app content into a marked channel is blocked', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    // Make the (mocked) platform clipboard answer getData with the copied text.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async => call.method == 'Clipboard.getData' ? <String, dynamic>{'text': 'cui secret'} : null,
+    );
+    addTearDown(() =>
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+
+    final guard = ClipboardGuard();
+    await guard.recordCopy('cui secret', 'CUI'); // an in-app copy of CUI content
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking) async {},
+            markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
+            markingPolicy: const MarkingPolicy(
+              levels: ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
+              defaultLevel: 'UNCLASSIFIED',
+            ),
+            clipboardGuard: guard,
+            channelMarking: 'PROPRIETARY', // a marked channel with a PROPRIETARY ceiling
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pump(); // key handler kicks the async guarded paste
+    await tester.pump(); // getData resolves → decision
+    await tester.pump(const Duration(milliseconds: 400)); // SnackBar slides in
+
+    // The paste was refused (nothing inserted) and a spillage warning is shown.
+    expect(_fieldText(tester), '');
+    expect(find.textContaining('pasted into this'), findsOneWidget);
+
+    // Let the SnackBar auto-dismiss so no timer is left pending at teardown.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
   });
 }
