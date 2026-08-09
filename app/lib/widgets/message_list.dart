@@ -136,75 +136,103 @@ class _MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isAgent = message.authorType == AuthorType.agent;
     final authorColor = isAgent || isOwn ? AppColors.accent : AppColors.text;
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-      decoration: BoxDecoration(
-        color: isAgent ? AppColors.accentSoft : Colors.transparent,
-        border: Border(
-          left: BorderSide(
-            color: isAgent ? AppColors.accentBorder : Colors.transparent,
-            width: 2,
-          ),
+
+    // Your own messages sit on the right in a filled bubble (avatar on the
+    // right); an agent keeps its left accent-bar treatment; everyone else is
+    // plain and left-aligned. All are width-capped for readable line lengths.
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment:
+          isOwn ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Flexible(
+              child: Text(
+                message.authorRef,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: authorColor,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              formatClockTime(message.createdAt),
+              style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        message.isRedacted
+            ? const Text(
+                'message redacted',
+                style: TextStyle(
+                  fontStyle: FontStyle.italic,
+                  color: AppColors.textFaint,
+                  fontSize: 14,
+                ),
+              )
+            : MarkdownText(
+                message.content!,
+                baseStyle: const TextStyle(
+                  color: AppColors.text,
+                  fontSize: 14,
+                  height: 1.4,
+                ),
+              ),
+      ],
+    );
+
+    final avatar = _Avatar(ref: message.authorRef, isAgent: isAgent);
+
+    final BoxDecoration decoration;
+    if (isAgent) {
+      decoration = BoxDecoration(
+        color: AppColors.accentSoft,
+        border: const Border(
+          left: BorderSide(color: AppColors.accentBorder, width: 2),
         ),
         borderRadius: BorderRadius.circular(AppRadius.sm),
+      );
+    } else if (isOwn) {
+      decoration = BoxDecoration(
+        color: AppColors.surfaceRaised,
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      );
+    } else {
+      decoration = BoxDecoration(
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      );
+    }
+
+    final bubble = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 680),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: decoration,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: isOwn
+              ? [Flexible(child: content), const SizedBox(width: 10), avatar]
+              : [avatar, const SizedBox(width: 12), Flexible(child: content)],
+        ),
       ),
+    );
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Avatar(ref: message.authorRef, isAgent: isAgent),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Flexible(
-                      child: Text(
-                        message.authorRef,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w700,
-                          color: authorColor,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      formatClockTime(message.createdAt),
-                      style: AppFonts.mono(
-                        fontSize: 11,
-                        color: AppColors.textFaint,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                message.isRedacted
-                    ? const Text(
-                        'message redacted',
-                        style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: AppColors.textFaint,
-                          fontSize: 14,
-                        ),
-                      )
-                    : MarkdownText(
-                        message.content!,
-                        baseStyle: const TextStyle(
-                          color: AppColors.text,
-                          fontSize: 14,
-                          height: 1.4,
-                        ),
-                      ),
-              ],
-            ),
-          ),
-        ],
+        mainAxisAlignment:
+            isOwn ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [Flexible(child: bubble)],
       ),
     );
   }

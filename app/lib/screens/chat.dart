@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../commands.dart';
 import '../formatting.dart';
 import '../models.dart';
 import '../theme.dart';
@@ -223,6 +224,19 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _handleSend(String text) async {
     final channel = _selected;
     if (channel == null) return;
+    // A leading "/<known-command>" is a slash command; everything else
+    // (including a "/" that doesn't spell a command) is ordinary text.
+    final command = parseSlashCommand(text);
+    if (command != null) {
+      await _runCommand(channel, command);
+      return;
+    }
+    await _sendPlain(channel, text);
+  }
+
+  /// Sends ordinary (non-command) text: to the coding-agent session when this
+  /// channel has one, otherwise as a chat message.
+  Future<void> _sendPlain(Channel channel, String text) async {
     final sessionId = _codingSessionIdFor(channel.id);
     if (sessionId != null) {
       // A coding agent is driven by its runner, not chat history: input
@@ -243,6 +257,114 @@ class _ChatScreenState extends State<ChatScreen> {
     final message = await widget.api.postMessage(channel.id, text);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
+  }
+
+  /// Dispatches a parsed slash command. `/pi` is the pi passthrough: its text
+  /// goes straight to this channel's coding-agent *session*, so it only works
+  /// where such a session exists (there is nothing to pass through to
+  /// otherwise -- the "technical issue" the feature degrades on). `/shrug`
+  /// appends the shrug and sends via the normal path; `/help` opens a dialog.
+  Future<void> _runCommand(Channel channel, ParsedCommand command) async {
+    switch (command.command.name) {
+      case 'help':
+        _showCommandHelp();
+      case 'shrug':
+        final base = command.args.trim();
+        await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug');
+      case 'pi':
+        final input = command.args;
+        if (input.trim().isEmpty) {
+          _showError(
+            'Usage: /pi <message> — passes input to this channel’s coding agent.',
+          );
+          return;
+        }
+        final sessionId = _codingSessionIdFor(channel.id);
+        if (sessionId == null) {
+          _showError(
+            '/pi works only in a coding-agent channel with an active session.',
+          );
+          return;
+        }
+        await widget.api.sendInput(sessionId, input);
+        if (!mounted) return;
+        setState(() => _append(channel.id, MessageEntry(_localEcho('/pi $input'))));
+    }
+  }
+
+  void _showCommandHelp() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          side: const BorderSide(color: AppColors.border),
+        ),
+        title: const Text(
+          'Slash commands',
+          style: TextStyle(
+            color: AppColors.text,
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        content: SizedBox(
+          width: 440,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final command in kSlashCommands)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            command.display,
+                            style: AppFonts.mono(
+                              fontSize: 13,
+                              color: AppColors.accent,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (command.argHint.isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              command.argHint,
+                              style: AppFonts.mono(
+                                fontSize: 12.5,
+                                color: AppColors.textFaint,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        command.summary,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// A locally-synthesized "sent" message for text handed to `sendInput`,

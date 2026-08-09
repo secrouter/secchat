@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secchat_app/commands.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/screens/chat.dart';
 import 'package:secchat_app/widgets/composer.dart';
@@ -254,4 +255,106 @@ void main() {
       expect(find.text('run the tests'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    '/pi in a coding-agent channel passes its text straight through to sendInput',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final fake = FakeApiClient(me: _principal, channels: const []);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      await tester.tap(find.text('New coding agent'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'infra-fixer');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+      await pumpSettled(tester, times: 10);
+
+      final composerField = find.descendant(
+        of: find.byType(MessageComposer),
+        matching: find.byType(TextField),
+      );
+      // A leading slash inside the pi passthrough is preserved -- this is how
+      // you send pi its own slash command (e.g. /model) past the client's
+      // command parser.
+      await tester.enterText(composerField, '/pi /model list');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await pumpSettled(tester);
+
+      expect(fake.sendInputCalls, hasLength(1));
+      expect(fake.sendInputCalls.single.sessionId, 'session-1');
+      expect(fake.sendInputCalls.single.text, '/model list');
+      expect(fake.postMessageCalls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    '/pi in a non-coding channel neither sends input nor posts a message',
+    (tester) async {
+      final fake = FakeApiClient(me: _principal, channels: [_channels[0]]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      await tester.enterText(find.byType(TextField), '/pi do something');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await pumpSettled(tester);
+
+      // Nothing is sent anywhere (no pi session to pass through to), and the
+      // user is told why.
+      expect(fake.sendInputCalls, isEmpty);
+      expect(fake.postMessageCalls, isEmpty);
+      expect(find.textContaining('/pi works only'), findsOneWidget);
+    },
+  );
+
+  testWidgets('/help opens the slash-command help dialog', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: [_channels[0]]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+      ),
+    );
+    await pumpSettled(tester);
+
+    await tester.enterText(find.byType(TextField), '/help');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+
+    expect(find.text('Slash commands'), findsOneWidget);
+    expect(fake.postMessageCalls, isEmpty);
+  });
+
+  testWidgets('/shrug sends the shrug as an ordinary message', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: [_channels[0]]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+      ),
+    );
+    await pumpSettled(tester);
+
+    await tester.enterText(find.byType(TextField), '/shrug');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+
+    expect(fake.postMessageCalls, hasLength(1));
+    expect(fake.postMessageCalls.single.content, kShrug);
+  });
 }
