@@ -17,11 +17,13 @@ class AppTopBar extends StatelessWidget {
     required this.principal,
     required this.status,
     required this.onSignOut,
+    this.onSearch,
   });
 
   final Principal principal;
   final ConnStatus status;
   final VoidCallback onSignOut;
+  final VoidCallback? onSearch;
 
   @override
   Widget build(BuildContext context) {
@@ -36,6 +38,15 @@ class AppTopBar extends StatelessWidget {
         children: [
           const BrandMark(small: true),
           const Spacer(),
+          if (onSearch != null) ...[
+            IconButton(
+              onPressed: onSearch,
+              icon: const Icon(Icons.search, size: 18),
+              tooltip: 'Search messages',
+              color: AppColors.textMuted,
+            ),
+            const SizedBox(width: 6),
+          ],
           _ConnIndicator(status: status),
           const SizedBox(width: 16),
           _UserChip(principal: principal),

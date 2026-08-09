@@ -223,6 +223,33 @@ class Reaction {
   );
 }
 
+/// One hit from `GET /search` — a message the caller can see whose content
+/// matched, carrying its [channelId] so the UI can jump to that channel.
+class SearchHit {
+  const SearchHit({
+    required this.channelId,
+    required this.messageId,
+    required this.authorRef,
+    required this.content,
+    required this.createdAt,
+  });
+
+  final String channelId;
+  final String messageId;
+  final String authorRef;
+  final String content;
+  final DateTime createdAt;
+
+  factory SearchHit.fromJson(Map<String, dynamic> json) => SearchHit(
+    channelId: json['channelId'] as String? ?? '',
+    messageId: json['id'] as String? ?? '',
+    authorRef: json['authorRef'] as String? ?? '',
+    content: json['content'] as String? ?? '',
+    createdAt:
+        DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
+  );
+}
+
 /// An agent as embedded in a `POST /agents` response.
 class Agent {
   const Agent({required this.id, required this.kind, required this.name});

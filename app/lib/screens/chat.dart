@@ -14,6 +14,7 @@ import '../widgets/composer.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
+import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/user_picker.dart';
 
@@ -66,6 +67,12 @@ class _ChatScreenState extends State<ChatScreen> {
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
 
+  // Per-channel unread counts, shown as sidebar badges. Refreshed on load and
+  // channel switch; the active channel is kept read as messages arrive. (Live
+  // unread for BACKGROUND channels would need a global socket — a follow-up;
+  // the client subscribes only to the open channel today.)
+  final Map<String, int> _unreadByChannel = {};
+
   @override
   void initState() {
     super.initState();
@@ -101,6 +108,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_selected == null && channels.isNotEmpty) {
         await _selectChannel(channels.first);
       }
+      await _loadUnread();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -114,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_selected?.id == channel.id) return;
     await _wsSub?.cancel();
     _wsSub = null;
+    if (!mounted) return; // could have been disposed during the await
 
     final cached = _transcripts[channel.id];
     setState(() {
@@ -142,6 +151,64 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     _subscribe(channel.id);
+    // Viewing a channel marks it read up to its latest message; then refresh the
+    // other channels' unread counts.
+    unawaited(_markChannelRead(channel.id).then((_) => _loadUnread()));
+  }
+
+  /// Fetches unread counts for every channel into [_unreadByChannel]. Failures
+  /// per channel are ignored (an absent count renders as no badge).
+  Future<void> _loadUnread() async {
+    final counts = <String, int>{};
+    for (final channel in List<Channel>.of(_channels)) {
+      try {
+        counts[channel.id] = await widget.api.getUnread(channel.id);
+      } catch (_) {
+        // ignore — non-critical
+      }
+    }
+    if (!mounted) return;
+    setState(() => counts.forEach((id, count) => _unreadByChannel[id] = count));
+  }
+
+  /// Marks [channelId] read up to the highest message seq currently loaded and
+  /// zeroes its badge. No-op (badge zeroed) when nothing is loaded yet.
+  Future<void> _markChannelRead(String channelId) async {
+    var maxSeq = 0;
+    for (final entry in _transcripts[channelId] ?? const <TranscriptEntry>[]) {
+      if (entry is MessageEntry && entry.message.seq > maxSeq) {
+        maxSeq = entry.message.seq;
+      }
+    }
+    if (maxSeq > 0) {
+      try {
+        await widget.api.markRead(channelId, maxSeq);
+      } catch (_) {
+        // ignore — non-critical
+      }
+    }
+    if (!mounted) return;
+    setState(() => _unreadByChannel[channelId] = 0);
+  }
+
+  Future<void> _openSearch() async {
+    final hit = await showMessageSearch(
+      context,
+      api: widget.api,
+      channelLabel: (channelId) {
+        for (final channel in _channels) {
+          if (channel.id == channelId) return _channelTitle(channel);
+        }
+        return channelId;
+      },
+    );
+    if (hit == null || !mounted) return;
+    for (final channel in _channels) {
+      if (channel.id == hit.channelId) {
+        await _selectChannel(channel);
+        return;
+      }
+    }
   }
 
   Future<void> _retryMessages(Channel channel) async {
@@ -193,6 +260,9 @@ class _ChatScreenState extends State<ChatScreen> {
         case WsMessageEvent(:final message):
           _typing = null;
           _appendMessageUnlessDuplicate(channelId, message);
+          // You're viewing this channel (events only fire for the open one), so
+          // advance the read marker to include the new message.
+          unawaited(_markChannelRead(channelId));
         case WsAssistantDeltaEvent(:final agentId, :final delta):
           _typing = _typing?.agentId == agentId
               ? TypingState(agentId, _typing!.text + delta)
@@ -558,6 +628,7 @@ class _ChatScreenState extends State<ChatScreen> {
             principal: widget.principal,
             status: _connStatus,
             onSignOut: widget.onSignOut,
+            onSearch: _openSearch,
           ),
           Expanded(
             child: Row(
@@ -571,6 +642,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   agentKindByChannel: _agentKindByChannel,
                   currentUserSub: widget.principal.sub,
                   usersBySub: _usersBySub,
+                  unreadByChannel: _unreadByChannel,
                   onSelect: _selectChannel,
                   onNewChannel: _handleNewChannel,
                   onNewDm: _handleNewDm,

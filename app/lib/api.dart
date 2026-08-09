@@ -60,6 +60,18 @@ abstract class ApiClient {
   Future<void> addReaction(String messageId, String emoji);
   Future<void> removeReaction(String messageId, String emoji);
 
+  /// Unread count for a channel (messages with seq beyond the caller's
+  /// last-read marker).
+  Future<int> getUnread(String channelId);
+
+  /// Mark [channelId] read up to [seq] — the latest message seq the caller
+  /// has seen.
+  Future<void> markRead(String channelId, int seq);
+
+  /// Permission-scoped full-text message search (`GET /search`): only messages
+  /// in channels the caller belongs to, newest first.
+  Future<List<SearchHit>> search(String query);
+
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
@@ -248,6 +260,24 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> removeReaction(String messageId, String emoji) async {
     await _delete('/messages/$messageId/reactions/${Uri.encodeComponent(emoji)}');
+  }
+
+  @override
+  Future<int> getUnread(String channelId) async {
+    final data = await _get('/channels/$channelId/unread') as Map<String, dynamic>;
+    return (data['unread'] as num?)?.toInt() ?? 0;
+  }
+
+  @override
+  Future<void> markRead(String channelId, int seq) async {
+    await _post('/channels/$channelId/read', {'seq': seq});
+  }
+
+  @override
+  Future<List<SearchHit>> search(String query) async {
+    final data =
+        await _get('/search?q=${Uri.encodeQueryComponent(query)}') as List<dynamic>;
+    return data.map((e) => SearchHit.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   @override

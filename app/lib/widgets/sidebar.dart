@@ -16,6 +16,7 @@ class ChatSidebar extends StatelessWidget {
     required this.agentKindByChannel,
     required this.currentUserSub,
     required this.usersBySub,
+    required this.unreadByChannel,
     required this.onSelect,
     required this.onNewChannel,
     required this.onNewAssistant,
@@ -35,6 +36,9 @@ class ChatSidebar extends StatelessWidget {
 
   /// Directory (sub -> user) for resolving a DM peer's display name.
   final Map<String, User> usersBySub;
+
+  /// Per-channel unread counts (channelId -> count); rendered as a badge.
+  final Map<String, int> unreadByChannel;
 
   final ValueChanged<Channel> onSelect;
   final VoidCallback onNewChannel;
@@ -145,6 +149,7 @@ class ChatSidebar extends StatelessWidget {
       label: labelOverride ?? (channel.name.isEmpty ? '(unnamed)' : channel.name),
       isSelected: channel.id == selectedChannelId,
       agentKind: agentKindByChannel[channel.id],
+      unread: unreadByChannel[channel.id] ?? 0,
       onTap: () => onSelect(channel),
     );
 
@@ -214,12 +219,40 @@ class _SidebarActionButton extends StatelessWidget {
   }
 }
 
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: AppColors.accent,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          color: AppColors.onAccent,
+        ),
+      ),
+    );
+  }
+}
+
 class _ChannelListItem extends StatelessWidget {
   const _ChannelListItem({
     required this.channel,
     required this.label,
     required this.isSelected,
     required this.agentKind,
+    required this.unread,
     required this.onTap,
   });
 
@@ -227,6 +260,7 @@ class _ChannelListItem extends StatelessWidget {
   final String label;
   final bool isSelected;
   final AgentKind? agentKind;
+  final int unread;
   final VoidCallback onTap;
 
   @override
@@ -264,11 +298,18 @@ class _ChannelListItem extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13.5,
-                      color: isSelected ? AppColors.text : AppColors.textMuted,
+                      fontWeight: unread > 0 ? FontWeight.w700 : FontWeight.w400,
+                      color: unread > 0
+                          ? AppColors.text
+                          : (isSelected ? AppColors.text : AppColors.textMuted),
                     ),
                   ),
                 ),
                 const SizedBox(width: 6),
+                if (unread > 0) ...[
+                  _UnreadBadge(count: unread),
+                  const SizedBox(width: 6),
+                ],
                 ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
               ],
             ),

@@ -127,6 +127,36 @@ class FakeApiClient implements ApiClient {
     reactionCalls.add((messageId: messageId, emoji: emoji, add: false));
   }
 
+  /// Per-channel unread counts reported by [getUnread]; tests set these directly.
+  final Map<String, int> unreadByChannel = {};
+
+  /// Every `markRead` call, in order.
+  final List<({String channelId, int seq})> markReadCalls = [];
+
+  /// Results [search] returns; the queries it was called with.
+  List<SearchHit> searchResults = const [];
+  final List<String> searchCalls = [];
+
+  @override
+  Future<int> getUnread(String channelId) async {
+    _maybeThrow('getUnread');
+    return unreadByChannel[channelId] ?? 0;
+  }
+
+  @override
+  Future<void> markRead(String channelId, int seq) async {
+    _maybeThrow('markRead');
+    markReadCalls.add((channelId: channelId, seq: seq));
+    unreadByChannel[channelId] = 0;
+  }
+
+  @override
+  Future<List<SearchHit>> search(String query) async {
+    _maybeThrow('search');
+    searchCalls.add(query);
+    return List.of(searchResults);
+  }
+
   @override
   Future<List<User>> getUsers() async {
     _maybeThrow('getUsers');

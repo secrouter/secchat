@@ -460,4 +460,80 @@ void main() {
 
     expect(find.textContaining('prompted by dev.alice'), findsOneWidget);
   });
+
+  testWidgets('unread badges render for background channels; opening a channel marks it read', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [
+        Channel(id: 'c1', kind: ChannelKind.human, name: 'general'),
+        Channel(id: 'c2', kind: ChannelKind.human, name: 'random'),
+      ],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm5',
+            seq: 5,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: 'hey',
+            createdAt: DateTime(2026, 1, 1),
+          ),
+        ],
+      },
+    );
+    fake.unreadByChannel['c2'] = 3; // c2 is not opened → keeps its badge
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester, times: 12);
+
+    // c1 auto-selected → marked read up to its latest seq (5).
+    expect(fake.markReadCalls, contains((channelId: 'c1', seq: 5)));
+    // c2 (background) shows its unread count.
+    expect(find.text('3'), findsOneWidget);
+  });
+
+  testWidgets('top-bar search finds a message and opens its channel', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [
+        Channel(id: 'c1', kind: ChannelKind.human, name: 'general'),
+        Channel(id: 'c2', kind: ChannelKind.human, name: 'random'),
+      ],
+    );
+    fake.searchResults = [
+      SearchHit(
+        channelId: 'c2',
+        messageId: 'm9',
+        authorRef: 'bob',
+        content: 'the secret plan',
+        createdAt: DateTime(2026, 1, 1),
+      ),
+    ];
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.byTooltip('Search messages'));
+    await pumpSettled(tester, times: 8);
+
+    final searchField = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(searchField, 'secret');
+    await tester.tap(find.byTooltip('Search')); // the suffix run-search button
+    await pumpSettled(tester, times: 8);
+
+    expect(fake.searchCalls, contains('secret'));
+    expect(find.textContaining('the secret plan'), findsOneWidget);
+
+    // Tapping the hit opens its channel (c2 → "random" in the header).
+    await tester.tap(find.textContaining('the secret plan'));
+    await pumpSettled(tester, times: 10);
+    expect(find.text('random'), findsWidgets);
+  });
 }
