@@ -172,7 +172,77 @@ function buildRouter(
   const router = new Router<Handler>();
 
   router.add("GET", "/me", async ({ res, principal }) => {
+    // Record/refresh this principal in the seen-users directory (from their real SSO claims) — the
+    // client calls /me on every load, so this is where a user first enters the roster that powers
+    // DM selection. Awaited so a just-signed-in user is discoverable by the /users call that
+    // typically follows on the same load.
+    await store.upsertUser({
+      sub: principal.sub,
+      email: principal.email,
+      displayName: principal.displayName,
+      groups: principal.groups,
+    });
     sendJson(res, 200, principal);
+  });
+
+  // The user directory (seen-users): everyone who has signed in via SSO, with their real group
+  // claims. Any authenticated user may read it (a team roster); it's what the DM picker lists.
+  router.add("GET", "/users", async ({ res }) => {
+    sendJson(res, 200, await store.listUsers());
+  });
+
+  // Groups derived from the directory — each group with the subs that claim it. "Real groups from
+  // SSO" surfaced as a roster-by-group, without a separate group store (the claims ARE the source).
+  router.add("GET", "/groups", async ({ res }) => {
+    const users = await store.listUsers();
+    const byGroup = new Map<string, string[]>();
+    for (const user of users) {
+      for (const group of user.groups) {
+        const members = byGroup.get(group);
+        if (members) members.push(user.sub);
+        else byGroup.set(group, [user.sub]);
+      }
+    }
+    const groups = [...byGroup.entries()]
+      .map(([name, members]) => ({ name, members }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    sendJson(res, 200, groups);
+  });
+
+  // Open (or reuse) a 1:1 DM with another user. Idempotent: one DM channel per pair, ever — a
+  // second call returns the existing one (200) rather than minting a duplicate (201). The target
+  // must be a known directory user (you can only DM someone SecChat has seen sign in).
+  router.add("POST", "/dm", async ({ req, res, principal }) => {
+    const body = (await readJsonBody(req)) as { user?: string };
+    const other = (body.user ?? "").trim();
+    if (!other) {
+      sendJson(res, 400, { error: "user required" });
+      return;
+    }
+    if (other === principal.sub) {
+      sendJson(res, 400, { error: "cannot DM yourself" });
+      return;
+    }
+    if (!(await store.getUser(other))) {
+      sendJson(res, 404, { error: "unknown user" });
+      return;
+    }
+    const existing = await store.findDmChannel(principal.sub, other);
+    if (existing) {
+      // Carry `members` so the client can label the DM with the peer immediately,
+      // exactly as GET /channels does for a DM.
+      sendJson(res, 200, { ...existing, members: [principal.sub, other] });
+      return;
+    }
+    const channel = await store.createChannel({
+      workspaceId: "ws-default",
+      kind: "dm",
+      createdBy: principal.sub,
+    });
+    await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
+    await store.addMember({ channelId: channel.id, memberRef: other, memberType: "user", role: "member" });
+    await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: other });
+    sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });
 
   router.add("POST", "/channels", async ({ req, res, principal }) => {
@@ -194,9 +264,19 @@ function buildRouter(
   // Store method — the same isMember gate every per-channel route below already applies.
   router.add("GET", "/channels", async ({ res, principal }) => {
     const chans = await store.listChannels();
-    const mine: Channel[] = [];
+    const mine: Array<Channel & { members?: string[] }> = [];
     for (const c of chans) {
-      if (await store.isMember(c.id, principal.sub)) mine.push(c);
+      if (!(await store.isMember(c.id, principal.sub))) continue;
+      if (c.kind === "dm") {
+        // A DM has no fixed name — the client labels it with the OTHER participant, so it needs
+        // the member subs. Only dm channels carry this (few of them, and only they need it).
+        const members = (await store.listMembers(c.id))
+          .filter((m) => m.memberType === "user")
+          .map((m) => m.memberRef);
+        mine.push({ ...c, members });
+      } else {
+        mine.push(c);
+      }
     }
     sendJson(res, 200, mine);
   });

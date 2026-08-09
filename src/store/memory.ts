@@ -63,6 +63,7 @@ import type {
   SessionStatus,
   SessionStore,
   Store,
+  User,
   Webhook,
 } from "../types.ts";
 
@@ -80,6 +81,7 @@ export class MemoryStore implements Store, SessionStore {
   #lastRead = new Map<Id, Map<string, number>>(); // channelId -> (userSub -> last-read seq)
   #webhooksById = new Map<Id, Webhook>();
   #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
+  #users = new Map<string, User>(); // sub -> directory entry (seen-users), insertion order
 
   async createChannel(input: Omit<Channel, "id" | "createdAt">): Promise<Channel> {
     const channel: Channel = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -111,6 +113,48 @@ export class MemoryStore implements Store, SessionStore {
    * audit-review console (AU 3.3.5/6), same idiom as listMembers/listAgentsByOwner. */
   async listChannels(): Promise<Channel[]> {
     return [...this.#channels.values()];
+  }
+
+  // ── Directory of seen users (captured from SSO tokens) ────────────────────────────────────────
+
+  /** `email`/`displayName` are preserved from the prior observation when this one omits them (a
+   * dev token carries neither, so a real profile field isn't clobbered by a later thin sign-in);
+   * `groups` always reflects the latest token. Absent optional keys (not present-with-undefined)
+   * keep the object shape identical to PgStore's `compact`-ed rows. */
+  async upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }): Promise<User> {
+    const existing = this.#users.get(input.sub);
+    const email = input.email ?? existing?.email;
+    const displayName = input.displayName ?? existing?.displayName;
+    const user: User = {
+      sub: input.sub,
+      ...(email !== undefined ? { email } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+      groups: input.groups,
+      lastSeenAt: new Date().toISOString(),
+    };
+    this.#users.set(user.sub, user);
+    return user;
+  }
+
+  async listUsers(): Promise<User[]> {
+    return [...this.#users.values()];
+  }
+
+  async getUser(sub: string): Promise<User | null> {
+    return this.#users.get(sub) ?? null;
+  }
+
+  /** Scans dm channels for one whose user members are exactly {subA, subB}. There are few DMs per
+   * user, so a linear scan is fine (PgStore does the equivalent with a SQL predicate). */
+  async findDmChannel(subA: string, subB: string): Promise<Channel | null> {
+    for (const channel of this.#channels.values()) {
+      if (channel.kind !== "dm") continue;
+      const userRefs = (this.#members.get(channel.id) ?? [])
+        .filter((m) => m.memberType === "user")
+        .map((m) => m.memberRef);
+      if (userRefs.length === 2 && userRefs.includes(subA) && userRefs.includes(subB)) return channel;
+    }
+    return null;
   }
 
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {

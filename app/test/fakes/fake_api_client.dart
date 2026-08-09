@@ -10,9 +10,11 @@ class FakeApiClient implements ApiClient {
   FakeApiClient({
     Principal? me,
     List<Channel>? channels,
+    List<User>? users,
     Map<String, List<Message>>? messagesByChannel,
   }) : me = me ?? const Principal(sub: 'dev.tester', groups: []),
        channels = List.of(channels ?? const []),
+       users = List.of(users ?? const []),
        _messagesByChannel = {
          for (final entry in (messagesByChannel ?? const {}).entries)
            entry.key: List.of(entry.value),
@@ -20,7 +22,9 @@ class FakeApiClient implements ApiClient {
 
   final Principal me;
   List<Channel> channels;
+  List<User> users;
   final Map<String, List<Message>> _messagesByChannel;
+  final Map<String, Channel> _dmByPeer = {};
 
   /// Every `postMessage` call, in order, as `(channelId, content)`.
   final List<({String channelId, String content})> postMessageCalls = [];
@@ -30,6 +34,9 @@ class FakeApiClient implements ApiClient {
 
   /// Every `createAgent` call, in order.
   final List<({AgentKind kind, String name})> createAgentCalls = [];
+
+  /// Every `createDm` call, in order, as the target user sub.
+  final List<String> createDmCalls = [];
 
   /// Every `grantExecute` call, in order.
   final List<String> grantExecuteCalls = [];
@@ -103,6 +110,31 @@ class FakeApiClient implements ApiClient {
   Future<void> sendInput(String sessionId, String text) async {
     _maybeThrow('sendInput');
     sendInputCalls.add((sessionId: sessionId, text: text));
+  }
+
+  @override
+  Future<List<User>> getUsers() async {
+    _maybeThrow('getUsers');
+    return List.of(users);
+  }
+
+  @override
+  Future<Channel> createDm(String userSub) async {
+    _maybeThrow('createDm');
+    createDmCalls.add(userSub);
+    // Idempotent, like the real backend: the same peer always resolves to the
+    // same channel.
+    final existing = _dmByPeer[userSub];
+    if (existing != null) return existing;
+    final channel = Channel(
+      id: 'dm-${_dmByPeer.length + 1}',
+      kind: ChannelKind.dm,
+      name: '',
+      members: [me.sub, userSub],
+    );
+    _dmByPeer[userSub] = channel;
+    channels = [...channels, channel];
+    return channel;
   }
 
   @override

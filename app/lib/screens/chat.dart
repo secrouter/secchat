@@ -15,6 +15,7 @@ import '../widgets/empty_state.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/sidebar.dart';
+import '../widgets/user_picker.dart';
 
 /// The main chat surface: sidebar + selected channel's transcript +
 /// composer, backed by [api]. Everything here goes through the [ApiClient]
@@ -62,10 +63,25 @@ class _ChatScreenState extends State<ChatScreen> {
   final Set<String> _endedSessionIds = {};
   int _localEchoSeq = 0;
 
+  // The seen-users directory (sub -> user), for DM peer names + the DM picker.
+  Map<String, User> _usersBySub = {};
+
   @override
   void initState() {
     super.initState();
     _loadChannels();
+    _loadUsers();
+  }
+
+  Future<void> _loadUsers() async {
+    try {
+      final users = await widget.api.getUsers();
+      if (!mounted) return;
+      setState(() => _usersBySub = {for (final u in users) u.sub: u});
+    } catch (_) {
+      // The directory is non-critical to the main chat view: on failure, DMs
+      // fall back to showing the peer's sub and the picker is simply empty.
+    }
   }
 
   @override
@@ -400,6 +416,41 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _handleNewDm() async {
+    // Refresh the directory first so it reflects anyone who signed in since load.
+    await _loadUsers();
+    if (!mounted) return;
+    final candidates =
+        _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList()
+          ..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+    final picked = await showUserPicker(context, candidates);
+    if (picked == null || !mounted) return;
+    try {
+      // Idempotent server-side: an existing DM with this person comes back as-is.
+      final channel = await widget.api.createDm(picked.sub);
+      if (!mounted) return;
+      setState(() {
+        if (!_channels.any((c) => c.id == channel.id)) {
+          _channels = [..._channels, channel];
+        }
+      });
+      await _selectChannel(channel);
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
+  /// The header/title for [channel]: a DM shows the other participant's name
+  /// (from the directory), everything else shows its channel name.
+  String _channelTitle(Channel channel) {
+    if (channel.kind == ChannelKind.dm) {
+      final peer = channel.peer(widget.principal.sub);
+      if (peer != null) return _usersBySub[peer]?.label ?? peer;
+      return channel.name.isEmpty ? 'Direct message' : channel.name;
+    }
+    return channel.name.isEmpty ? '(unnamed)' : channel.name;
+  }
+
   Future<void> _handleNewAgent(AgentKind kind) async {
     final isCoding = kind == AgentKind.coding;
     final name = await showNewItemDialog(
@@ -458,8 +509,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   loading: _loadingChannels,
                   errorText: _channelsError,
                   agentKindByChannel: _agentKindByChannel,
+                  currentUserSub: widget.principal.sub,
+                  usersBySub: _usersBySub,
                   onSelect: _selectChannel,
                   onNewChannel: _handleNewChannel,
+                  onNewDm: _handleNewDm,
                   onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
                   onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
                 ),
@@ -499,6 +553,7 @@ class _ChatScreenState extends State<ChatScreen> {
       children: [
         _ChannelHeader(
           channel: selected,
+          title: _channelTitle(selected),
           agentKind: _agentKindByChannel[selected.id],
         ),
         if (codingStrip != null) codingStrip,
@@ -529,9 +584,14 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 class _ChannelHeader extends StatelessWidget {
-  const _ChannelHeader({required this.channel, required this.agentKind});
+  const _ChannelHeader({
+    required this.channel,
+    required this.title,
+    required this.agentKind,
+  });
 
   final Channel channel;
+  final String title;
   final AgentKind? agentKind;
 
   @override
@@ -552,7 +612,7 @@ class _ChannelHeader extends StatelessWidget {
           const SizedBox(width: 10),
           Flexible(
             child: Text(
-              channel.name.isEmpty ? '(unnamed)' : channel.name,
+              title,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 fontSize: 16,

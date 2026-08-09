@@ -65,6 +65,20 @@ export interface Member {
   role: "owner" | "member";
 }
 
+/** A directory entry for a real end user, captured from their SSO token the first time they are
+ * seen and refreshed on every later sign-in — the "seen-users" directory. It powers DM target
+ * selection and surfaces real group membership. `groups` is whatever the IdP put in the token's
+ * group claim (so it always reflects the user's current groups as of their last sign-in). This
+ * needs no Authentik admin API and holds no standing secret; an optional IdP-directory sync that
+ * also lists users who have never signed in is a later, additive step. */
+export interface User {
+  sub: string; // stable subject id from the IdP — the directory key
+  email?: string;
+  displayName?: string;
+  groups: string[];
+  lastSeenAt: string; // ISO-8601 UTC — most recent time this principal was observed
+}
+
 /** A spawned agent, owned by — and acting as — exactly one user (decision #2/#7). Sprint 2
  * implements `assistant` (server-side model chat, NO runner); `coding` (runner + tools +
  * owner-gated execution) lands in Sprint 4. Its model calls are always attributed to
@@ -157,6 +171,16 @@ export interface Store {
   addMember(m: Member): Promise<void>;
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;
+
+  // Directory of users seen via SSO (captured from their tokens) — powers DMs + the roster.
+  /** Record or refresh a user from their token claims; `email`/`displayName` are preserved when
+   * the new observation omits them (a dev token carries neither), `groups` always overwrites. */
+  upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }): Promise<User>;
+  listUsers(): Promise<User[]>;
+  getUser(sub: string): Promise<User | null>;
+  /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
+   * or null. Used to keep POST /dm idempotent (one DM per pair, never a duplicate). */
+  findDmChannel(subA: string, subB: string): Promise<Channel | null>;
 
   createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent>;
   getAgent(id: Id): Promise<Agent | null>;

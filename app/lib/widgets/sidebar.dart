@@ -4,8 +4,9 @@ import '../models.dart';
 import '../theme.dart';
 import 'badges.dart';
 
-/// Left rail: New channel / New assistant / New coding agent actions, plus
-/// the channel list (`#sidebar` in `app.css`).
+/// Left rail: New channel / assistant / coding agent / DM actions, plus the
+/// channel list split into a channels section and a direct-messages section
+/// (`#sidebar` in `app.css`).
 class ChatSidebar extends StatelessWidget {
   const ChatSidebar({
     super.key,
@@ -13,10 +14,13 @@ class ChatSidebar extends StatelessWidget {
     required this.selectedChannelId,
     required this.loading,
     required this.agentKindByChannel,
+    required this.currentUserSub,
+    required this.usersBySub,
     required this.onSelect,
     required this.onNewChannel,
     required this.onNewAssistant,
     required this.onNewCodingAgent,
+    required this.onNewDm,
     this.errorText,
   });
 
@@ -25,10 +29,26 @@ class ChatSidebar extends StatelessWidget {
   final bool loading;
   final String? errorText;
   final Map<String, AgentKind> agentKindByChannel;
+
+  /// The signed-in user's sub — used to pick the *other* participant of a DM.
+  final String currentUserSub;
+
+  /// Directory (sub -> user) for resolving a DM peer's display name.
+  final Map<String, User> usersBySub;
+
   final ValueChanged<Channel> onSelect;
   final VoidCallback onNewChannel;
   final VoidCallback onNewAssistant;
   final VoidCallback onNewCodingAgent;
+  final VoidCallback onNewDm;
+
+  /// The label a DM shows in the rail: the other participant's display name
+  /// (from the directory), falling back to their sub, then the channel name.
+  String _dmLabel(Channel channel) {
+    final peer = channel.peer(currentUserSub);
+    if (peer == null) return channel.name.isEmpty ? 'Direct message' : channel.name;
+    return usersBySub[peer]?.label ?? peer;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -51,6 +71,12 @@ class ChatSidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 _SidebarActionButton(
+                  icon: Icons.alternate_email,
+                  label: 'New direct message',
+                  onPressed: onNewDm,
+                ),
+                const SizedBox(height: 6),
+                _SidebarActionButton(
                   icon: Icons.auto_awesome,
                   label: 'New assistant',
                   onPressed: onNewAssistant,
@@ -62,21 +88,6 @@ class ChatSidebar extends StatelessWidget {
                   onPressed: onNewCodingAgent,
                 ),
               ],
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(18, 16, 18, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'CHANNELS',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.6,
-                  color: AppColors.textFaint,
-                ),
-              ),
             ),
           ),
           Expanded(child: _buildList()),
@@ -125,18 +136,55 @@ class ChatSidebar extends StatelessWidget {
         ),
       );
     }
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-      itemCount: channels.length,
-      itemBuilder: (context, index) {
-        final channel = channels[index];
-        return _ChannelListItem(
-          channel: channel,
-          isSelected: channel.id == selectedChannelId,
-          agentKind: agentKindByChannel[channel.id],
-          onTap: () => onSelect(channel),
-        );
-      },
+
+    final dms = channels.where((c) => c.kind == ChannelKind.dm).toList();
+    final rest = channels.where((c) => c.kind != ChannelKind.dm).toList();
+
+    Widget item(Channel channel, {String? labelOverride}) => _ChannelListItem(
+      channel: channel,
+      label: labelOverride ?? (channel.name.isEmpty ? '(unnamed)' : channel.name),
+      isSelected: channel.id == selectedChannelId,
+      agentKind: agentKindByChannel[channel.id],
+      onTap: () => onSelect(channel),
+    );
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
+      children: [
+        if (rest.isNotEmpty) ...[
+          const _SectionHeader('CHANNELS'),
+          for (final channel in rest) item(channel),
+        ],
+        if (dms.isNotEmpty) ...[
+          const _SectionHeader('DIRECT MESSAGES'),
+          for (final channel in dms) item(channel, labelOverride: _dmLabel(channel)),
+        ],
+      ],
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 12, 10, 6),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.6,
+            color: AppColors.textFaint,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -169,12 +217,14 @@ class _SidebarActionButton extends StatelessWidget {
 class _ChannelListItem extends StatelessWidget {
   const _ChannelListItem({
     required this.channel,
+    required this.label,
     required this.isSelected,
     required this.agentKind,
     required this.onTap,
   });
 
   final Channel channel;
+  final String label;
   final bool isSelected;
   final AgentKind? agentKind;
   final VoidCallback onTap;
@@ -210,7 +260,7 @@ class _ChannelListItem extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    channel.name.isEmpty ? '(unnamed)' : channel.name,
+                    label,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13.5,

@@ -84,6 +84,40 @@ if (!DATABASE_URL) {
     assert.equal(await store.getChannel(randomUUID()), null);
   });
 
+  test("users directory: upsert (COALESCE keeps profile, groups refresh via text[]), getUser, findDmChannel", async () => {
+    const a = `u-${randomUUID()}`;
+    const b = `u-${randomUUID()}`;
+
+    const created = await store.upsertUser({ sub: a, email: "a@x.mil", displayName: "A Person", groups: ["eng", "sec"] });
+    assert.equal(created.email, "a@x.mil");
+    assert.deepEqual(created.groups, ["eng", "sec"]); // Postgres text[] round-trips as a JS array
+
+    // A thin re-observation (a dev token: no email/displayName) preserves the profile, refreshes groups.
+    const refreshed = await store.upsertUser({ sub: a, groups: ["eng"] });
+    assert.equal(refreshed.email, "a@x.mil"); // COALESCE(EXCLUDED.email, users.email)
+    assert.equal(refreshed.displayName, "A Person");
+    assert.deepEqual(refreshed.groups, ["eng"]);
+
+    assert.equal((await store.getUser(a))!.email, "a@x.mil");
+    assert.equal(await store.getUser(`u-${randomUUID()}`), null);
+
+    await store.upsertUser({ sub: b, groups: [] });
+
+    // findDmChannel: none until a 2-user dm channel with both exists; then order-independent.
+    assert.equal(await store.findDmChannel(a, b), null);
+    const dm = await store.createChannel({ workspaceId: WORKSPACE, kind: "dm", createdBy: a });
+    await store.addMember({ channelId: dm.id, memberRef: a, memberType: "user", role: "owner" });
+    await store.addMember({ channelId: dm.id, memberRef: b, memberType: "user", role: "member" });
+    assert.equal((await store.findDmChannel(a, b))?.id, dm.id);
+    assert.equal((await store.findDmChannel(b, a))?.id, dm.id);
+
+    // A non-dm channel with the same two members must NOT match (the kind guard).
+    const grp = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: a });
+    await store.addMember({ channelId: grp.id, memberRef: a, memberType: "user", role: "owner" });
+    await store.addMember({ channelId: grp.id, memberRef: b, memberType: "user", role: "member" });
+    assert.equal((await store.findDmChannel(a, b))?.id, dm.id);
+  });
+
   test("redaction: content is omitted (key absent) from listMessages, but the chain stays intact, and exactly one audit event is appended", async () => {
     const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
     const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "public" });

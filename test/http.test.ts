@@ -106,6 +106,12 @@ const store = {
   async appendAudit() {
     // noop
   },
+  // GET /me upserts the caller into the seen-users directory; this fake just echoes a row back so
+  // that route keeps working. (The directory routes themselves are covered by directory.exit.test.ts
+  // against the real MemoryStore.)
+  async upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }) {
+    return { ...input, lastSeenAt: new Date().toISOString() };
+  },
   async isMember(channelId: string, ref: string) {
     return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
   },

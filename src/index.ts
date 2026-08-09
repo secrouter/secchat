@@ -139,6 +139,16 @@ if (config.devMode && !config.databaseUrl) {
   await store.addMember({ channelId: coderCh.id, memberRef: coder.id, memberType: "agent", role: "member" });
   await store.appendAudit({ actor: "bob", action: "agent.spawn", target: coder.id });
   await control.spawn({ agent: coder, channelId: coderCh.id, hostType: "server" });
+  // Seed the directory so the DM picker has people to choose from in dev (in a real deployment
+  // it fills as users sign in via SSO). A dev sign-in later refreshes the matching row's groups.
+  for (const u of [
+    { sub: "alice", displayName: "Alice Ng", email: "alice@example.mil", groups: ["secchat-admins", "eng"] },
+    { sub: "bob", displayName: "Bob Reyes", email: "bob@example.mil", groups: ["eng"] },
+    { sub: "carol", displayName: "Carol Diaz", email: "carol@example.mil", groups: ["security"] },
+    { sub: "dave", displayName: "Dave Okafor", email: "dave@example.mil", groups: ["eng", "security"] },
+  ]) {
+    await store.upsertUser(u);
+  }
   console.error("▸ dev seed loaded (SECCHAT_DEV_MODE=1) — visit /admin");
 }
 

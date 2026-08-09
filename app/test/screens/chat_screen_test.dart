@@ -357,4 +357,46 @@ void main() {
     expect(fake.postMessageCalls, hasLength(1));
     expect(fake.postMessageCalls.single.content, kShrug);
   });
+
+  testWidgets(
+    'New direct message picks a directory user (excluding self) and opens a DM labeled with their name',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final fake = FakeApiClient(
+        me: _principal, // sub: 'dev.alice'
+        channels: const [],
+        users: const [
+          User(sub: 'dev.alice', displayName: 'Alice Ng', groups: ['eng']),
+          User(sub: 'bob', displayName: 'Bob Reyes', groups: ['eng', 'security']),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      await tester.tap(find.text('New direct message'));
+      await pumpSettled(tester, times: 8);
+
+      // The picker offers other people, not yourself.
+      expect(find.text('Bob Reyes'), findsOneWidget);
+      expect(find.text('Alice Ng'), findsNothing);
+
+      await tester.tap(find.text('Bob Reyes'));
+      await pumpSettled(tester, times: 10);
+
+      // It opened a DM with bob via createDm...
+      expect(fake.createDmCalls, ['bob']);
+      // ...which shows in the sidebar's DIRECT MESSAGES section labeled with the
+      // peer's real display name (resolved from the directory), and in the header.
+      expect(find.text('DIRECT MESSAGES'), findsOneWidget);
+      expect(find.text('Bob Reyes'), findsWidgets);
+    },
+  );
 }

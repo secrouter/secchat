@@ -75,17 +75,68 @@ class Principal {
 }
 
 /// A channel as returned by `GET /channels` / `POST /channels`.
+///
+/// [members] is populated by the backend ONLY for `dm` channels (the user subs
+/// on both sides), since a DM has no fixed name — the client labels it with the
+/// other participant. It's null/empty for every other channel kind.
 class Channel {
-  const Channel({required this.id, required this.kind, required this.name});
+  const Channel({
+    required this.id,
+    required this.kind,
+    required this.name,
+    this.members = const [],
+  });
 
   final String id;
   final ChannelKind kind;
   final String name;
+  final List<String> members;
+
+  /// For a DM, the participant sub that isn't [me] (the person you're talking
+  /// to); null for a non-DM or a malformed/self-only member list.
+  String? peer(String me) {
+    for (final sub in members) {
+      if (sub != me) return sub;
+    }
+    return null;
+  }
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
     id: json['id'] as String,
     kind: ChannelKind.fromWire(json['kind'] as String?),
     name: json['name'] as String? ?? '',
+    members: (json['members'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => e.toString())
+        .toList(),
+  );
+}
+
+/// A directory entry (`GET /users`) — a real user seen via SSO, with their
+/// group claims. Powers the DM picker and the roster.
+class User {
+  const User({
+    required this.sub,
+    this.email,
+    this.displayName,
+    this.groups = const [],
+  });
+
+  final String sub;
+  final String? email;
+  final String? displayName;
+  final List<String> groups;
+
+  /// A human label: the display name when present, else the sub.
+  String get label =>
+      (displayName != null && displayName!.isNotEmpty) ? displayName! : sub;
+
+  factory User.fromJson(Map<String, dynamic> json) => User(
+    sub: json['sub'] as String? ?? '',
+    email: json['email'] as String?,
+    displayName: json['displayName'] as String?,
+    groups: (json['groups'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => e.toString())
+        .toList(),
   );
 }
 

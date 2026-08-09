@@ -32,6 +32,15 @@ abstract class ApiClient {
 
   Future<Channel> createChannel(String name);
 
+  /// The user directory (`GET /users`): real users seen via SSO, with their
+  /// group claims. Powers the DM picker + roster.
+  Future<List<User>> getUsers();
+
+  /// Opens — or reuses — a 1:1 DM channel with [userSub] (`POST /dm`). The
+  /// backend is idempotent: the same pair always resolves to the same channel,
+  /// so calling this for an existing DM just returns it.
+  Future<Channel> createDm(String userSub);
+
   Future<List<Message>> getMessages(String channelId);
 
   Future<Message> postMessage(String channelId, String content);
@@ -187,6 +196,17 @@ class HttpApiClient implements ApiClient {
   @override
   Future<Channel> createChannel(String name) async => Channel.fromJson(
     await _post('/channels', {'name': name}) as Map<String, dynamic>,
+  );
+
+  @override
+  Future<List<User>> getUsers() async {
+    final data = await _get('/users') as List<dynamic>;
+    return data.map((e) => User.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<Channel> createDm(String userSub) async => Channel.fromJson(
+    await _post('/dm', {'user': userSub}) as Map<String, dynamic>,
   );
 
   @override

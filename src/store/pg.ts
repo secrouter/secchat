@@ -73,6 +73,7 @@ import type {
   SessionStatus,
   SessionStore,
   Store,
+  User,
   Webhook,
 } from "../types.ts";
 
@@ -109,6 +110,14 @@ interface ChannelRow {
   cui_marking: string | null;
   created_by: string;
   created_at: Date;
+}
+
+interface UserRow {
+  sub: string;
+  email: string | null;
+  display_name: string | null;
+  groups: string[]; // Postgres text[] → JS string[]
+  last_seen_at: Date;
 }
 
 interface MemberRow {
@@ -206,6 +215,16 @@ function rowToChannel(row: ChannelRow): Channel {
     cuiMarking: row.cui_marking ?? undefined,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
+  });
+}
+
+function rowToUser(row: UserRow): User {
+  return compact({
+    sub: row.sub,
+    email: row.email ?? undefined,
+    displayName: row.display_name ?? undefined,
+    groups: row.groups ?? [],
+    lastSeenAt: iso(row.last_seen_at),
   });
 }
 
@@ -379,6 +398,59 @@ export class PgStore implements Store, SessionStore {
       `SELECT id, workspace_id, kind, name, cui_marking, created_by, created_at FROM channels ORDER BY ins_seq`,
     );
     return rows.map(rowToChannel);
+  }
+
+  // ── directory of seen users (db/migrations/0003_users.sql) ─────────────────────────────────────
+
+  /** Upsert on the `sub` PK: `email`/`display_name` use COALESCE(EXCLUDED, existing) so a thin
+   * observation (a dev token, which carries neither) never nulls out a richer profile; `groups`
+   * always takes the newest value; `last_seen_at` always advances. Mirrors MemoryStore.upsertUser. */
+  async upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }): Promise<User> {
+    const { rows } = await this.#pool.query<UserRow>(
+      `INSERT INTO users (sub, email, display_name, groups, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (sub) DO UPDATE SET
+         email = COALESCE(EXCLUDED.email, users.email),
+         display_name = COALESCE(EXCLUDED.display_name, users.display_name),
+         groups = EXCLUDED.groups,
+         last_seen_at = EXCLUDED.last_seen_at
+       RETURNING sub, email, display_name, groups, last_seen_at`,
+      [input.sub, input.email ?? null, input.displayName ?? null, input.groups, new Date().toISOString()],
+    );
+    return rowToUser(rows[0]!);
+  }
+
+  async listUsers(): Promise<User[]> {
+    const { rows } = await this.#pool.query<UserRow>(
+      `SELECT sub, email, display_name, groups, last_seen_at FROM users ORDER BY ins_seq`,
+    );
+    return rows.map(rowToUser);
+  }
+
+  async getUser(sub: string): Promise<User | null> {
+    const { rows } = await this.#pool.query<UserRow>(
+      `SELECT sub, email, display_name, groups, last_seen_at FROM users WHERE sub = $1`,
+      [sub],
+    );
+    return rows[0] ? rowToUser(rows[0]) : null;
+  }
+
+  /** A dm channel whose user-members are exactly {subA, subB} — two user members, both present.
+   * The count guard rules out a would-be group DM; the two EXISTS clauses pin both participants. */
+  async findDmChannel(subA: string, subB: string): Promise<Channel | null> {
+    const { rows } = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.workspace_id, c.kind, c.name, c.cui_marking, c.created_by, c.created_at
+       FROM channels c
+       WHERE c.kind = 'dm'
+         AND (SELECT count(*) FROM channel_members m
+              WHERE m.channel_id = c.id AND m.member_type = 'user') = 2
+         AND EXISTS (SELECT 1 FROM channel_members m WHERE m.channel_id = c.id AND m.member_ref = $1)
+         AND EXISTS (SELECT 1 FROM channel_members m WHERE m.channel_id = c.id AND m.member_ref = $2)
+       ORDER BY c.ins_seq
+       LIMIT 1`,
+      [subA, subB],
+    );
+    return rows[0] ? rowToChannel(rows[0]) : null;
   }
 
   // ── agents ───────────────────────────────────────────────────────────────────────────────────
