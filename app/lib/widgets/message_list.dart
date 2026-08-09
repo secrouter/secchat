@@ -29,6 +29,8 @@ class MessageList extends StatefulWidget {
     required this.currentUserSub,
     this.typing,
     this.onToggleReaction,
+    this.replyCounts = const {},
+    this.onOpenThread,
   });
 
   final List<TranscriptEntry> entries;
@@ -38,6 +40,13 @@ class MessageList extends StatefulWidget {
   /// Toggle an emoji reaction on a message (null disables the affordance, e.g.
   /// in tests that don't wire it).
   final void Function(Message message, String emoji)? onToggleReaction;
+
+  /// Reply counts per message id, to render the thread affordance.
+  final Map<String, int> replyCounts;
+
+  /// Open a message's thread (null disables threading, e.g. in coding channels
+  /// or the thread view itself — one level deep).
+  final void Function(Message message)? onOpenThread;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -101,6 +110,8 @@ class _MessageListState extends State<MessageList> {
               entry: widget.entries[index],
               currentUserSub: widget.currentUserSub,
               onToggleReaction: widget.onToggleReaction,
+              replyCounts: widget.replyCounts,
+              onOpenThread: widget.onOpenThread,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -115,11 +126,15 @@ class _TranscriptTile extends StatelessWidget {
     required this.entry,
     required this.currentUserSub,
     this.onToggleReaction,
+    this.replyCounts = const {},
+    this.onOpenThread,
   });
 
   final TranscriptEntry entry;
   final String currentUserSub;
   final void Function(Message message, String emoji)? onToggleReaction;
+  final Map<String, int> replyCounts;
+  final void Function(Message message)? onOpenThread;
 
   @override
   Widget build(BuildContext context) {
@@ -131,6 +146,8 @@ class _TranscriptTile extends StatelessWidget {
             message.authorType == AuthorType.user &&
             message.authorRef == currentUserSub,
         onToggleReaction: onToggleReaction,
+        replyCount: replyCounts[message.id] ?? 0,
+        onOpenThread: onOpenThread,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
@@ -147,12 +164,16 @@ class _MessageBubble extends StatelessWidget {
     required this.isOwn,
     required this.currentUserSub,
     this.onToggleReaction,
+    this.replyCount = 0,
+    this.onOpenThread,
   });
 
   final Message message;
   final bool isOwn;
   final String currentUserSub;
   final void Function(Message message, String emoji)? onToggleReaction;
+  final int replyCount;
+  final void Function(Message message)? onOpenThread;
 
   @override
   Widget build(BuildContext context) {
@@ -227,6 +248,17 @@ class _MessageBubble extends StatelessWidget {
               currentUserSub: currentUserSub,
               alignEnd: isOwn,
               onToggle: (emoji) => onToggleReaction!(message, emoji),
+            ),
+          ),
+        if (!message.isRedacted && onOpenThread != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Align(
+              alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
+              child: _ThreadChip(
+                replyCount: replyCount,
+                onTap: () => onOpenThread!(message),
+              ),
             ),
           ),
       ],
@@ -587,6 +619,51 @@ class _ErrorTile extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The thread affordance under a message: "N replies" when it has any (opens
+/// the thread), otherwise a "Reply" prompt to start one.
+class _ThreadChip extends StatelessWidget {
+  const _ThreadChip({required this.replyCount, required this.onTap});
+
+  final int replyCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasReplies = replyCount > 0;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                hasReplies ? Icons.forum_outlined : Icons.reply,
+                size: 13,
+                color: hasReplies ? AppColors.accent : AppColors.textFaint,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                hasReplies
+                    ? '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}'
+                    : 'Reply',
+                style: AppFonts.mono(
+                  fontSize: 11.5,
+                  color: hasReplies ? AppColors.accent : AppColors.textFaint,
+                  fontWeight: hasReplies ? FontWeight.w700 : FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

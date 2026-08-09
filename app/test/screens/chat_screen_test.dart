@@ -536,4 +536,62 @@ void main() {
     await pumpSettled(tester, times: 10);
     expect(find.text('random'), findsWidgets);
   });
+
+  testWidgets('replies fold into a thread: count shows, opening reveals the reply, replying posts with parentId', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'p1',
+            seq: 1,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: 'top level question',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+          Message(
+            id: 'r1',
+            seq: 2,
+            authorRef: 'carol',
+            authorType: AuthorType.user,
+            content: 'an existing reply',
+            createdAt: DateTime(2026, 1, 1, 9, 31),
+            parentId: 'p1',
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // Main view: the top-level message shows with a reply count; the reply is
+    // NOT rendered inline.
+    expect(find.textContaining('top level question'), findsOneWidget);
+    expect(find.textContaining('an existing reply'), findsNothing);
+    expect(find.text('1 reply'), findsOneWidget);
+
+    // Open the thread → the reply is now visible under a Thread header.
+    await tester.tap(find.text('1 reply'));
+    await pumpSettled(tester);
+    expect(find.text('Thread'), findsOneWidget);
+    expect(find.textContaining('an existing reply'), findsOneWidget);
+
+    // Replying in the thread posts with the parent id.
+    final threadComposer = find.descendant(
+      of: find.byType(MessageComposer),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(threadComposer, 'my threaded reply');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+
+    expect(fake.postMessageCalls, hasLength(1));
+    expect(fake.postMessageCalls.single.parentId, 'p1');
+    expect(fake.postMessageCalls.single.content, 'my threaded reply');
+  });
 }

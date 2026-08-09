@@ -43,7 +43,9 @@ abstract class ApiClient {
 
   Future<List<Message>> getMessages(String channelId);
 
-  Future<Message> postMessage(String channelId, String content);
+  /// Posts a message to a channel. A non-null [parentId] makes it a reply in
+  /// that message's thread.
+  Future<Message> postMessage(String channelId, String content, {String? parentId});
 
   /// Feeds free-text input to a running coding-agent *session* (as opposed
   /// to [postMessage], which posts a chat message to a *channel*). A coding
@@ -241,10 +243,12 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
-  Future<Message> postMessage(String channelId, String content) async =>
+  Future<Message> postMessage(String channelId, String content, {String? parentId}) async =>
       Message.fromJson(
-        await _post('/channels/$channelId/messages', {'content': content})
-            as Map<String, dynamic>,
+        await _post('/channels/$channelId/messages', {
+          'content': content,
+          if (parentId != null) 'parentId': parentId,
+        }) as Map<String, dynamic>,
       );
 
   @override

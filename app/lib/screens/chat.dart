@@ -73,6 +73,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // the client subscribes only to the open channel today.)
   final Map<String, int> _unreadByChannel = {};
 
+  // The id of the message whose thread is open (the transcript is replaced by
+  // the thread view), or null for the normal channel view. Cleared on switch.
+  String? _threadParentId;
+
   @override
   void initState() {
     super.initState();
@@ -128,6 +132,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _selected = channel;
       _typing = null;
+      _threadParentId = null;
       _connStatus = ConnStatus.idle;
       _messagesError = null;
       _loadingMessages = cached == null;
@@ -403,6 +408,26 @@ class _ChatScreenState extends State<ChatScreen> {
     final message = await widget.api.postMessage(channel.id, text);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
+  }
+
+  /// Posts a threaded reply to [parentId] and appends it locally.
+  Future<void> _sendReply(Channel channel, String parentId, String text) async {
+    final message = await widget.api.postMessage(channel.id, text, parentId: parentId);
+    if (!mounted) return;
+    setState(() => _appendMessageUnlessDuplicate(channel.id, message));
+  }
+
+  void _openThread(Message message) =>
+      setState(() => _threadParentId = message.id);
+
+  void _closeThread() => setState(() => _threadParentId = null);
+
+  /// The message with [id] in [channelId]'s loaded transcript, or null.
+  Message? _messageById(String channelId, String id) {
+    for (final entry in _transcripts[channelId] ?? const <TranscriptEntry>[]) {
+      if (entry is MessageEntry && entry.message.id == id) return entry.message;
+    }
+    return null;
   }
 
   /// Dispatches a parsed slash command. `/pi` is the pi passthrough: its text
@@ -681,6 +706,11 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    // An open thread replaces the transcript + composer with a focused view.
+    final threadParent = _threadParentId == null
+        ? null
+        : _messageById(selected.id, _threadParentId!);
+
     return Column(
       children: [
         _ChannelHeader(
@@ -688,9 +718,13 @@ class _ChatScreenState extends State<ChatScreen> {
           title: _channelTitle(selected),
           agentKind: _agentKindByChannel[selected.id],
         ),
-        if (codingStrip != null) codingStrip,
-        Expanded(child: _buildTranscript(selected)),
-        MessageComposer(onSend: _handleSend),
+        if (codingStrip != null && threadParent == null) codingStrip,
+        if (threadParent != null)
+          Expanded(child: _buildThread(selected, threadParent))
+        else ...[
+          Expanded(child: _buildTranscript(selected)),
+          MessageComposer(onSend: _handleSend),
+        ],
       ],
     );
   }
@@ -707,11 +741,99 @@ class _ChatScreenState extends State<ChatScreen> {
         onRetry: () => _retryMessages(selected),
       );
     }
+    // The main view shows only top-level messages; replies fold into their
+    // parent's thread, indicated by a per-parent reply count.
+    final all = _transcripts[selected.id] ?? const <TranscriptEntry>[];
+    final topLevel = <TranscriptEntry>[];
+    final replyCounts = <String, int>{};
+    for (final entry in all) {
+      if (entry is MessageEntry && entry.message.parentId != null) {
+        replyCounts.update(entry.message.parentId!, (n) => n + 1, ifAbsent: () => 1);
+      } else {
+        topLevel.add(entry);
+      }
+    }
+    // Threads are a chat-channel affordance; coding-agent channels are
+    // runner-driven, so no threading there.
+    final canThread = _codingSessionIdFor(selected.id) == null;
     return MessageList(
-      entries: _transcripts[selected.id] ?? const [],
+      entries: topLevel,
       typing: _typing,
       currentUserSub: widget.principal.sub,
       onToggleReaction: _toggleReaction,
+      replyCounts: replyCounts,
+      onOpenThread: canThread ? _openThread : null,
+    );
+  }
+
+  /// The focused thread view: a back header, the parent + its replies, and a
+  /// reply composer that posts into the thread.
+  Widget _buildThread(Channel channel, Message parent) {
+    final replies = <Message>[];
+    for (final entry in _transcripts[channel.id] ?? const <TranscriptEntry>[]) {
+      if (entry is MessageEntry && entry.message.parentId == parent.id) {
+        replies.add(entry.message);
+      }
+    }
+    replies.sort((a, b) => a.seq.compareTo(b.seq));
+    return Column(
+      children: [
+        _ThreadHeader(replyCount: replies.length, onClose: _closeThread),
+        Expanded(
+          child: MessageList(
+            entries: [MessageEntry(parent), ...replies.map(MessageEntry.new)],
+            currentUserSub: widget.principal.sub,
+            onToggleReaction: _toggleReaction,
+            // one level deep — no nested thread affordance inside a thread
+          ),
+        ),
+        MessageComposer(onSend: (text) => _sendReply(channel, parent.id, text)),
+      ],
+    );
+  }
+}
+
+class _ThreadHeader extends StatelessWidget {
+  const _ThreadHeader({required this.replyCount, required this.onClose});
+
+  final int replyCount;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: onClose,
+            icon: const Icon(Icons.arrow_back, size: 18),
+            tooltip: 'Back to channel',
+            color: AppColors.textMuted,
+            visualDensity: VisualDensity.compact,
+          ),
+          const SizedBox(width: 4),
+          const Text(
+            'Thread',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: AppColors.text,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            replyCount == 0
+                ? 'no replies yet'
+                : '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
+            style: AppFonts.mono(fontSize: 11.5, color: AppColors.textFaint),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -26,8 +26,8 @@ class FakeApiClient implements ApiClient {
   final Map<String, List<Message>> _messagesByChannel;
   final Map<String, Channel> _dmByPeer = {};
 
-  /// Every `postMessage` call, in order, as `(channelId, content)`.
-  final List<({String channelId, String content})> postMessageCalls = [];
+  /// Every `postMessage` call, in order (`parentId` set for a threaded reply).
+  final List<({String channelId, String content, String? parentId})> postMessageCalls = [];
 
   /// Every `sendInput` call, in order, as `(sessionId, text)`.
   final List<({String sessionId, String text})> sendInputCalls = [];
@@ -88,9 +88,9 @@ class FakeApiClient implements ApiClient {
   }
 
   @override
-  Future<Message> postMessage(String channelId, String content) async {
+  Future<Message> postMessage(String channelId, String content, {String? parentId}) async {
     _maybeThrow('postMessage');
-    postMessageCalls.add((channelId: channelId, content: content));
+    postMessageCalls.add((channelId: channelId, content: content, parentId: parentId));
     final existing = _messagesByChannel[channelId] ?? const [];
     final message =
         postMessageResponder?.call(channelId, content) ??
@@ -101,6 +101,7 @@ class FakeApiClient implements ApiClient {
           authorType: AuthorType.user,
           content: content,
           createdAt: DateTime(2026, 1, 1),
+          parentId: parentId,
         );
     _messagesByChannel[channelId] = [...existing, message];
     return message;
