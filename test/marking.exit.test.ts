@@ -182,3 +182,30 @@ test("setting a marking on an unknown channel is 404; a non-member is 403", asyn
     assert.equal((await setMarking(base, "carol", channel.id, "CUI")).status, 403);
   });
 });
+
+test("PORTION marking: an inline (CUI) portion RAISES an unmarked channel message to CUI, and the chain still verifies", async () => {
+  await withServer(async (base, store) => {
+    const channel = (await (await createChannel(base, "alice", { name: "general" })).json()) as Channel;
+    // No per-message marking requested, but the body carries a CUI portion → overall becomes CUI.
+    const m = (await (await post(base, "alice", channel.id, { content: "(U) intro\n(CUI) the controlled part" })).json()) as Message;
+    assert.equal(m.marking, "CUI", "the highest portion drives the overall marking");
+    assert.equal((await store.verifyChains()).messagesOk, true);
+
+    // A message with only ordinary parentheticals stays at the floor.
+    const plain = (await (await post(base, "alice", channel.id, { content: "see (below)" })).json()) as Message;
+    assert.equal(plain.marking, "UNCLASSIFIED");
+  });
+});
+
+test("PORTION marking in a MARKED channel: a portion within the ceiling is fine; one ABOVE it is blocked (422)", async () => {
+  await withServer(async (base) => {
+    const channel = (await (await createChannel(base, "alice", { name: "prop", marking: "PROPRIETARY" })).json()) as Channel;
+    // A (U) portion is within a PROPRIETARY channel → posts fine (message inherits the channel level).
+    const ok = (await (await post(base, "alice", channel.id, { content: "(U) a note in a proprietary room" })).json()) as Message;
+    assert.equal(ok.marking, "PROPRIETARY");
+    // A (CUI) portion EXCEEDS the PROPRIETARY ceiling → spillage block.
+    const res = await post(base, "alice", channel.id, { content: "(CUI) this is above the channel" });
+    assert.equal(res.status, 422);
+    assert.equal(((await res.json()) as { error: string }).error, "marking_exceeds_channel");
+  });
+});

@@ -275,6 +275,7 @@ class _MessageComposerState extends State<MessageComposer> {
                   () => _linePrefix('- ')),
               _toolButton(Icons.format_quote, 'Quote',
                   () => _linePrefix('> ')),
+              if (widget.markingLevels.isNotEmpty) _portionButton(),
               _emojiButton(),
             ],
           ),
@@ -291,6 +292,37 @@ class _MessageComposerState extends State<MessageComposer> {
         ),
         const SizedBox(width: 6),
         _keyboardHint(),
+      ],
+    );
+  }
+
+  /// The standard CUI portion abbreviation for a level — "(U)" for UNCLASSIFIED,
+  /// the level name otherwise (what the server parses to derive the overall marking).
+  String _portionToken(String level) => level.toUpperCase() == 'UNCLASSIFIED' ? 'U' : level.toUpperCase();
+
+  /// Inserts an inline CUI PORTION marking at the start of the current line — e.g.
+  /// "(CUI) " — so an individual portion of the message can carry its own level.
+  Widget _portionButton() {
+    return PopupMenuButton<String>(
+      tooltip: 'Mark this line (portion marking)',
+      padding: EdgeInsets.zero,
+      color: AppColors.surfaceRaised,
+      position: PopupMenuPosition.under,
+      icon: const Icon(Icons.label_important_outline, size: 17, color: AppColors.textMuted),
+      onSelected: (level) => _linePrefix('(${_portionToken(level)}) '),
+      itemBuilder: (_) => [
+        for (final l in widget.markingLevels)
+          PopupMenuItem<String>(
+            value: l,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(color: markingStyle(l).bg, borderRadius: BorderRadius.circular(3)),
+              child: Text(
+                '(${_portionToken(l)})',
+                style: AppFonts.mono(fontSize: 11, color: markingStyle(l).fg).copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
       ],
     );
   }

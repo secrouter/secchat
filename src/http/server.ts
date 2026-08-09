@@ -20,6 +20,7 @@ import {
   markRank,
   type MarkingPolicy,
 } from "../marking/policy.ts";
+import { overallPortionMarking } from "../marking/portions.ts";
 import { DlpPolicy } from "../dlp/policy.ts";
 import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
 import type { StepUp } from "../auth/stepup.ts";
@@ -433,6 +434,20 @@ function buildRouter(
     } else {
       // Unmarked channel / DM: per-message marking, defaulting to the policy floor.
       effective = requested ?? marking.default;
+    }
+    // Inline CUI PORTION markings — e.g. "(CUI) a controlled line" — RAISE the message's overall
+    // marking to the highest portion present (the CUI convention). In a marked channel a portion
+    // above the ceiling is spillage; in an unmarked channel it drives the overall up.
+    const portionMax = overallPortionMarking(marking, content);
+    if (portionMax) {
+      if (channel?.cuiMarking) {
+        if (!markingAtMost(marking, portionMax, channel.cuiMarking)) {
+          sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel.cuiMarking });
+          return;
+        }
+      } else if (markRank(marking, portionMax) > markRank(marking, effective)) {
+        effective = portionMax;
+      }
     }
     // Local DLP scan (on-premise; matches only rule NAMES, never the content). In `block` mode a
     // match refuses the post before anything is written; in `flag` mode the post proceeds but is

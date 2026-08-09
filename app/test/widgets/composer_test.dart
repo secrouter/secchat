@@ -124,4 +124,31 @@ void main() {
     expect(find.text('/pi'), findsOneWidget);
     expect(find.text('/help'), findsOneWidget);
   });
+
+  testWidgets('the portion-mark button inserts a CUI portion token at the line start', (tester) async {
+    // A wider surface so the toolbar (with the marking controls) doesn't overflow the test viewport.
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking) async {},
+            markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), 'the controlled part');
+    await tester.pump();
+
+    // Open the portion-marking menu → pick (CUI) → the line is prefixed with "(CUI) ".
+    await tester.tap(find.byTooltip('Mark this line (portion marking)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('(CUI)'));
+    await tester.pumpAndSettle();
+
+    expect(_fieldText(tester), '(CUI) the controlled part');
+  });
 }
