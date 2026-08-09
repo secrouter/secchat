@@ -3,6 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile, utimes, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { devVerifyToken } from "../src/dev/auth.ts";
 import { createHttpServer } from "../src/http/server.ts";
 import { MemoryStore } from "../src/store/memory.ts";
@@ -64,5 +67,38 @@ test("exit 3 — a dev token authenticates the real API end-to-end", async () =>
     assert.equal(ch.status, 201);
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+// The SPA shell is not content-hash-named (Flutter emits a stable `main.dart.js`), so two things
+// must hold or a redeploy silently serves a stale client: (1) responses say `no-cache` so browsers
+// revalidate instead of holding the bundle forever, and (2) the server's in-memory asset cache is
+// invalidated by mtime, so a rebuild done WHILE the server runs is served without a restart.
+test("static assets revalidate (no-cache) and a rebuilt file is re-served without a restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "secchat-web-"));
+  const asset = join(root, "main.dart.js");
+  await writeFile(asset, "console.log('v1')");
+  const server = createHttpServer({ verifyToken: devVerifyToken, store: new MemoryStore(), web: { root } });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as { port: number };
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const first = await fetch(`${base}/main.dart.js`);
+    assert.equal(first.status, 200);
+    assert.equal(first.headers.get("cache-control"), "no-cache");
+    assert.match(await first.text(), /v1/);
+
+    // simulate a rebuild in place: new bytes AND a strictly newer mtime (so the check is robust
+    // even when the rewrite lands within the same millisecond as the original write).
+    await writeFile(asset, "console.log('v2')");
+    const future = new Date(Date.now() + 2000);
+    await utimes(asset, future, future);
+
+    const second = await fetch(`${base}/main.dart.js`);
+    assert.equal(second.status, 200);
+    assert.match(await second.text(), /v2/); // re-read from disk, not the cached v1
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    await rm(root, { recursive: true, force: true });
   }
 });

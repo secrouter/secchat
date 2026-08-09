@@ -81,19 +81,27 @@ function contentTypeFor(path: string): string {
   }
 }
 
-/** Reads `absPath` (through `cache`, populated on first read — dev-served files don't change
- * within a running process, so a plain read-through Map needs no invalidation) and writes it as
- * the response body with `contentType`. ENOENT (no such file) → 404; anything else (e.g. `absPath`
- * is a directory, a permissions error) → 500 — the same split every other route here uses. */
-function serveWebFile(res: ServerResponse, cache: Map<string, Buffer>, absPath: string, contentType: string): void {
+/** One cached web asset, keyed to the on-disk mtime it was read at. */
+type WebCacheEntry = { mtimeMs: number; data: Buffer };
+
+/** Reads `absPath` (through `cache`) and writes it as the response body with `contentType`. The
+ * cache is invalidated by mtime, NOT read-once: a rebuilt asset (a fresh `flutter build web` while
+ * the server keeps running) must be served without a restart, so we re-read whenever the file's
+ * mtime changes. The SPA shell and its assets are not content-hash-named (Flutter emits a stable
+ * `main.dart.js`), so they're sent `Cache-Control: no-cache` — browsers may store them but must
+ * revalidate every load, otherwise a redeploy leaves clients running a stale bundle indefinitely.
+ * ENOENT (no such file) → 404; anything else (e.g. `absPath` is a directory, a permissions error)
+ * → 500 — the same split every other route here uses. */
+function serveWebFile(res: ServerResponse, cache: Map<string, WebCacheEntry>, absPath: string, contentType: string): void {
   try {
-    let data = cache.get(absPath);
-    if (!data) {
-      data = readFileSync(absPath);
-      cache.set(absPath, data);
+    const mtimeMs = statSync(absPath).mtimeMs;
+    let entry = cache.get(absPath);
+    if (!entry || entry.mtimeMs !== mtimeMs) {
+      entry = { mtimeMs, data: readFileSync(absPath) };
+      cache.set(absPath, entry);
     }
-    res.writeHead(200, { "content-type": contentType });
-    res.end(data);
+    res.writeHead(200, { "content-type": contentType, "cache-control": "no-cache" });
+    res.end(entry.data);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
       sendJson(res, 404, { error: "not_found" });
@@ -443,7 +451,7 @@ export function createHttpServer(deps: {
 }): Server {
   const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
-  const webCache = new Map<string, Buffer>();
+  const webCache = new Map<string, WebCacheEntry>();
 
   return createServer(async (req, res) => {
     const method = req.method ?? "GET";
