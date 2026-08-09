@@ -894,4 +894,47 @@ void main() {
     expect(find.textContaining('Possible data spillage'), findsOneWidget);
     expect(find.textContaining('us-ssn'), findsOneWidget);
   });
+
+  testWidgets('a step-up-gated redaction re-authenticates and retries', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice — the author
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'dev.alice',
+            authorType: AuthorType.user,
+            content: 'purge me',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+        ],
+      },
+    )..redactRequiresStepUp = true; // the deployment gates redaction on a fresh re-auth
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // Open the menu → Redact… → supply a reason → Redact.
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Redact…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)), 'spillage');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Redact'));
+    await tester.pumpAndSettle();
+
+    // The server demanded step-up → the re-auth dialog appears; confirm it.
+    expect(find.text('Re-authentication required'), findsOneWidget);
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Re-authenticate'));
+    await tester.pumpAndSettle();
+
+    // We stepped up once and the redaction then went through (tombstone shows).
+    expect(fake.stepUpCalls, 1);
+    expect(fake.redactCalls, hasLength(1));
+    expect(find.text('message redacted'), findsOneWidget);
+  });
 }

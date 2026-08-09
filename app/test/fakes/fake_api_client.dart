@@ -180,9 +180,25 @@ class FakeApiClient implements ApiClient {
   /// Every `redactMessage` call, in order.
   final List<({String messageId, String reason})> redactCalls = [];
 
+  /// When true, `redactMessage` throws `stepup_required` until [stepUp] is
+  /// called — simulating a deployment that gates redaction on a fresh re-auth.
+  bool redactRequiresStepUp = false;
+  int stepUpCalls = 0;
+  bool _steppedUp = false;
+
+  @override
+  Future<void> stepUp() async {
+    _maybeThrow('stepUp');
+    stepUpCalls++;
+    _steppedUp = true;
+  }
+
   @override
   Future<void> redactMessage(String messageId, String reason) async {
     _maybeThrow('redactMessage');
+    if (redactRequiresStepUp && !_steppedUp) {
+      throw const ApiException(403, 'stepup_required');
+    }
     redactCalls.add((messageId: messageId, reason: reason));
   }
 

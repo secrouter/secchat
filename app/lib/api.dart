@@ -21,6 +21,10 @@ class ApiException implements Exception {
   final int statusCode;
   final String message;
 
+  /// The server refused a privileged action pending a fresh re-authentication
+  /// (step-up). Callers can catch this, run [ApiClient.stepUp], and retry.
+  bool get isStepUpRequired => statusCode == 403 && message == 'stepup_required';
+
   @override
   String toString() => 'ApiException($statusCode): $message';
 }
@@ -37,6 +41,11 @@ abstract class ApiClient {
   /// downgrade. Returns the updated channel; broadcasts a `channel_marking`
   /// event to every viewer.
   Future<Channel> setChannelMarking(String channelId, String marking);
+
+  /// Establishes a step-up re-authentication proof (`POST /auth/stepup`) that is
+  /// then presented automatically on subsequent privileged actions. Call this
+  /// after catching [ApiException.isStepUpRequired], then retry the action.
+  Future<void> stepUp();
 
   /// The user directory (`GET /users`): real users seen via SSO, with their
   /// group claims. Powers the DM picker + roster.
@@ -159,10 +168,15 @@ class HttpApiClient implements ApiClient {
   final http.Client _http = http.Client();
   final List<WebSocketChannel> _sockets = <WebSocketChannel>[];
 
+  /// The current step-up re-auth proof (from [stepUp]); presented on every
+  /// request so a privileged action that requires freshness is satisfied.
+  String? _stepUpToken;
+
   Map<String, String> get _headers {
     final token = this.token;
     return <String, String>{
       if (token != null) 'Authorization': 'Bearer $token',
+      if (_stepUpToken != null) 'X-Sec-StepUp': _stepUpToken!,
       'Content-Type': 'application/json',
     };
   }
@@ -252,6 +266,12 @@ class HttpApiClient implements ApiClient {
   Future<Channel> setChannelMarking(String channelId, String marking) async => Channel.fromJson(
     await _post('/channels/$channelId/marking', {'marking': marking}) as Map<String, dynamic>,
   );
+
+  @override
+  Future<void> stepUp() async {
+    final data = await _post('/auth/stepup') as Map<String, dynamic>;
+    _stepUpToken = data['token'] as String?;
+  }
 
   @override
   Future<List<User>> getUsers() async {

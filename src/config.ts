@@ -9,6 +9,8 @@ import {
   parseMarkingLevels,
 } from "./marking/policy.ts";
 import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
+import { type CapabilityPolicy, type CapabilityRule, defaultCapabilityPolicy } from "./auth/capabilities.ts";
+import { makeStepUp, type StepUp } from "./auth/stepup.ts";
 
 export interface Config {
   host: string;
@@ -66,6 +68,16 @@ export interface Config {
    * (off|flag|block, default flag) and an optional `SECCHAT_DLP_RULES` JSON override. Fails closed
    * at startup on a bad mode or malformed rule. */
   dlp: DlpPolicy;
+
+  /** Privileged-action authorization: each capability's required IdP group + step-up freshness.
+   * `SECCHAT_CAP_<REDACT|AGENT|DOWNGRADE|WEBHOOK>_GROUP` / `_STEPUP`. Defaults preserve today's
+   * behavior (redact/downgrade → admin group; agent/webhook ungated; step-up off). */
+  capabilities: CapabilityPolicy;
+
+  /** Step-up token minter/verifier — present when a signing secret is available
+   * (`SECCHAT_STEPUP_SECRET`, else the session secret). Unset ⇒ step-up can't be satisfied, so any
+   * capability configured to require it fails closed. */
+  stepUp?: StepUp;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -101,6 +113,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     opt(env, "SECCHAT_DLP_MODE", "flag") as DlpMode,
     parseDlpRules(env.SECCHAT_DLP_RULES),
   );
+  // Privileged-capability policy: start from the behavior-preserving defaults, then apply optional
+  // per-capability group / step-up overrides (the group names a deployment maps to its IdP).
+  const adminGroup = opt(env, "SECCHAT_ADMIN_GROUP", "secchat-admins");
+  const capDefaults = defaultCapabilityPolicy(adminGroup);
+  const capRule = (key: string, fallback: CapabilityRule): CapabilityRule => ({
+    group: env[`SECCHAT_CAP_${key}_GROUP`]?.trim() ?? fallback.group,
+    stepUpSeconds: env[`SECCHAT_CAP_${key}_STEPUP`]?.trim()
+      ? Number(env[`SECCHAT_CAP_${key}_STEPUP`])
+      : fallback.stepUpSeconds,
+  });
+  const capabilities: CapabilityPolicy = {
+    "message.redact": capRule("REDACT", capDefaults["message.redact"]),
+    "agent.manage": capRule("AGENT", capDefaults["agent.manage"]),
+    "marking.downgrade": capRule("DOWNGRADE", capDefaults["marking.downgrade"]),
+    "webhook.create": capRule("WEBHOOK", capDefaults["webhook.create"]),
+  };
+  // Step-up signing: a dedicated secret, else the session secret. Absent ⇒ step-up unavailable.
+  const stepUpSecret = env.SECCHAT_STEPUP_SECRET?.trim() || sessionSecret;
+  const stepUp = stepUpSecret ? makeStepUp(stepUpSecret, Number(opt(env, "SECCHAT_STEPUP_TTL", "900"))) : undefined;
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -110,7 +141,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secrouterUrl: opt(env, "SECROUTER_URL", "http://127.0.0.1:47002"),
     secrouterToken: env.SECROUTER_TOKEN?.trim() || undefined,
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
-    adminGroup: opt(env, "SECCHAT_ADMIN_GROUP", "secchat-admins"),
+    adminGroup,
     devMode: (env.SECCHAT_DEV_MODE?.trim() || "") === "1",
     oidcClientId: opt(env, "SECCHAT_OIDC_CLIENT_ID", oidcAudience),
     oidcClientSecret,
@@ -120,5 +151,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ssoEnabled: Boolean(oidcClientSecret && publicUrl && sessionSecret),
     marking,
     dlp,
+    capabilities,
+    stepUp,
   };
 }

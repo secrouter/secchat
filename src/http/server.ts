@@ -21,6 +21,8 @@ import {
   type MarkingPolicy,
 } from "../marking/policy.ts";
 import { DlpPolicy } from "../dlp/policy.ts";
+import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
+import type { StepUp } from "../auth/stepup.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -175,6 +177,8 @@ function buildRouter(
   store: Store,
   marking: MarkingPolicy,
   dlp: DlpPolicy,
+  capabilities: CapabilityPolicy,
+  stepUp: StepUp | undefined,
   broadcast?: Broadcast,
   llm?: LlmClient,
   control?: AgentControl,
@@ -182,6 +186,34 @@ function buildRouter(
   search?: SearchFn,
 ): Router<Handler> {
   const router = new Router<Handler>();
+
+  // How long ago (seconds) this request's caller last re-authenticated, from the `X-Sec-StepUp`
+  // token — Infinity when there's no valid, matching step-up proof.
+  const stepUpAge = async (req: IncomingMessage, sub: string): Promise<number> => {
+    const header = req.headers["x-sec-stepup"];
+    const token = Array.isArray(header) ? header[0] : header;
+    if (!token || !stepUp) return Infinity;
+    const proof = await stepUp.verify(token);
+    return proof && proof.sub === sub ? proof.ageSeconds : Infinity;
+  };
+
+  // Enforce a privileged capability; on denial writes the right 403 and returns false. `forbidden_group`
+  // and `stepup_required` are distinct so the client can offer re-authentication for the latter.
+  const enforceCapability = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    principal: Principal,
+    capability: Capability,
+  ): Promise<boolean> => {
+    const decision = authorizeCapability(principal, capability, capabilities, await stepUpAge(req, principal.sub));
+    if (decision.allow) return true;
+    if (decision.reason === "stepup_required") {
+      sendJson(res, 403, { error: "stepup_required", capability: decision.capability, maxAgeSeconds: decision.maxAgeSeconds });
+    } else {
+      sendJson(res, 403, { error: "forbidden" });
+    }
+    return false;
+  };
 
   router.add("GET", "/me", async ({ res, principal }) => {
     // Record/refresh this principal in the seen-users directory (from their real SSO claims) — the
@@ -197,6 +229,21 @@ function buildRouter(
     // Carry the deployment's marking ladder + default so the client can render banners, populate
     // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
     sendJson(res, 200, { ...principal, marking: { levels: marking.levels, default: marking.default } });
+  });
+
+  // Establish a step-up proof (a short-lived token the client presents via `X-Sec-StepUp` on a
+  // step-up-gated action) and record it in the audit chain. NOTE: this mints on a deliberate
+  // re-affirmation by the already-authenticated caller — production should gate the mint behind an
+  // interactive OIDC re-auth (prompt=login via the BFF) for a genuinely FRESH credential; the
+  // capability + freshness enforcement is identical either way.
+  router.add("POST", "/auth/stepup", async ({ res, principal }) => {
+    if (!stepUp) {
+      sendJson(res, 503, { error: "stepup_unavailable" });
+      return;
+    }
+    const token = await stepUp.mint(principal.sub);
+    await store.appendAudit({ actor: principal.sub, action: "auth.stepup" });
+    sendJson(res, 200, { token });
   });
 
   // The user directory (seen-users): everyone who has signed in via SSO, with their real group
@@ -305,13 +352,11 @@ function buildRouter(
       sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
       return;
     }
-    // Downgrade = lowering the level below the channel's current one → admin only.
+    // Downgrade = lowering the level below the channel's current one → the privileged
+    // `marking.downgrade` capability (group-gated, default the admin group; step-up if configured).
     const current = channel.cuiMarking;
     const isDowngrade = current != null && markRank(marking, next) < markRank(marking, current);
-    if (isDowngrade && !(admin != null && isAdmin(principal, admin.adminGroup))) {
-      sendJson(res, 403, { error: "downgrade_requires_admin" });
-      return;
-    }
+    if (isDowngrade && !(await enforceCapability(req, res, principal, "marking.downgrade"))) return;
     const updated = await store.setChannelMarking(channelId, next, principal.sub);
     broadcast?.(channelId, { type: "channel_marking", channelId, marking: next, by: principal.sub });
     sendJson(res, 200, updated);
@@ -485,12 +530,10 @@ function buildRouter(
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    const authorized =
-      message.authorRef === principal.sub ||
-      (admin != null && isAdmin(principal, admin.adminGroup));
-    if (!authorized) {
-      sendJson(res, 403, { error: "forbidden" });
-      return;
+    // The author may always redact their own; redacting ANOTHER's message is the privileged
+    // `message.redact` capability (group-gated, default the admin group; step-up if configured).
+    if (message.authorRef !== principal.sub) {
+      if (!(await enforceCapability(req, res, principal, "message.redact"))) return;
     }
     if (message.redactedAt) {
       sendJson(res, 409, { error: "already_redacted" });
@@ -587,12 +630,15 @@ function buildRouter(
   // POSTing TO that token is a separate, unauthenticated route handled before the auth block in
   // createServer below — see there for why (the token itself is the credential, not a bearer
   // token).
-  router.add("POST", "/channels/:id/webhooks", async ({ res, params, principal }) => {
+  router.add("POST", "/channels/:id/webhooks", async ({ req, res, params, principal }) => {
     const channelId = params.id!;
     if (!(await store.isMember(channelId, principal.sub))) {
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
+    // Minting a standing external credential is the `webhook.create` capability (ungated by default;
+    // step-up-eligible). Membership is still required above.
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
     const wh = await store.createWebhook(channelId, principal.sub);
     await store.appendAudit({ actor: principal.sub, action: "webhook.create", target: wh.id });
     sendJson(res, 201, wh);
@@ -612,6 +658,9 @@ function buildRouter(
   // Spawning an agent creates a channel with the agent pre-added as a member (decision #7: an
   // agent is a channel member, not a separate concept) plus the owning human as its owner.
   router.add("POST", "/agents", async ({ req, res, principal }) => {
+    // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
+    // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
+    if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
     const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string };
     const kind = body.kind ?? "assistant";
     const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model });
@@ -647,6 +696,9 @@ function buildRouter(
       sendJson(res, 404, { error: "sessions_unavailable" });
       return;
     }
+    // Empowering an agent to run a mutating tool is the same `agent.manage` capability as spawning
+    // one — it composes with the owner-only check inside control.grantExecute below.
+    if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
     const body = (await readJsonBody(req)) as { scope?: "once" | "turn"; turnId?: string };
     const decision = await control.grantExecute({
       sessionId: params.id!,
@@ -762,10 +814,17 @@ export function createHttpServer(deps: {
   /** Local DLP scanner (a deployment setting). Unset ⇒ an OFF policy (no scanning), so tests and
    * bare deployments are unaffected until DLP is deliberately configured. */
   dlp?: DlpPolicy;
+  /** Privileged-capability policy (a deployment setting). Unset ⇒ the behavior-preserving defaults
+   * (redact/downgrade → the admin group; agent/webhook ungated; step-up off). */
+  capabilities?: CapabilityPolicy;
+  /** Step-up token verifier/minter. Unset ⇒ POST /auth/stepup is unavailable and any capability that
+   * requires step-up fails closed (can't be satisfied). */
+  stepUp?: StepUp;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
-  const router = buildRouter(deps.store, marking, dlp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
+  const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

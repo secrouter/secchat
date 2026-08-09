@@ -22,6 +22,7 @@ import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
+import '../widgets/step_up_dialog.dart';
 import '../widgets/user_picker.dart';
 
 /// The main chat surface: sidebar + selected channel's transcript +
@@ -319,17 +320,34 @@ class _ChatScreenState extends State<ChatScreen> {
     if (changed) _transcripts[channelId] = updated;
   }
 
-  /// Redacts [message] after confirmation — a governed content purge. The live
-  /// `redaction` echo is idempotent; a failure surfaces an error.
+  /// Runs [action]; if the server demands a fresh re-authentication (step-up),
+  /// asks the user to re-authenticate, mints a proof, and retries once. Returns
+  /// true iff the action ultimately ran. Non-step-up errors propagate.
+  Future<bool> _withStepUp(Future<void> Function() action, {String? label}) async {
+    try {
+      await action();
+      return true;
+    } on ApiException catch (e) {
+      if (!e.isStepUpRequired || !mounted) rethrow;
+      final ok = await showStepUpDialog(context, action: label);
+      if (ok != true || !mounted) return false;
+      await widget.api.stepUp();
+      await action(); // retry — the client now presents the fresh step-up proof
+      return true;
+    }
+  }
+
+  /// Redacts [message] after confirmation — a governed content purge. Steps up
+  /// re-auth if the deployment gates redaction on it. The live `redaction` echo
+  /// is idempotent; a failure surfaces an error.
   Future<void> _redactMessage(Message message) async {
     final channel = _selected;
     if (channel == null) return;
     final reason = await showRedactDialog(context);
     if (reason == null || !mounted) return;
     try {
-      await widget.api.redactMessage(message.id, reason);
-      if (!mounted) return;
-      setState(() => _applyRedaction(channel.id, message.id));
+      final done = await _withStepUp(() => widget.api.redactMessage(message.id, reason), label: 'redact a message');
+      if (done && mounted) setState(() => _applyRedaction(channel.id, message.id));
     } catch (error) {
       _showError(error);
     }
@@ -406,9 +424,12 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (next == null || !mounted || next == channel.cuiMarking) return;
     try {
-      final updated = await widget.api.setChannelMarking(channel.id, next);
-      if (!mounted) return;
-      setState(() => _applyChannelMarking(channel.id, updated.cuiMarking ?? next));
+      // A downgrade may be step-up-gated; retry with a fresh proof if so.
+      final done = await _withStepUp(
+        () => widget.api.setChannelMarking(channel.id, next),
+        label: 'change a classification',
+      );
+      if (done && mounted) setState(() => _applyChannelMarking(channel.id, next));
     } catch (error) {
       _showError(error);
     }
