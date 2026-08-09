@@ -10,6 +10,7 @@ import { buildOverview } from "./admin/overview.ts";
 import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
 import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
+import { makePiRunner } from "./agent/pi-runner.ts";
 import { makeAuthGateway } from "./auth/bff.ts";
 import { makeVerifyToken } from "./auth/jwks.ts";
 import { loadConfig } from "./config.ts";
@@ -22,11 +23,55 @@ import { PgStore } from "./store/pg.ts";
 import { migrate } from "./db/migrate.ts";
 import { attachWsHub } from "./ws/hub.ts";
 import type { Hub } from "./ws/hub.ts";
-import type { SessionStore, Store } from "./types.ts";
+import type { Runner, SessionStore, Store } from "./types.ts";
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
+import { delimiter as pathDelimiter, join as pathJoin } from "node:path";
 import pg from "pg";
 const { Pool } = pg;
+
+/** Resolves a binary name (or path) to an executable file, searching `PATH` like a shell would —
+ * used only to decide, at startup, whether the real pi runner is usable (see `selectRunner`
+ * below). A relative/absolute path (contains "/" or starts with ".") is checked directly instead
+ * of searched, matching normal shell lookup rules. Returns undefined rather than throwing — this
+ * is a best-effort probe, never a hard requirement. */
+function resolveBin(name: string): string | undefined {
+  const candidates = name.includes("/")
+    ? [name]
+    : (process.env.PATH ?? "")
+        .split(pathDelimiter)
+        .filter((dir) => dir.length > 0)
+        .map((dir) => pathJoin(dir, name));
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // not here — keep looking
+    }
+  }
+  return undefined;
+}
+
+/** Picks the coding-agent Runner: the real pi runner (spawns the external `pi` CLI — see
+ * agent/pi-runner.ts) when it's usable, else the interactive demo stub (agent/interactive-runner.ts).
+ * "Usable" is `SECCHAT_PI_RUNNER=1` (explicit opt-in — trust the operator, fail loudly per-session
+ * via pi-runner.ts's own spawn-error handling if PI_BIN turns out not to resolve after all) OR
+ * `PI_BIN` (default `"pi"`) actually resolving on PATH right now. Either way the execute-gate
+ * (plan-mode default, owner-authorized mutation) is identically real — only what's on the other
+ * end of the Runner port changes. */
+function selectRunner(): Runner {
+  const piBin = process.env.PI_BIN?.trim() || "pi";
+  const forced = (process.env.SECCHAT_PI_RUNNER?.trim() ?? "") === "1";
+  const resolved = resolveBin(piBin);
+
+  if (forced || resolved) {
+    console.error(`▸ coding-agent runner: pi (${resolved ?? piBin}${forced && !resolved ? " — not found on PATH yet; SECCHAT_PI_RUNNER=1 forces it anyway" : ""})`);
+    return makePiRunner();
+  }
+  console.error("▸ coding-agent runner: interactive demo stub (pi not found on PATH — set PI_BIN, install pi, or force with SECCHAT_PI_RUNNER=1)");
+  return makeInteractiveRunner();
+}
 
 const config = loadConfig();
 // In dev-mode (SECCHAT_DEV_MODE=1) accept `dev.<sub>.<groups>` tokens so the local web client
@@ -63,11 +108,15 @@ if (config.databaseUrl) {
 
 let hub: Hub | undefined;
 const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channelId, payload);
-// Coding-agent control plane. The echo runner is a dev stand-in until a real pi runner lands
-// (Sprint 5); the execute-gate (plan-mode default, owner-authorized mutation) is fully real.
-// The interactive demo runner drives coding-agent sessions and requests a bash tool on build/run
-// intent, so the execute-gate is exercised (a real pi runner replaces it later — same Runner port).
-const control = makeControlPlane({ sessions: store, runner: makeInteractiveRunner(), getAgent: (id) => store.getAgent(id), broadcast });
+// Coding-agent control plane (Sprint 5: the real pi runner). The execute-gate (plan-mode default,
+// owner-authorized mutation) is fully real either way — selectRunner() only decides what's on the
+// other end of the Runner port: the real pi CLI when it's usable, else the interactive demo stub
+// (still handy for local dev without pi installed, or for exercising the gate without a model).
+// Named (not inlined into makeControlPlane below) so the shutdown handler can stop every session's
+// runner on the way out — unlike the demo runners, pi backs a session with a REAL OS process, and
+// this is the one place that outlives the control plane's own lifecycle.
+const runner = selectRunner();
+const control = makeControlPlane({ sessions: store, runner, getAgent: (id) => store.getAgent(id), broadcast });
 
 if (config.devMode && !config.databaseUrl) {
   // DEV ONLY (SECCHAT_DEV_MODE=1, in-memory only): seed so /admin + the client have sample data.
@@ -115,6 +164,13 @@ server.listen(config.port, config.host, () => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     hub?.close();
+    // Best-effort: stop every still-active session's runner so a real subprocess (pi) never
+    // outlives this process as an orphan. Never blocks shutdown on it — a hung/slow runner.stop()
+    // must not delay the exit any more than the SIGKILL fallback it already carries internally.
+    void store
+      .listActiveSessions()
+      .then((sessions) => Promise.allSettled(sessions.map((s) => runner.stop(s.id))))
+      .catch(() => {});
     server.close(() => process.exit(0));
   });
 }
