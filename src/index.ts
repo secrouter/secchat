@@ -164,6 +164,7 @@ const server = createHttpServer({
   search: (userSub, q) => searchMessages(store, userSub, q),
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
+  marking: config.marking,
 });
 hub = attachWsHub(server, { verifyToken, auth });
 

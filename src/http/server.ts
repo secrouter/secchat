@@ -11,6 +11,15 @@ import type { AdminOverview, AgentControl, AgentKind, AuthGateway, Channel, Chan
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
+import {
+  DEFAULT_MARKING,
+  DEFAULT_MARKING_LEVELS,
+  isKnownMarking,
+  makeMarkingPolicy,
+  markingAtMost,
+  markRank,
+  type MarkingPolicy,
+} from "../marking/policy.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -163,6 +172,7 @@ async function triggerAssistants(
 
 function buildRouter(
   store: Store,
+  marking: MarkingPolicy,
   broadcast?: Broadcast,
   llm?: LlmClient,
   control?: AgentControl,
@@ -182,7 +192,9 @@ function buildRouter(
       displayName: principal.displayName,
       groups: principal.groups,
     });
-    sendJson(res, 200, principal);
+    // Carry the deployment's marking ladder + default so the client can render banners, populate
+    // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
+    sendJson(res, 200, { ...principal, marking: { levels: marking.levels, default: marking.default } });
   });
 
   // The user directory (seen-users): everyone who has signed in via SSO, with their real group
@@ -246,16 +258,61 @@ function buildRouter(
   });
 
   router.add("POST", "/channels", async ({ req, res, principal }) => {
-    const body = (await readJsonBody(req)) as { name?: string; kind?: ChannelKind; workspaceId?: string };
+    const body = (await readJsonBody(req)) as { name?: string; kind?: ChannelKind; workspaceId?: string; marking?: string };
+    // An optional INITIAL channel marking (setting it later goes through POST /channels/:id/marking).
+    // A supplied level must be a rung of the ladder; unset ⇒ unmarked (per-message marking applies).
+    let cuiMarking: string | undefined;
+    if (body.marking != null && body.marking.trim() !== "") {
+      if (!isKnownMarking(marking, body.marking)) {
+        sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
+        return;
+      }
+      cuiMarking = body.marking.trim().toUpperCase();
+    }
     const channel = await store.createChannel({
       workspaceId: body.workspaceId ?? "ws-default",
       kind: body.kind ?? "human",
       name: body.name,
+      cuiMarking,
       createdBy: principal.sub,
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
-    await store.appendAudit({ actor: principal.sub, action: "channel.create", target: channel.id });
+    await store.appendAudit({ actor: principal.sub, action: "channel.create", target: channel.id, detail: cuiMarking });
     sendJson(res, 201, channel);
+  });
+
+  // ── Classification marking: set (or change) a channel's level. When a channel is marked, the
+  // channel IS the portion — every message inherits it and none may exceed it. Any member may SET a
+  // marking or RAISE it; only an admin may DOWNGRADE (lower the level) — loosening a control is a
+  // privileged act. Validated against the ladder; audited (`channel.mark`) by the store; a live
+  // `channel_marking` event updates every viewer's banner.
+  router.add("POST", "/channels/:id/marking", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    const channel = await store.getChannel(channelId);
+    if (!channel) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { marking?: string };
+    const next = (body.marking ?? "").trim().toUpperCase();
+    if (!isKnownMarking(marking, next)) {
+      sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
+      return;
+    }
+    // Downgrade = lowering the level below the channel's current one → admin only.
+    const current = channel.cuiMarking;
+    const isDowngrade = current != null && markRank(marking, next) < markRank(marking, current);
+    if (isDowngrade && !(admin != null && isAdmin(principal, admin.adminGroup))) {
+      sendJson(res, 403, { error: "downgrade_requires_admin" });
+      return;
+    }
+    const updated = await store.setChannelMarking(channelId, next, principal.sub);
+    broadcast?.(channelId, { type: "channel_marking", channelId, marking: next, by: principal.sub });
+    sendJson(res, 200, updated);
   });
 
   // The SPA sidebar needs a list of the caller's channels; every other channel read here is
@@ -305,14 +362,36 @@ function buildRouter(
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    const body = (await readJsonBody(req)) as { content?: string; parentId?: string };
+    const channel = await store.getChannel(channelId);
+    const body = (await readJsonBody(req)) as { content?: string; parentId?: string; marking?: string };
     const content = body.content ?? "";
+    // Resolve + ENFORCE the classification marking (blocking).
+    const requested =
+      body.marking != null && body.marking.trim() !== "" ? body.marking.trim().toUpperCase() : undefined;
+    if (requested != null && !isKnownMarking(marking, requested)) {
+      sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
+      return;
+    }
+    let effective: string;
+    if (channel?.cuiMarking) {
+      // Marked channel: the channel IS the portion. A message may never EXCEED the channel ceiling
+      // (spillage block); otherwise it simply takes the channel level, whatever was requested.
+      if (requested != null && !markingAtMost(marking, requested, channel.cuiMarking)) {
+        sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel.cuiMarking });
+        return;
+      }
+      effective = channel.cuiMarking;
+    } else {
+      // Unmarked channel / DM: per-message marking, defaulting to the policy floor.
+      effective = requested ?? marking.default;
+    }
     const message = await store.appendMessage({
       channelId,
       authorRef: principal.sub,
       authorType: "user",
       content,
       parentId: body.parentId,
+      marking: effective,
     });
     // Echo the plaintext the client just posted (the Message row carries only the content HASH),
     // and fan the same shape out to the channel's realtime subscribers.
@@ -661,8 +740,13 @@ export function createHttpServer(deps: {
   /** Static web root for the SPA shell (index.html + assets/*) — see the static-serving block
    * below. Unset in a deployment/test that doesn't serve the SPA from this process. */
   web?: { root: string };
+  /** The classification-marking ladder (a deployment setting, see config.ts). Unset ⇒ the built-in
+   * default ladder (UNCLASSIFIED→PROPRIETARY→CUI→CLASSIFIED, default UNCLASSIFIED), so tests and
+   * bare deployments still enforce a sane policy. */
+  marking?: MarkingPolicy;
 }): Server {
-  const router = buildRouter(deps.store, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
+  const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING);
+  const router = buildRouter(deps.store, marking, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

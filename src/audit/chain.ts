@@ -3,10 +3,12 @@
 // Two chains, both here (pure functions over node:crypto — no I/O, so trivially testable):
 //
 //  1. MESSAGE chain (per channel): each message's `hash` is over the previous hash + the
-//     message metadata + the CONTENT HASH. Because the chain binds `contentSha256` and never
-//     the plaintext, a spillage purge can drop the plaintext (redaction tombstone) while the
-//     chain still verifies — reconciling "tamper-evident" with "CUI must be purgeable"
-//     (decision #9). A verifier reports the chain intact even for redacted rows.
+//     message metadata + the CONTENT HASH + the classification MARKING. Because the chain binds
+//     `contentSha256` and never the plaintext, a spillage purge can drop the plaintext (redaction
+//     tombstone) while the chain still verifies — reconciling "tamper-evident" with "CUI must be
+//     purgeable" (decision #9). Binding `marking` makes the classification itself tamper-evident:
+//     a silently-altered marking (CUI→UNCLASSIFIED) breaks the chain. A verifier reports the chain
+//     intact even for redacted rows.
 //
 //  2. AUDIT chain (global): metadata-only events (the SecRouter auditor pattern — content is
 //     NEVER passed here), chained the same way, for who-did-what integrity.
@@ -39,10 +41,10 @@ export function hashContent(plaintext: string): Sha256Hex {
  * function `verifyMessageChain` recomputes. `contentSha256` (not the plaintext) is bound. */
 export function computeMessageHash(
   prevHash: Sha256Hex,
-  m: Pick<Message, "channelId" | "seq" | "authorRef" | "authorType" | "contentSha256" | "createdAt">,
+  m: Pick<Message, "channelId" | "seq" | "authorRef" | "authorType" | "contentSha256" | "marking" | "createdAt">,
 ): Sha256Hex {
   return sha256(
-    canonical([prevHash, m.channelId, m.seq, m.authorRef, m.authorType, m.contentSha256, m.createdAt]),
+    canonical([prevHash, m.channelId, m.seq, m.authorRef, m.authorType, m.contentSha256, m.marking, m.createdAt]),
   );
 }
 

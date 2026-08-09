@@ -48,6 +48,7 @@ import {
   verifyAuditChain,
   verifyMessageChain,
 } from "../audit/chain.ts";
+import { DEFAULT_MARKING } from "../marking/policy.ts";
 import type {
   Agent,
   AgentSession,
@@ -95,6 +96,16 @@ export class MemoryStore implements Store, SessionStore {
 
   async getChannel(id: Id): Promise<Channel | null> {
     return this.#channels.get(id) ?? null;
+  }
+
+  /** Sets the channel's classification level in place and chains a `channel.mark` audit event. The
+   * route validates the level + owns the set/raise-vs-downgrade authz; this just persists + audits. */
+  async setChannelMarking(channelId: Id, marking: string, by: string): Promise<Channel> {
+    const channel = this.#channels.get(channelId);
+    if (!channel) throw new Error(`MemoryStore.setChannelMarking: unknown channel ${channelId}`);
+    channel.cuiMarking = marking;
+    await this.appendAudit({ actor: by, action: "channel.mark", target: channelId, detail: marking });
+    return channel;
   }
 
   async addMember(m: Member): Promise<void> {
@@ -188,6 +199,9 @@ export class MemoryStore implements Store, SessionStore {
     const seq = last ? last.seq + 1 : 1;
     const prevHash = last ? last.hash : GENESIS;
     const contentSha256 = hashContent(input.content);
+    // Effective marking: a marked channel IS the portion (its level wins); otherwise the author's
+    // per-message choice, defaulting to the floor. Bound into the hash below (tamper-evident).
+    const marking = this.#channels.get(input.channelId)?.cuiMarking ?? input.marking ?? DEFAULT_MARKING;
     const createdAt = new Date().toISOString();
     const hash = computeMessageHash(prevHash, {
       channelId: input.channelId,
@@ -195,6 +209,7 @@ export class MemoryStore implements Store, SessionStore {
       authorRef: input.authorRef,
       authorType: input.authorType,
       contentSha256,
+      marking,
       createdAt,
     });
 
@@ -207,6 +222,7 @@ export class MemoryStore implements Store, SessionStore {
       promptedBy: input.promptedBy, // NOT a hash input (see header comment) — carried for provenance only
       parentId: input.parentId, // thread parent — same deal: metadata only, not bound into the hash
       contentSha256,
+      marking, // chain-bound (see computeMessageHash) — immutable, tamper-evident
       prevHash,
       hash,
       createdAt,

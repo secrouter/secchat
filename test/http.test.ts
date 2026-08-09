@@ -66,6 +66,7 @@ interface FakeMessage {
   authorType: string;
   parentId?: string;
   contentSha256: string;
+  marking: string;
   prevHash: string;
   hash: string;
   createdAt: string;
@@ -98,6 +99,11 @@ const store = {
     channelsById.set(id, channel);
     return channel;
   },
+  // The message-post route resolves the channel to read its marking ceiling; these fakes are
+  // unmarked (no cuiMarking), so posting defaults to the policy floor.
+  async getChannel(id: string) {
+    return channelsById.get(id) ?? null;
+  },
   async addMember(m: { channelId: string; memberRef: string }) {
     const members = channelMembers.get(m.channelId) ?? new Set<string>();
     members.add(m.memberRef);
@@ -128,6 +134,7 @@ const store = {
       authorType: input.authorType,
       parentId: input.parentId,
       contentSha256: "0".repeat(64),
+      marking: "UNCLASSIFIED",
       prevHash: "0".repeat(64),
       hash: "0".repeat(64),
       createdAt: new Date().toISOString(),
@@ -363,6 +370,7 @@ const fakeSearchResults: Array<Message & { content?: string }> = [
     authorRef: "user-1",
     authorType: "user",
     contentSha256: "0".repeat(64),
+    marking: "UNCLASSIFIED",
     prevHash: "0".repeat(64),
     hash: "0".repeat(64),
     createdAt: new Date().toISOString(),
@@ -441,10 +449,15 @@ test("GET /me without a token is 401", async () => {
   assert.deepEqual(await res.json(), { error: "unauthorized" });
 });
 
-test("GET /me with a valid bearer token returns the principal", async () => {
+test("GET /me with a valid bearer token returns the principal + the marking policy", async () => {
   const res = await fetch(`${baseUrl}/me`, { headers: { authorization: "Bearer good" } });
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { sub: "user-1", groups: ["eng"] });
+  const body = (await res.json()) as { sub: string; groups: string[]; marking: { levels: string[]; default: string } };
+  assert.equal(body.sub, "user-1");
+  assert.deepEqual(body.groups, ["eng"]);
+  // The default built-in ladder is attached (no `marking` dep wired in this server).
+  assert.equal(body.marking.default, "UNCLASSIFIED");
+  assert.ok(body.marking.levels.includes("CUI"));
 });
 
 test("GET /me with a bad token is 401", async () => {

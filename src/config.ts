@@ -1,6 +1,13 @@
 // Environment-driven configuration. No secrets are defaulted; a missing REQUIRED value fails
 // closed at startup (never silently insecure). Kept dependency-free — plain process.env.
 
+import {
+  DEFAULT_MARKING_LEVELS,
+  makeMarkingPolicy,
+  type MarkingPolicy,
+  parseMarkingLevels,
+} from "./marking/policy.ts";
+
 export interface Config {
   host: string;
   port: number;
@@ -46,6 +53,12 @@ export interface Config {
    * false, `/auth/login|callback|logout` 503 and the client falls back to the dev/bearer path;
    * `/auth/status` always reports this value so the client knows which login UI to show. */
   ssoEnabled: boolean;
+
+  /** The classification-marking ladder + default level (a DEPLOYMENT SETTING). Drives channel/
+   * message marking, the rendered banners, and the blocking spillage checks. Defaults to
+   * UNCLASSIFIED → PROPRIETARY → CUI → CLASSIFIED with UNCLASSIFIED as the fail-safe default.
+   * Set `SECCHAT_MARKING_LEVELS` (comma-separated, low→high) and `SECCHAT_MARKING_DEFAULT`. */
+  marking: MarkingPolicy;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -66,6 +79,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const oidcClientSecret = env.SECCHAT_OIDC_CLIENT_SECRET?.trim() || undefined;
   const publicUrl = env.SECCHAT_PUBLIC_URL?.trim().replace(/\/+$/, "") || undefined;
   const sessionSecret = env.SECCHAT_SESSION_SECRET?.trim() || undefined;
+  // Marking ladder: a deployment setting. An override that's malformed (empty, or a default outside
+  // the ladder) fails closed at startup via makeMarkingPolicy — never silently insecure.
+  const markingLevelsRaw = env.SECCHAT_MARKING_LEVELS?.trim();
+  const markingLevels = markingLevelsRaw ? parseMarkingLevels(markingLevelsRaw) : [...DEFAULT_MARKING_LEVELS];
+  const marking = makeMarkingPolicy(markingLevels, opt(env, "SECCHAT_MARKING_DEFAULT", markingLevels[0] ?? ""));
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -83,5 +101,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionSecret,
     sessionTtl: Number(opt(env, "SECCHAT_SESSION_TTL", "28800")),
     ssoEnabled: Boolean(oidcClientSecret && publicUrl && sessionSecret),
+    marking,
   };
 }

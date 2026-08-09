@@ -195,6 +195,43 @@ if (!DATABASE_URL) {
     assert.equal((await store.verifyChains()).messagesOk, true);
   });
 
+  test("marking: stamped at write + chain-bound; a marked channel forces its level; setChannelMarking audits + is immutable per-row", async () => {
+    // Unmarked channel → per-message marking (input.marking, defaulting to the floor).
+    const open = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    const u = await store.appendMessage({ channelId: open.id, authorRef: "user-alice", authorType: "user", content: "hi" });
+    assert.equal(u.marking, "UNCLASSIFIED", "defaults to the floor when unspecified");
+    const c = await store.appendMessage({ channelId: open.id, authorRef: "user-alice", authorType: "user", content: "cui", marking: "CUI" });
+    assert.equal(c.marking, "CUI");
+
+    // A marked channel IS the portion — every message inherits it (input.marking ignored).
+    const room = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice", cuiMarking: "CUI" });
+    const inherited = await store.appendMessage({ channelId: room.id, authorRef: "user-alice", authorType: "user", content: "x", marking: "UNCLASSIFIED" });
+    assert.equal(inherited.marking, "CUI", "the channel level wins over the request");
+
+    // The marking is bound into the hash chain (both channels verify).
+    assert.equal((await store.verifyChains()).messagesOk, true);
+
+    // setChannelMarking updates the level + chains a channel.mark audit event.
+    const auditBefore = (await store.listAudit()).length;
+    const updated = await store.setChannelMarking(open.id, "PROPRIETARY", "admin-1");
+    assert.equal(updated.cuiMarking, "PROPRIETARY");
+    const audit = await store.listAudit();
+    assert.equal(audit.length, auditBefore + 1);
+    assert.equal(audit[audit.length - 1]!.action, "channel.mark");
+    assert.equal(audit[audit.length - 1]!.detail, "PROPRIETARY");
+
+    // The message row's marking is immutable — the 0005 guard rejects a direct UPDATE (chain input).
+    const pool2 = new Pool({ connectionString: DATABASE_URL, max: 1 });
+    try {
+      await assert.rejects(
+        () => pool2.query(`UPDATE messages SET marking = 'UNCLASSIFIED' WHERE id = $1`, [c.id]),
+        /append-only/,
+      );
+    } finally {
+      await pool2.end();
+    }
+  });
+
   test("listThread returns only the replies to that parent, seq order; redacted replies omit content too", async () => {
     const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
 

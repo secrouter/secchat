@@ -24,6 +24,7 @@ function buildMessages(n: number): Message[] {
       authorRef: `user-${i}`,
       authorType: "user" as const,
       contentSha256: hashContent(`message ${i}`),
+      marking: "UNCLASSIFIED",
       createdAt: `2026-08-08T00:00:0${i}.000Z`,
     };
     const hash = computeMessageHash(prev, base);

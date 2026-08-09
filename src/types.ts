@@ -53,7 +53,10 @@ export interface Channel {
   workspaceId: Id;
   kind: ChannelKind;
   name?: string;
-  cuiMarking?: string; // e.g. "CUI//SP-PRVCY" — channel-level marking (32 CFR 2002)
+  /** The channel's classification level (a rung of the deployment's marking ladder, see
+   * marking/policy.ts). When set, the channel IS the portion — every message inherits it and no
+   * message may exceed it (spillage block). Unset ("unspecified") ⇒ marking is per-message. */
+  cuiMarking?: string;
   createdBy: string; // Principal.sub
   createdAt: string; // ISO-8601 UTC
 }
@@ -107,6 +110,11 @@ export interface Message {
    * bound into the message hash. Top-level messages leave it unset. */
   parentId?: Id;
   contentSha256: Sha256Hex; // hash of the ORIGINAL content — stays even after redaction
+  /** The message's EFFECTIVE classification level (a rung of the marking ladder), stamped at write:
+   * the channel's level when the channel is marked, else the author's per-message choice (defaulting
+   * to the policy default). Bound INTO the hash chain — a marking you could silently alter wouldn't
+   * be a control — so it's immutable and tamper-evident like contentSha256. */
+  marking: string;
   prevHash: Sha256Hex;
   hash: Sha256Hex;
   createdAt: string;
@@ -153,6 +161,10 @@ export interface AppendMessageInput {
   content: string;
   promptedBy?: string;
   parentId?: Id;
+  /** The author's requested per-message marking. Ignored when the channel is marked (the channel
+   * level is stamped instead). When the channel is unmarked, this is the message's level, defaulting
+   * to the policy default when omitted. The store validates/stamps the EFFECTIVE marking. */
+  marking?: string;
 }
 
 /** A reaction (emoji) a user placed on a message. Mutable social signal — NOT in the audit
@@ -187,6 +199,10 @@ export interface AppendAuditInput {
 export interface Store {
   createChannel(input: Omit<Channel, "id" | "createdAt">): Promise<Channel>;
   getChannel(id: Id): Promise<Channel | null>;
+  /** Set (or change) a channel's classification level, recording an audited `channel.mark` event.
+   * The route owns authz (member to set/raise; admin to downgrade) and validates the level against
+   * the policy; the store just persists + audits atomically. Returns the updated channel. */
+  setChannelMarking(channelId: Id, marking: string, by: string): Promise<Channel>;
   addMember(m: Member): Promise<void>;
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;

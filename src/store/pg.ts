@@ -54,6 +54,7 @@ import {
   verifyAuditChain,
   verifyMessageChain,
 } from "../audit/chain.ts";
+import { DEFAULT_MARKING } from "../marking/policy.ts";
 import type {
   Agent,
   AgentKind,
@@ -146,6 +147,7 @@ interface MessageRow {
   prompted_by: string | null;
   parent_id: string | null;
   content_sha256: string;
+  marking: string;
   prev_hash: string;
   hash: string;
   created_at: Date;
@@ -271,6 +273,7 @@ function rowToMessage(row: MessageRow): Message {
     promptedBy: row.prompted_by ?? undefined,
     parentId: row.parent_id ?? undefined,
     contentSha256: row.content_sha256,
+    marking: row.marking,
     prevHash: row.prev_hash,
     hash: row.hash,
     createdAt: iso(row.created_at),
@@ -383,6 +386,30 @@ export class PgStore implements Store, SessionStore {
       [id],
     );
     return rows[0] ? rowToChannel(rows[0]) : null;
+  }
+
+  /** Sets the channel's classification level and chains a `channel.mark` audit event in ONE
+   * transaction. The route validates the level + owns the set/raise-vs-downgrade authz. */
+  async setChannelMarking(channelId: Id, marking: string, by: string): Promise<Channel> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<ChannelRow>(
+        `UPDATE channels SET cui_marking = $2 WHERE id = $1
+         RETURNING id, workspace_id, kind, name, cui_marking, created_by, created_at`,
+        [channelId, marking],
+      );
+      const row = rows[0];
+      if (!row) throw new Error(`PgStore.setChannelMarking: unknown channel ${channelId}`);
+      await this.#appendAuditWithClient(client, { actor: by, action: "channel.mark", target: channelId, detail: marking });
+      await client.query("COMMIT");
+      return rowToChannel(row);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /** Idempotent upsert on (channelId, memberRef): unlike MemoryStore's unconditional array push,
@@ -537,6 +564,13 @@ export class PgStore implements Store, SessionStore {
       const seq = last ? last.seq + 1 : 1;
       const prevHash = last ? last.hash : GENESIS;
       const contentSha256 = hashContent(input.content);
+      // Effective marking: a marked channel IS the portion; else the author's per-message choice,
+      // defaulting to the floor. Read under the same lock; bound into the hash below.
+      const { rows: chanRows } = await client.query<{ cui_marking: string | null }>(
+        `SELECT cui_marking FROM channels WHERE id = $1`,
+        [input.channelId],
+      );
+      const marking = chanRows[0]?.cui_marking ?? input.marking ?? DEFAULT_MARKING;
       const createdAt = new Date().toISOString();
       const hash = computeMessageHash(prevHash, {
         channelId: input.channelId,
@@ -544,15 +578,16 @@ export class PgStore implements Store, SessionStore {
         authorRef: input.authorRef,
         authorType: input.authorType,
         contentSha256,
+        marking,
         createdAt,
       });
       const id = randomUUID();
 
       // channel_id's FK makes an unknown channel fail closed here, matching MemoryStore's throw.
       await client.query(
-        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, prev_hash, hash, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, prevHash, hash, createdAt],
+        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, marking, prev_hash, hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, marking, prevHash, hash, createdAt],
       );
       await client.query(`INSERT INTO message_content (message_id, content) VALUES ($1, $2)`, [id, input.content]);
 
@@ -567,6 +602,7 @@ export class PgStore implements Store, SessionStore {
         promptedBy: input.promptedBy,
         parentId: input.parentId,
         contentSha256,
+        marking,
         prevHash,
         hash,
         createdAt,
@@ -583,7 +619,7 @@ export class PgStore implements Store, SessionStore {
   async getMessage(id: Id): Promise<Message | null> {
     const { rows } = await this.#pool.query<MessageRow>(
       `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
-              content_sha256, prev_hash, hash, created_at, redacted_at
+              content_sha256, marking, prev_hash, hash, created_at, redacted_at
        FROM messages WHERE id = $1`,
       [id],
     );
@@ -594,7 +630,7 @@ export class PgStore implements Store, SessionStore {
   async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
               rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
@@ -613,7 +649,7 @@ export class PgStore implements Store, SessionStore {
   async listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>> {
     const { rows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
+              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
               rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
@@ -638,7 +674,7 @@ export class PgStore implements Store, SessionStore {
 
       const { rows: mrows } = await client.query<MessageRow>(
         `SELECT id, channel_id, seq, author_ref, author_type, prompted_by, parent_id,
-                content_sha256, prev_hash, hash, created_at, redacted_at
+                content_sha256, marking, prev_hash, hash, created_at, redacted_at
          FROM messages WHERE id = $1 FOR UPDATE`,
         [id],
       );
@@ -697,7 +733,7 @@ export class PgStore implements Store, SessionStore {
     // Never edited — the one revision is the original on the row (content omitted if redacted).
     const { rows: orows } = await this.#pool.query<MessageJoinRow>(
       `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
-              m.content_sha256, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
+              m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
        WHERE m.id = $1`,

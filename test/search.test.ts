@@ -29,6 +29,7 @@ function makeMessage(partial: Partial<Row> & Pick<Row, "id" | "channelId" | "seq
     authorRef: "user-1",
     authorType: "user",
     contentSha256: GENESIS,
+    marking: "UNCLASSIFIED",
     prevHash: GENESIS,
     hash: GENESIS,
     createdAt: "2026-08-01T00:00:00.000Z",
