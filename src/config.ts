@@ -2,9 +2,10 @@
 // closed at startup (never silently insecure). Kept dependency-free — plain process.env.
 
 import {
-  DEFAULT_MARKING_LEVELS,
+  DEFAULT_MARKING_PROFILE,
   makeMarkingPolicy,
   type MarkingPolicy,
+  markingProfile,
   parseMarkingLevels,
 } from "./marking/policy.ts";
 import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
@@ -85,11 +86,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const oidcClientSecret = env.SECCHAT_OIDC_CLIENT_SECRET?.trim() || undefined;
   const publicUrl = env.SECCHAT_PUBLIC_URL?.trim().replace(/\/+$/, "") || undefined;
   const sessionSecret = env.SECCHAT_SESSION_SECRET?.trim() || undefined;
-  // Marking ladder: a deployment setting. An override that's malformed (empty, or a default outside
-  // the ladder) fails closed at startup via makeMarkingPolicy — never silently insecure.
+  // Marking: a deployment posture. `SECCHAT_MARKING_PROFILE` (dod-cui default | dod-classified |
+  // commercial) presets the taxonomy + baseline; `SECCHAT_MARKING_LEVELS` fully overrides it (a
+  // custom ladder). Either way `SECCHAT_MARKING_DEFAULT` can override the baseline. A malformed
+  // profile/ladder (unknown profile, empty list, or a default outside the ladder) fails closed here.
   const markingLevelsRaw = env.SECCHAT_MARKING_LEVELS?.trim();
-  const markingLevels = markingLevelsRaw ? parseMarkingLevels(markingLevelsRaw) : [...DEFAULT_MARKING_LEVELS];
-  const marking = makeMarkingPolicy(markingLevels, opt(env, "SECCHAT_MARKING_DEFAULT", markingLevels[0] ?? ""));
+  const profile = markingLevelsRaw ? null : markingProfile(opt(env, "SECCHAT_MARKING_PROFILE", DEFAULT_MARKING_PROFILE));
+  const markingLevels = markingLevelsRaw ? parseMarkingLevels(markingLevelsRaw) : [...profile!.levels];
+  const markingDefault = opt(env, "SECCHAT_MARKING_DEFAULT", profile?.default ?? markingLevels[0] ?? "");
+  const marking = makeMarkingPolicy(markingLevels, markingDefault);
   // Local DLP: default to `flag` (detect + record, never block legitimate work); a bad mode or
   // malformed rule override throws here, at startup.
   const dlp = new DlpPolicy(

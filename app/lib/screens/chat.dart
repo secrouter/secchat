@@ -414,18 +414,25 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// The classification to show in the channel banner: a marked channel's level,
-  /// else the HIGHEST marking present among visible messages, else the default.
-  String _bannerMarking(Channel channel, List<TranscriptEntry> entries) {
-    if (channel.isMarked) return channel.cuiMarking!;
-    final policy = widget.principal.marking;
-    var best = policy.defaultLevel;
-    for (final e in entries) {
-      if (e is MessageEntry && policy.rank(e.message.marking) > policy.rank(best)) {
-        best = e.message.marking;
-      }
+  /// The classification for the channel's top/bottom banners, or null when none should show.
+  /// A banner appears ONLY when the channel is itself marked ABOVE the baseline (the channel is the
+  /// portion). An unmarked channel shows no banner — its elevated messages are marked per-message
+  /// (and masked); a channel explicitly at baseline shows nothing (baseline display is suppressed).
+  String? _bannerMarking(Channel channel) {
+    if (channel.isMarked && widget.principal.marking.isElevated(channel.cuiMarking!)) {
+      return channel.cuiMarking;
     }
-    return best;
+    return null;
+  }
+
+  /// Message ids the viewer has revealed this session (above-baseline content is masked until
+  /// clicked). Ephemeral — cleared on sign-out; re-hidden if the list is rebuilt fresh.
+  final Set<String> _revealedMessageIds = {};
+
+  void _toggleReveal(Message message) {
+    setState(() {
+      if (!_revealedMessageIds.remove(message.id)) _revealedMessageIds.add(message.id);
+    });
   }
 
   /// Applies a reaction add/remove to the matching message in the transcript.
@@ -852,8 +859,9 @@ class _ChatScreenState extends State<ChatScreen> {
         : _messageById(selected.id, _threadParentId!);
 
     final policy = widget.principal.marking;
-    final entries = _transcripts[selected.id] ?? const <TranscriptEntry>[];
-    final bannerLevel = _bannerMarking(selected, entries);
+    // A banner appears only for a channel marked above baseline (the channel is the portion);
+    // otherwise none (an unmarked/baseline channel is clutter-free — elevated messages self-mark).
+    final bannerLevel = _bannerMarking(selected);
 
     return Column(
       children: [
@@ -863,9 +871,8 @@ class _ChatScreenState extends State<ChatScreen> {
           agentKind: _agentKindByChannel[selected.id],
           onMarkChannel: () => _markChannel(selected),
         ),
-        // Classification banners frame the whole channel view, top and bottom
-        // (DoDI 5200.48 marking practice).
-        MarkingBanner(level: bannerLevel),
+        // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
+        if (bannerLevel != null) MarkingBanner(level: bannerLevel),
         if (codingStrip != null && threadParent == null) codingStrip,
         if (threadParent != null)
           Expanded(child: _buildThread(selected, threadParent))
@@ -878,7 +885,7 @@ class _ChatScreenState extends State<ChatScreen> {
             initialMarking: policy.defaultLevel,
           ),
         ],
-        MarkingBanner(level: bannerLevel),
+        if (bannerLevel != null) MarkingBanner(level: bannerLevel),
       ],
     );
   }
@@ -922,8 +929,11 @@ class _ChatScreenState extends State<ChatScreen> {
       onRedact: canThread ? _redactMessage : null,
       onEdit: canThread ? _editMessage : null,
       onViewHistory: canThread ? _openHistory : null,
-      // Per-message marking chips only when the channel isn't itself the portion.
+      // Per-message marking + mask-until-revealed only when the channel isn't itself the portion.
       showMarking: !selected.isMarked,
+      markingPolicy: widget.principal.marking,
+      revealedIds: _revealedMessageIds,
+      onToggleReveal: _toggleReveal,
     );
   }
 
@@ -950,6 +960,9 @@ class _ChatScreenState extends State<ChatScreen> {
             onEdit: _editMessage,
             onViewHistory: _openHistory,
             showMarking: !channel.isMarked,
+            markingPolicy: widget.principal.marking,
+            revealedIds: _revealedMessageIds,
+            onToggleReveal: _toggleReveal,
             // one level deep — no nested thread affordance inside a thread
           ),
         ),

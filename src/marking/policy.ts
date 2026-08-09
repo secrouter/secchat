@@ -20,13 +20,44 @@ export interface MarkingPolicy {
   default: string;
 }
 
-/** The out-of-the-box ladder when a deployment sets none. UNCLASSIFIED is the floor/default;
- * PROPRIETARY and CUI cover the contractor/CUI cases; CLASSIFIED caps it. Deployment-overridable. */
-export const DEFAULT_MARKING_LEVELS: readonly string[] = ["UNCLASSIFIED", "PROPRIETARY", "CUI", "CLASSIFIED"];
+/** Built-in deployment PROFILES: each is a named preset of the marking ladder + its baseline/default,
+ * chosen by the deployment's posture. The taxonomy IS the ceiling — a level absent from the profile
+ * can never be selected or sent (so CLASSIFIED simply doesn't exist on an unclass system). The
+ * baseline (= `default`) is the "everything is this unless labelled" floor whose display is
+ * suppressed (no UNCLASSIFIED chrome cluttering the UI); markings show only ABOVE it. */
+export interface MarkingProfileDef {
+  levels: string[];
+  default: string;
+}
+
+export const MARKING_PROFILES: Readonly<Record<string, MarkingProfileDef>> = {
+  // DoD unclassified system (the default): up to CUI. CLASSIFIED is deliberately absent.
+  "dod-cui": { levels: ["UNCLASSIFIED", "PROPRIETARY", "CUI"], default: "UNCLASSIFIED" },
+  // A classified deployment unlocks the classified tiers — only when explicitly configured.
+  "dod-classified": {
+    levels: ["UNCLASSIFIED", "PROPRIETARY", "CUI", "CONFIDENTIAL", "SECRET", "TOP SECRET"],
+    default: "UNCLASSIFIED",
+  },
+  // Non-defense / commercial: everything is unclassified unless labelled PROPRIETARY or SENSITIVE
+  // (the CUI-equivalent tier covering PII + other regulated data). No defense/classified markings.
+  commercial: { levels: ["UNCLASSIFIED", "PROPRIETARY", "SENSITIVE"], default: "UNCLASSIFIED" },
+};
+
+export const DEFAULT_MARKING_PROFILE = "dod-cui";
+
+/** The out-of-the-box ladder when a deployment sets no profile or levels — the `dod-cui` profile. */
+export const DEFAULT_MARKING_LEVELS: readonly string[] = MARKING_PROFILES[DEFAULT_MARKING_PROFILE]!.levels;
 
 /** The floor / fail-safe default level. A store stamps this when nobody specified a marking and the
  * channel is unmarked (real posts go through the HTTP layer, which passes the configured default). */
 export const DEFAULT_MARKING = "UNCLASSIFIED";
+
+/** Resolve a profile name to its definition, or throw (fails closed on an unknown profile). */
+export function markingProfile(name: string): MarkingProfileDef {
+  const p = MARKING_PROFILES[name];
+  if (!p) throw new Error(`marking: unknown profile "${name}" (want ${Object.keys(MARKING_PROFILES).join("|")})`);
+  return p;
+}
 
 /** Normalize a raw level token: trim + uppercase (markings are case-insensitive on the wire, canonical
  * upper in storage/display). Returns "" for blank input. */
@@ -77,4 +108,11 @@ export function markingAtMost(policy: MarkingPolicy, a: string, b: string): bool
   const ra = markRank(policy, a);
   const rb = markRank(policy, b);
   return ra >= 0 && rb >= 0 && ra <= rb;
+}
+
+/** Whether `level` sits ABOVE the baseline (the default/floor) — i.e. it warrants a visible marking.
+ * Baseline (and anything at/below it, or unknown) is NOT elevated, so its display is suppressed. */
+export function isElevatedMarking(policy: MarkingPolicy, level: string): boolean {
+  const r = markRank(policy, level);
+  return r > markRank(policy, policy.default);
 }

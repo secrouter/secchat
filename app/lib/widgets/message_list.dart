@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../formatting.dart';
+import '../marking.dart';
 import '../models.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
@@ -37,6 +38,9 @@ class MessageList extends StatefulWidget {
     this.onEdit,
     this.onViewHistory,
     this.showMarking = false,
+    this.markingPolicy,
+    this.revealedIds = const {},
+    this.onToggleReveal,
   });
 
   final List<TranscriptEntry> entries;
@@ -70,10 +74,18 @@ class MessageList extends StatefulWidget {
   /// message, to anyone who can see the message.
   final void Function(Message message)? onViewHistory;
 
-  /// Render a per-message classification chip on each bubble — set only when the
-  /// channel is unmarked (per-message marking); a marked channel's banner
-  /// carries the level for everything, so the chip would be redundant.
+  /// Mark + mask above-baseline messages per-message — set only when the channel
+  /// is unmarked (a marked channel's banner carries the level for everything).
   final bool showMarking;
+
+  /// The marking policy (to decide which messages are above baseline / elevated).
+  final MarkingPolicy? markingPolicy;
+
+  /// Message ids the viewer has revealed (elevated content is masked until clicked).
+  final Set<String> revealedIds;
+
+  /// Toggle the reveal state of an elevated message (null disables masking).
+  final void Function(Message message)? onToggleReveal;
 
   @override
   State<MessageList> createState() => _MessageListState();
@@ -144,6 +156,9 @@ class _MessageListState extends State<MessageList> {
               onEdit: widget.onEdit,
               onViewHistory: widget.onViewHistory,
               showMarking: widget.showMarking,
+              markingPolicy: widget.markingPolicy,
+              revealedIds: widget.revealedIds,
+              onToggleReveal: widget.onToggleReveal,
             );
           }
           return _TypingBubble(typing: widget.typing!);
@@ -165,6 +180,9 @@ class _TranscriptTile extends StatelessWidget {
     this.onEdit,
     this.onViewHistory,
     this.showMarking = false,
+    this.markingPolicy,
+    this.revealedIds = const {},
+    this.onToggleReveal,
   });
 
   final TranscriptEntry entry;
@@ -177,6 +195,9 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
   final bool showMarking;
+  final MarkingPolicy? markingPolicy;
+  final Set<String> revealedIds;
+  final void Function(Message message)? onToggleReveal;
 
   @override
   Widget build(BuildContext context) {
@@ -195,6 +216,9 @@ class _TranscriptTile extends StatelessWidget {
         onEdit: onEdit,
         onViewHistory: onViewHistory,
         showMarking: showMarking,
+        markingPolicy: markingPolicy,
+        revealedIds: revealedIds,
+        onToggleReveal: onToggleReveal,
       ),
       AgentOutputEntry(:final text) => _OutputTile(text: text),
       ToolDecisionEntry(:final tool, :final allow, :final reason) =>
@@ -218,6 +242,9 @@ class _MessageBubble extends StatelessWidget {
     this.onEdit,
     this.onViewHistory,
     this.showMarking = false,
+    this.markingPolicy,
+    this.revealedIds = const {},
+    this.onToggleReveal,
   });
 
   final Message message;
@@ -231,6 +258,14 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
   final bool showMarking;
+  final MarkingPolicy? markingPolicy;
+  final Set<String> revealedIds;
+  final void Function(Message message)? onToggleReveal;
+
+  // This message carries an above-baseline marking that should be framed + masked (only in an
+  // unmarked channel — a marked channel's banner already frames everything).
+  bool get _isElevated =>
+      showMarking && !message.isRedacted && (markingPolicy?.isElevated(message.marking) ?? false);
 
   // Redaction is offered to the message's author or an admin, on live messages.
   bool get _canRedact =>
@@ -286,11 +321,6 @@ class _MessageBubble extends StatelessWidget {
               formatClockTime(message.createdAt),
               style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
             ),
-            // Per-message classification chip (only when the channel is unmarked).
-            if (showMarking && !message.isRedacted) ...[
-              const SizedBox(width: 6),
-              MarkingChip(level: message.marking),
-            ],
             // "(edited)" marker — tapping it opens the version history when available.
             if (message.isEdited && !message.isRedacted) ...[
               const SizedBox(width: 6),
@@ -311,23 +341,24 @@ class _MessageBubble extends StatelessWidget {
             ),
           ),
         const SizedBox(height: 2),
-        message.isRedacted
-            ? const Text(
-                'message redacted',
-                style: TextStyle(
-                  fontStyle: FontStyle.italic,
-                  color: AppColors.textFaint,
-                  fontSize: 14,
-                ),
-              )
-            : MarkdownText(
-                message.content!,
-                baseStyle: const TextStyle(
-                  color: AppColors.text,
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-              ),
+        if (message.isRedacted)
+          const Text(
+            'message redacted',
+            style: TextStyle(fontStyle: FontStyle.italic, color: AppColors.textFaint, fontSize: 14),
+          )
+        else if (_isElevated)
+          // Above-baseline content: framed by its marking top & bottom, and MASKED until the
+          // viewer clicks to reveal (nothing sensitive shown in the open).
+          _ElevatedContent(
+            message: message,
+            revealed: revealedIds.contains(message.id),
+            onToggleReveal: onToggleReveal == null ? null : () => onToggleReveal!(message),
+          )
+        else
+          MarkdownText(
+            message.content!,
+            baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+          ),
         // DLP: this message's content tripped a data-loss rule (flag mode). Surfaced as a warning
         // so it can be reviewed / redacted; the durable record is the audit trail.
         if (!message.isRedacted && message.dlpFlags.isNotEmpty)
@@ -874,6 +905,85 @@ class _DlpWarning extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Above-baseline message content: framed by its classification marking top & bottom, with the
+/// body MASKED until the viewer clicks to reveal (need-to-know / shoulder-surfing protection).
+class _ElevatedContent extends StatelessWidget {
+  const _ElevatedContent({
+    required this.message,
+    required this.revealed,
+    this.onToggleReveal,
+  });
+
+  final Message message;
+  final bool revealed;
+  final VoidCallback? onToggleReveal;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = markingStyle(message.marking);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        MarkingBanner(level: message.marking),
+        Container(
+          decoration: BoxDecoration(
+            color: style.bg.withValues(alpha: 0.06),
+            border: Border(left: BorderSide(color: style.bg, width: 2)),
+          ),
+          padding: const EdgeInsets.fromLTRB(11, 9, 11, 9),
+          child: revealed
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    MarkdownText(
+                      message.content!,
+                      baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+                    ),
+                    if (onToggleReveal != null) ...[
+                      const SizedBox(height: 8),
+                      _RevealButton(revealed: true, marking: message.marking, onTap: onToggleReveal),
+                    ],
+                  ],
+                )
+              : _RevealButton(revealed: false, marking: message.marking, onTap: onToggleReveal),
+        ),
+        MarkingBanner(level: message.marking),
+      ],
+    );
+  }
+}
+
+/// The click-to-reveal / hide control inside an elevated message.
+class _RevealButton extends StatelessWidget {
+  const _RevealButton({required this.revealed, required this.marking, this.onTap});
+
+  final bool revealed;
+  final String marking;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(revealed ? Icons.visibility_off_outlined : Icons.lock_outline, size: 14, color: AppColors.textMuted),
+            const SizedBox(width: 6),
+            Text(
+              revealed ? 'Hide' : '${marking.toUpperCase()} content — click to reveal',
+              style: AppFonts.mono(fontSize: 11.5, color: AppColors.textMuted),
+            ),
+          ],
+        ),
       ),
     );
   }

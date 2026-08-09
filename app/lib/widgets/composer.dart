@@ -300,15 +300,23 @@ class _MessageComposerState extends State<MessageComposer> {
   /// menu over the ladder, defaulting to the fail-safe floor.
   Widget _markingSelector() {
     final level = _effectiveMarking;
-    final style = markingStyle(level);
+    // Baseline (the default/floor) is displayed muted as "UNMARKED" — its marking is suppressed
+    // everywhere; only an above-baseline choice gets the solid classification color.
+    final isBaseline = level == widget.initialMarking;
+    final style = isBaseline ? (bg: AppColors.surfaceRaised, fg: AppColors.textMuted) : markingStyle(level);
+    final label = isBaseline ? 'UNMARKED' : level.toUpperCase();
     final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(color: style.bg, borderRadius: BorderRadius.circular(4)),
+      decoration: BoxDecoration(
+        color: style.bg,
+        borderRadius: BorderRadius.circular(4),
+        border: isBaseline ? Border.all(color: AppColors.border) : null,
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            level.toUpperCase(),
+            label,
             style: AppFonts.mono(fontSize: 10.5, color: style.fg).copyWith(fontWeight: FontWeight.w700),
           ),
           Icon(

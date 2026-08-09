@@ -829,21 +829,14 @@ void main() {
     expect(fake.postMessageCalls.single.marking, 'CUI');
   });
 
-  testWidgets('an UNMARKED channel shows per-message marking chips and marking it calls the API', (tester) async {
+  testWidgets('an UNMARKED channel masks above-baseline content until revealed; baseline shows plainly', (tester) async {
     final fake = FakeApiClient(
       me: _principal,
       channels: const [Channel(id: 'c1', kind: ChannelKind.human, name: 'general')],
       messagesByChannel: {
         'c1': [
-          Message(
-            id: 'm1',
-            seq: 1,
-            authorRef: 'bob',
-            authorType: AuthorType.user,
-            content: 'a proprietary note',
-            createdAt: DateTime(2026, 1, 1, 9, 30),
-            marking: 'PROPRIETARY',
-          ),
+          Message(id: 'm0', seq: 1, authorRef: 'bob', authorType: AuthorType.user, content: 'just a normal note', createdAt: DateTime(2026, 1, 1, 9, 29)),
+          Message(id: 'm1', seq: 2, authorRef: 'bob', authorType: AuthorType.user, content: 'a proprietary secret', createdAt: DateTime(2026, 1, 1, 9, 30), marking: 'PROPRIETARY'),
         ],
       },
     );
@@ -852,12 +845,19 @@ void main() {
     );
     await pumpSettled(tester);
 
-    // The message carries its own classification chip (channel is unmarked).
-    expect(find.widgetWithText(MarkingChip, 'PROPRIETARY'), findsOneWidget);
-    // The banner reflects the highest marking present (PROPRIETARY > default UNCLASSIFIED).
+    // Baseline (UNMARKED) content shows in the open, with no marking chrome.
+    expect(find.textContaining('just a normal note'), findsOneWidget);
+    // The elevated message is framed by its marking (top + bottom) and MASKED until clicked.
     expect(find.widgetWithText(MarkingBanner, 'PROPRIETARY'), findsNWidgets(2));
+    expect(find.textContaining('click to reveal'), findsOneWidget);
+    expect(find.textContaining('a proprietary secret'), findsNothing, reason: 'content is hidden until revealed');
 
-    // Mark the channel via the header control → the classification picker → pick CUI.
+    // Click to reveal → the content appears.
+    await tester.tap(find.textContaining('click to reveal'));
+    await pumpSettled(tester);
+    expect(find.textContaining('a proprietary secret'), findsOneWidget);
+
+    // The header MARK… control opens the classification picker and calls the API.
     await tester.tap(find.text('MARK…'));
     await tester.pumpAndSettle();
     expect(find.text('Channel classification'), findsOneWidget);

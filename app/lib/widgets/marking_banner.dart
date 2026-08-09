@@ -28,28 +28,3 @@ class MarkingBanner extends StatelessWidget {
     );
   }
 }
-
-/// A compact classification chip for one message — shown on a bubble only when
-/// the channel is unmarked (per-message marking); in a marked channel the banner
-/// carries the level for everything, so a per-message chip would be redundant.
-class MarkingChip extends StatelessWidget {
-  const MarkingChip({super.key, required this.level});
-
-  final String level;
-
-  @override
-  Widget build(BuildContext context) {
-    final style = markingStyle(level);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: style.bg,
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(
-        level.toUpperCase(),
-        style: AppFonts.mono(fontSize: 9.5, color: style.fg).copyWith(fontWeight: FontWeight.w700),
-      ),
-    );
-  }
-}

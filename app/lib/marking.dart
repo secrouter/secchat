@@ -11,14 +11,22 @@ class MarkingPolicy {
   final String defaultLevel;
 
   /// Used before `/me` resolves, and if the server omitted the policy — matches
-  /// the backend's built-in default ladder.
+  /// the backend's default (dod-cui) profile: up to CUI, no CLASSIFIED.
   static const MarkingPolicy fallback = MarkingPolicy(
-    levels: ['UNCLASSIFIED', 'PROPRIETARY', 'CUI', 'CLASSIFIED'],
+    levels: ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
     defaultLevel: 'UNCLASSIFIED',
   );
 
   int rank(String level) => levels.indexOf(level.toUpperCase());
   bool known(String level) => rank(level) >= 0;
+
+  /// The baseline (the default/floor). Everything is implicitly this unless labelled;
+  /// its display is suppressed (no baseline chrome).
+  String get baseline => defaultLevel;
+
+  /// Whether [level] is ABOVE the baseline and so warrants a visible marking + masking.
+  /// Baseline (and below/unknown) is never elevated.
+  bool isElevated(String level) => rank(level) > rank(defaultLevel);
 
   /// True when [a] is no more sensitive than [b] (rank(a) ≤ rank(b)); unknown
   /// levels never compare true.
