@@ -13,6 +13,9 @@ dependencies:
   # directly here too because lib/platform/browser_redirect_web.dart imports
   # it explicitly for the "Sign in with SecSSO" browser redirect.
   web: ^1.1.0
+  flutter_markdown_plus: ^1.0.12
+  flutter_markdown_plus_latex: ^1.0.5
+  markdown: ^7.3.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

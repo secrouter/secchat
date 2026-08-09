@@ -6,6 +6,7 @@ import '../formatting.dart';
 import '../models.dart';
 import '../theme.dart';
 import 'empty_state.dart';
+import 'markdown_text.dart';
 
 /// The assistant's in-flight response for a channel: accumulated
 /// `assistant_delta` text, rendered as a growing bubble until the matching
@@ -192,9 +193,9 @@ class _MessageBubble extends StatelessWidget {
                           fontSize: 14,
                         ),
                       )
-                    : Text(
+                    : MarkdownText(
                         message.content!,
-                        style: const TextStyle(
+                        baseStyle: const TextStyle(
                           color: AppColors.text,
                           fontSize: 14,
                           height: 1.4,
@@ -313,7 +314,11 @@ class _DecisionTile extends StatelessWidget {
         spacing: 9,
         runSpacing: 4,
         children: [
-          Icon(allow ? Icons.check_circle : Icons.cancel, size: 14, color: color),
+          Icon(
+            allow ? Icons.check_circle : Icons.cancel,
+            size: 14,
+            color: color,
+          ),
           Text(
             tool,
             style: AppFonts.mono(
@@ -325,7 +330,10 @@ class _DecisionTile extends StatelessWidget {
           if (reason != null && reason!.isNotEmpty)
             Text(
               reason!,
-              style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted),
+              style: const TextStyle(
+                fontSize: 12.5,
+                color: AppColors.textMuted,
+              ),
             ),
         ],
       ),
@@ -345,7 +353,9 @@ class _SystemDivider extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
       child: Row(
         children: [
-          const Expanded(child: Divider(color: AppColors.borderSoft, height: 1)),
+          const Expanded(
+            child: Divider(color: AppColors.borderSoft, height: 1),
+          ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(
@@ -358,7 +368,9 @@ class _SystemDivider extends StatelessWidget {
               ),
             ),
           ),
-          const Expanded(child: Divider(color: AppColors.borderSoft, height: 1)),
+          const Expanded(
+            child: Divider(color: AppColors.borderSoft, height: 1),
+          ),
         ],
       ),
     );
@@ -464,7 +476,8 @@ class _TypingDotsState extends State<_TypingDots>
             mainAxisSize: MainAxisSize.min,
             children: List.generate(3, (i) {
               final phase = (_controller.value + i / 3) % 1.0;
-              final bounce = (math.sin(phase * 2 * math.pi - math.pi / 2) + 1) / 2;
+              final bounce =
+                  (math.sin(phase * 2 * math.pi - math.pi / 2) + 1) / 2;
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 1.5),
                 child: Transform.translate(

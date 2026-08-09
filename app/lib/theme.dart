@@ -43,6 +43,13 @@ class AppColors {
   static const onWarn = Color(0xFF241A05); // .btn-warn color
 
   static const overlay = Color(0x99050609); // modal-overlay rgba(5,6,9,.6)
+
+  // Markdown rendering (`lib/widgets/markdown_text.dart`) -- named aliases
+  // over the palette above so that widget reads its own semantic names
+  // rather than reaching for `surfaceAlt`/`border`/`accent` directly.
+  static const codeBg = surfaceAlt;
+  static const codeBorder = border;
+  static const link = accent;
 }
 
 class AppRadius {
@@ -236,10 +243,7 @@ ThemeData buildSecChatTheme() {
       fillColor: AppColors.surfaceAlt,
       hintStyle: const TextStyle(color: AppColors.textFaint, fontSize: 14),
       labelStyle: const TextStyle(color: AppColors.textMuted, fontSize: 13),
-      contentPadding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 10,
-      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(AppRadius.sm),
         borderSide: const BorderSide(color: AppColors.border),
