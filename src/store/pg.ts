@@ -70,6 +70,7 @@ import type {
   Member,
   MemberType,
   Message,
+  MessagePageOpts,
   MessageRevision,
   Reaction,
   SessionStatus,
@@ -626,21 +627,33 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToMessage(rows[0]) : null;
   }
 
-  /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. */
-  async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
-    const { rows } = await this.#pool.query<MessageJoinRow>(
-      `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
+  /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. With
+   * `opts.limit`/`before`, returns a cursor page — the most recent `limit` at seq < `before` — via a
+   * DESC+LIMIT query that is then reversed to ascending. Unbounded when both are unset. */
+  async listMessages(channelId: Id, opts?: MessagePageOpts): Promise<Array<Message & { content?: string }>> {
+    const select = `SELECT m.id, m.channel_id, m.seq, m.author_ref, m.author_type, m.prompted_by, m.parent_id,
               m.content_sha256, m.marking, m.prev_hash, m.hash, m.created_at, m.redacted_at, mc.content,
               rev.edited_at
        FROM messages m
        LEFT JOIN message_content mc ON mc.message_id = m.id
        LEFT JOIN (SELECT message_id, MAX(at) AS edited_at FROM message_revisions GROUP BY message_id) rev
-              ON rev.message_id = m.id
-       WHERE m.channel_id = $1
-       ORDER BY m.seq`,
-      [channelId],
-    );
-    return rows.map(rowToMessageWithContent);
+              ON rev.message_id = m.id`;
+    const args: unknown[] = [channelId];
+    let where = "WHERE m.channel_id = $1";
+    if (opts?.before != null) {
+      args.push(opts.before);
+      where += ` AND m.seq < $${args.length}`;
+    }
+    let sql: string;
+    if (opts?.limit != null) {
+      args.push(opts.limit);
+      sql = `${select} ${where} ORDER BY m.seq DESC LIMIT $${args.length}`;
+    } else {
+      sql = `${select} ${where} ORDER BY m.seq`;
+    }
+    const { rows } = await this.#pool.query<MessageJoinRow>(sql, args);
+    const mapped = rows.map(rowToMessageWithContent);
+    return opts?.limit != null ? mapped.reverse() : mapped;
   }
 
   /** Replies to `parentId` in `channelId`, seq order; same redaction-omits-content rule as

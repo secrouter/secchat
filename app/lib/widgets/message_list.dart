@@ -38,6 +38,9 @@ class MessageList extends StatefulWidget {
     this.onEdit,
     this.onViewHistory,
     this.onCopy,
+    this.onLoadOlder,
+    this.hasMore = false,
+    this.loadingOlder = false,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -79,6 +82,15 @@ class MessageList extends StatefulWidget {
   /// provenance so a later paste into a lower-marked destination is guarded.
   final void Function(Message message)? onCopy;
 
+  /// Load the next older page (scroll-back). Null disables paging (e.g. threads).
+  final Future<void> Function()? onLoadOlder;
+
+  /// Whether older history remains to load (drives the top affordance + scroll trigger).
+  final bool hasMore;
+
+  /// Whether an older page is currently loading (shows a spinner, suppresses re-trigger).
+  final bool loadingOlder;
+
   /// Mark + mask above-baseline messages per-message — set only when the channel
   /// is unmarked (a marked channel's banner carries the level for everything).
   final bool showMarking;
@@ -102,25 +114,58 @@ class _MessageListState extends State<MessageList> {
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
   @override
   void didUpdateWidget(covariant MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final changed =
-        oldWidget.entries.length != widget.entries.length ||
+    final grew = widget.entries.length > oldWidget.entries.length;
+    final newLast = _lastKey(widget.entries);
+    final oldLast = _lastKey(oldWidget.entries);
+    final typingChanged =
         oldWidget.typing?.text.length != widget.typing?.text.length ||
         oldWidget.typing?.agentId != widget.typing?.agentId;
-    if (changed) {
+    if (grew && oldLast != null && newLast == oldLast) {
+      // Older history was PREPENDED (the tail is unchanged) — keep the viewport where it was by
+      // jumping down by however much the total extent grew above the fold.
+      final oldMax = _scrollController.hasClients ? _scrollController.position.maxScrollExtent : 0.0;
+      final oldPixels = _scrollController.hasClients ? _scrollController.position.pixels : 0.0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        _scrollController.jumpTo(oldPixels + (_scrollController.position.maxScrollExtent - oldMax));
+      });
+    } else if (grew || typingChanged) {
+      // A new message at the tail (or a typing indicator) — follow it down.
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     }
   }
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// A stable key for the LAST entry — used to tell a tail-append (new message, scroll down) from a
+  /// front-prepend (older history, preserve position): only the latter leaves the last entry unchanged.
+  String? _lastKey(List<TranscriptEntry> entries) {
+    if (entries.isEmpty) return null;
+    final last = entries.last;
+    return last is MessageEntry ? last.message.id : last.runtimeType.toString();
+  }
+
+  /// Near the top with more history available ⇒ pull the next older page (the parent guards re-entry).
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    if (widget.hasMore &&
+        !widget.loadingOlder &&
+        widget.onLoadOlder != null &&
+        _scrollController.position.pixels <= 240) {
+      widget.onLoadOlder!.call();
+    }
   }
 
   void _scrollToBottom() {
@@ -134,7 +179,8 @@ class _MessageListState extends State<MessageList> {
 
   @override
   Widget build(BuildContext context) {
-    final itemCount = widget.entries.length + (widget.typing != null ? 1 : 0);
+    final leading = widget.hasMore ? 1 : 0; // the "load earlier" control at the top
+    final itemCount = leading + widget.entries.length + (widget.typing != null ? 1 : 0);
     if (itemCount == 0) {
       return const EmptyState(
         icon: Icons.chat_bubble_outline,
@@ -149,9 +195,16 @@ class _MessageListState extends State<MessageList> {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
         itemCount: itemCount,
         itemBuilder: (context, index) {
-          if (index < widget.entries.length) {
+          if (leading == 1 && index == 0) {
+            return _LoadOlderControl(
+              loading: widget.loadingOlder,
+              onTap: widget.onLoadOlder,
+            );
+          }
+          final entryIndex = index - leading;
+          if (entryIndex < widget.entries.length) {
             return _TranscriptTile(
-              entry: widget.entries[index],
+              entry: widget.entries[entryIndex],
               currentUserSub: widget.currentUserSub,
               onToggleReaction: widget.onToggleReaction,
               replyCounts: widget.replyCounts,
@@ -169,6 +222,36 @@ class _MessageListState extends State<MessageList> {
           }
           return _TypingBubble(typing: widget.typing!);
         },
+      ),
+    );
+  }
+}
+
+/// The top-of-history affordance: a "Load earlier messages" button, or a spinner while a page loads.
+/// Scrolling near the top also triggers the load; this is the explicit fallback.
+class _LoadOlderControl extends StatelessWidget {
+  const _LoadOlderControl({required this.loading, this.onTap});
+
+  final bool loading;
+  final Future<void> Function()? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: loading
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.textMuted),
+              )
+            : TextButton.icon(
+                onPressed: onTap == null ? null : () => onTap!(),
+                icon: const Icon(Icons.history, size: 15),
+                label: const Text('Load earlier messages'),
+                style: TextButton.styleFrom(foregroundColor: AppColors.textMuted),
+              ),
       ),
     );
   }

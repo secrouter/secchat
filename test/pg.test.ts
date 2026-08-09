@@ -80,6 +80,23 @@ if (!DATABASE_URL) {
     assert.equal((await store.verifyChains()).messagesOk, true);
   });
 
+  test("listMessages cursor paging: DESC+LIMIT query, reversed to ascending, walked via `before`", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
+    for (let i = 1; i <= 12; i++) {
+      await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: `m${i}` });
+    }
+    // Most recent 5 (seq 8..12), ascending, with content joined in.
+    const p1 = await store.listMessages(channel.id, { limit: 5 });
+    assert.deepEqual(p1.map((m) => m.seq), [8, 9, 10, 11, 12]);
+    assert.deepEqual(p1.map((m) => m.content), ["m8", "m9", "m10", "m11", "m12"]);
+    // The previous page (seq < 8).
+    const p2 = await store.listMessages(channel.id, { limit: 5, before: p1[0]!.seq });
+    assert.deepEqual(p2.map((m) => m.seq), [3, 4, 5, 6, 7]);
+    // Unbounded still returns everything, ascending.
+    assert.equal((await store.listMessages(channel.id)).length, 12);
+  });
+
   test("getChannel returns null for an unknown id", async () => {
     assert.equal(await store.getChannel(randomUUID()), null);
   });

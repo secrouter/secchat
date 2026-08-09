@@ -106,6 +106,20 @@ class FakeApiClient implements ApiClient {
   }
 
   @override
+  Future<MessagePage> getMessagePage(String channelId, {int? limit, int? before}) async {
+    getMessagesCallCount++;
+    _maybeThrow('getMessages');
+    final seeded = List<Message>.of(_messagesByChannel[channelId] ?? const [])
+      ..sort((a, b) => a.seq.compareTo(b.seq));
+    var pool = seeded;
+    if (before != null) pool = pool.where((m) => m.seq < before).toList();
+    final page = (limit != null && pool.length > limit) ? pool.sublist(pool.length - limit) : pool;
+    final oldestSeq = seeded.isEmpty ? null : seeded.first.seq;
+    final hasOlder = page.isNotEmpty && oldestSeq != null && page.first.seq > oldestSeq;
+    return MessagePage(messages: page, nextCursor: hasOlder ? page.first.seq : null);
+  }
+
+  @override
   Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking}) async {
     _maybeThrow('postMessage');
     postMessageCalls.add((channelId: channelId, content: content, parentId: parentId, marking: marking));

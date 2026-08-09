@@ -56,6 +56,12 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _messagesError;
   final Map<String, List<TranscriptEntry>> _transcripts = {};
 
+  /// Initial page size + per-channel "load older" cursor (the seq to fetch before,
+  /// or null once the start of history is reached / the channel fit in one page).
+  static const int _pageSize = 50;
+  final Map<String, int?> _cursors = {};
+  bool _loadingOlder = false;
+
   TypingState? _typing;
   ConnStatus _connStatus = ConnStatus.idle;
   StreamSubscription<WsEvent>? _wsSub;
@@ -148,10 +154,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (cached == null) {
       try {
-        final messages = await widget.api.getMessages(channel.id);
+        final page = await widget.api.getMessagePage(channel.id, limit: _pageSize);
         if (!mounted || _selected?.id != channel.id) return;
         setState(() {
-          _transcripts[channel.id] = messages.map<TranscriptEntry>(MessageEntry.new).toList();
+          _transcripts[channel.id] = page.messages.map<TranscriptEntry>(MessageEntry.new).toList();
+          _cursors[channel.id] = page.nextCursor;
           _loadingMessages = false;
         });
       } catch (error) {
@@ -204,6 +211,26 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _unreadByChannel[channelId] = 0);
   }
 
+  /// Loads the next OLDER page for [channelId] and PREPENDS it. Guarded so overlapping
+  /// scroll triggers coalesce; a null cursor (start of history) is a no-op.
+  Future<void> _loadOlder(String channelId) async {
+    final cursor = _cursors[channelId];
+    if (_loadingOlder || cursor == null) return;
+    setState(() => _loadingOlder = true);
+    try {
+      final page = await widget.api.getMessagePage(channelId, limit: _pageSize, before: cursor);
+      if (!mounted) return;
+      setState(() {
+        final older = page.messages.map<TranscriptEntry>(MessageEntry.new).toList();
+        _transcripts[channelId] = [...older, ...?_transcripts[channelId]];
+        _cursors[channelId] = page.nextCursor;
+        _loadingOlder = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingOlder = false);
+    }
+  }
+
   Future<void> _openSearch() async {
     final hit = await showMessageSearch(
       context,
@@ -230,10 +257,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _loadingMessages = true;
     });
     try {
-      final messages = await widget.api.getMessages(channel.id);
+      final page = await widget.api.getMessagePage(channel.id, limit: _pageSize);
       if (!mounted || _selected?.id != channel.id) return;
       setState(() {
-        _transcripts[channel.id] = messages.map<TranscriptEntry>(MessageEntry.new).toList();
+        _transcripts[channel.id] = page.messages.map<TranscriptEntry>(MessageEntry.new).toList();
+        _cursors[channel.id] = page.nextCursor;
         _loadingMessages = false;
       });
       _subscribe(channel.id);
@@ -979,6 +1007,10 @@ class _ChatScreenState extends State<ChatScreen> {
       onEdit: canThread ? _editMessage : null,
       onViewHistory: canThread ? _openHistory : null,
       onCopy: _copyMessage,
+      // Older-history paging: a cursor means there's more to load above.
+      hasMore: _cursors[selected.id] != null,
+      loadingOlder: _loadingOlder,
+      onLoadOlder: () => _loadOlder(selected.id),
       // Per-message marking + mask-until-revealed only when the channel isn't itself the portion.
       showMarking: !selected.isMarked,
       markingPolicy: widget.principal.marking,

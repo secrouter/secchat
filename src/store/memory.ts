@@ -60,6 +60,7 @@ import type {
   Id,
   Member,
   Message,
+  MessagePageOpts,
   MessageRevision,
   Reaction,
   SessionStatus,
@@ -239,9 +240,12 @@ export class MemoryStore implements Store, SessionStore {
     return this.#messagesById.get(id) ?? null;
   }
 
-  /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. */
-  async listMessages(channelId: Id): Promise<Array<Message & { content?: string }>> {
-    const messages = this.#messagesByChannel.get(channelId) ?? [];
+  /** Messages in seq order; `content` is omitted (key absent, not undefined) for redacted rows. With
+   * `opts.limit`/`before`, returns a cursor page (most recent `limit` at or below `before`). */
+  async listMessages(channelId: Id, opts?: MessagePageOpts): Promise<Array<Message & { content?: string }>> {
+    let messages = this.#messagesByChannel.get(channelId) ?? []; // already ascending by seq
+    if (opts?.before != null) messages = messages.filter((m) => m.seq < opts.before!);
+    if (opts?.limit != null && messages.length > opts.limit) messages = messages.slice(messages.length - opts.limit);
     return messages.map((m) => (m.redactedAt ? { ...m } : { ...m, content: this.#content.get(m.id) }));
   }
 

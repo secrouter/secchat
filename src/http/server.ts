@@ -400,13 +400,18 @@ function buildRouter(
     sendJson(res, 200, mine);
   });
 
-  router.add("GET", "/channels/:id/messages", async ({ res, params, principal }) => {
+  router.add("GET", "/channels/:id/messages", async ({ req, res, params, principal }) => {
     const channelId = params.id!;
     if (!(await store.isMember(channelId, principal.sub))) {
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    const messages = await store.listMessages(channelId);
+    // Optional cursor paging: `?limit=N` returns the most recent N (ascending), with `?before=<seq>`
+    // for the previous (older) page. No `limit` ⇒ the legacy full-array shape (backwards-compatible).
+    const q = new URL(req.url ?? "", "http://localhost").searchParams;
+    const limit = q.has("limit") ? Math.max(1, Math.min(200, Number(q.get("limit")) || 0)) : undefined;
+    const before = q.has("before") ? Number(q.get("before")) : undefined;
+    const messages = await store.listMessages(channelId, { limit, before });
     // Attach each message's reactions in ONE read (not N per-message calls) so the client renders
     // reaction chips straight from history without a follow-up request per message.
     const byMessage = new Map<string, Reaction[]>();
@@ -415,7 +420,15 @@ function buildRouter(
       if (list) list.push(reaction);
       else byMessage.set(reaction.messageId, [reaction]);
     }
-    sendJson(res, 200, messages.map((m) => ({ ...m, reactions: byMessage.get(m.id) ?? [] })));
+    const enriched = messages.map((m) => ({ ...m, reactions: byMessage.get(m.id) ?? [] }));
+    if (limit == null) {
+      sendJson(res, 200, enriched); // legacy: the whole channel as a bare array
+      return;
+    }
+    // `nextCursor` = the oldest seq in this page, to pass as `before` for the next older page — or
+    // null when we've reached the start (a short page, or the first message is included).
+    const nextCursor = enriched.length === limit && enriched[0] && enriched[0].seq > 1 ? enriched[0].seq : null;
+    sendJson(res, 200, { messages: enriched, nextCursor });
   });
 
   router.add("POST", "/channels/:id/messages", async ({ req, res, params, principal }) => {

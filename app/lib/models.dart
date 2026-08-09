@@ -318,6 +318,16 @@ class MessageRevision {
   );
 }
 
+/// A page of a channel's messages. [messages] is ascending by seq; [nextCursor]
+/// is the seq to pass as `before` to fetch the next OLDER page, or null when the
+/// start of history has been reached.
+class MessagePage {
+  const MessagePage({required this.messages, this.nextCursor});
+
+  final List<Message> messages;
+  final int? nextCursor;
+}
+
 /// One emoji reaction a user placed on a message.
 class Reaction {
   const Reaction({

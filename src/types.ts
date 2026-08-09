@@ -154,6 +154,13 @@ export interface AuditEvent {
   at: string;
 }
 
+/** Cursor paging for `listMessages`. `before` is a seq (exclusive upper bound); `limit` caps the page
+ * size, taking the most recent messages within the bound. Both unset ⇒ the whole channel. */
+export interface MessagePageOpts {
+  limit?: number;
+  before?: number;
+}
+
 export interface AppendMessageInput {
   channelId: Id;
   authorRef: string;
@@ -225,8 +232,11 @@ export interface Store {
   /** One message by id (metadata only — no content), or null. Used to resolve a message's channel
    * for an access-control check on message-scoped routes (e.g. reactions). */
   getMessage(id: Id): Promise<Message | null>;
-  /** Messages in seq order; `content` is omitted for redacted rows. */
-  listMessages(channelId: Id): Promise<Array<Message & { content?: string }>>;
+  /** Messages in seq order; `content` is omitted for redacted rows. With `opts.limit`, returns the
+   * most recent `limit` (the tail), or — with `opts.before` (a seq cursor, exclusive) — the `limit`
+   * messages just before it (the previous page for scroll-back). Unbounded (both unset) ⇒ the whole
+   * channel, so existing callers are unaffected. Always ascending by seq. */
+  listMessages(channelId: Id, opts?: MessagePageOpts): Promise<Array<Message & { content?: string }>>;
   /** Replies to `parentId` in `channelId`, seq order; `content` omitted for redacted rows. */
   listThread(channelId: Id, parentId: Id): Promise<Array<Message & { content?: string }>>;
   redactMessage(id: Id, by: string, reason: string): Promise<void>;

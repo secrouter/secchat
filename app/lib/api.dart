@@ -60,6 +60,11 @@ abstract class ApiClient {
 
   Future<List<Message>> getMessages(String channelId);
 
+  /// A cursor page of a channel's messages: the most recent [limit] (ascending),
+  /// or the page just before [before] (a seq) for scroll-back. The result carries
+  /// `nextCursor` to fetch the next older page (null at the start of history).
+  Future<MessagePage> getMessagePage(String channelId, {int? limit, int? before});
+
   /// Posts a message to a channel. A non-null [parentId] makes it a reply in
   /// that message's thread. [marking] is the requested per-message
   /// classification (ignored server-side when the channel is itself marked).
@@ -302,6 +307,25 @@ class HttpApiClient implements ApiClient {
     return data
         .map((e) => Message.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  @override
+  Future<MessagePage> getMessagePage(String channelId, {int? limit, int? before}) async {
+    final q = <String>[
+      if (limit != null) 'limit=$limit',
+      if (before != null) 'before=$before',
+    ];
+    final path = '/channels/$channelId/messages${q.isEmpty ? '' : '?${q.join('&')}'}';
+    final data = await _get(path);
+    // With `limit` the server returns {messages, nextCursor}; without it, a bare array (legacy).
+    if (data is Map<String, dynamic>) {
+      final list = (data['messages'] as List<dynamic>)
+          .map((e) => Message.fromJson(e as Map<String, dynamic>))
+          .toList();
+      return MessagePage(messages: list, nextCursor: (data['nextCursor'] as num?)?.toInt());
+    }
+    final list = (data as List<dynamic>).map((e) => Message.fromJson(e as Map<String, dynamic>)).toList();
+    return MessagePage(messages: list, nextCursor: null);
   }
 
   @override
