@@ -72,6 +72,12 @@ export interface BuildAuthorizeUrlInput {
   state: string;
   nonce: string;
   codeChallenge: string;
+  /** OIDC `prompt` (e.g. "login" to FORCE a fresh re-authentication even with an active IdP
+   * session — used by the step-up flow). Omitted ⇒ normal login (silent SSO allowed). */
+  prompt?: string;
+  /** OIDC `max_age`: maximum acceptable seconds since the user last authenticated. `0` demands a
+   * brand-new authentication and makes the IdP include a fresh `auth_time` claim. */
+  maxAge?: number;
 }
 
 /** Builds the SecSSO authorize-endpoint URL for the Authorization Code + PKCE (S256) flow. Every
@@ -87,6 +93,8 @@ export function buildAuthorizeUrl(input: BuildAuthorizeUrlInput): string {
   url.searchParams.set("nonce", input.nonce);
   url.searchParams.set("code_challenge", input.codeChallenge);
   url.searchParams.set("code_challenge_method", "S256");
+  if (input.prompt) url.searchParams.set("prompt", input.prompt);
+  if (input.maxAge !== undefined) url.searchParams.set("max_age", String(input.maxAge));
   return url.toString();
 }
 
@@ -155,6 +163,10 @@ export interface VerifyIdTokenInput {
   jwksUri: string;
   issuer: string;
   clientId: string;
+  /** When set, require the id_token's `auth_time` to be no older than this many seconds — proof
+   * that the user authenticated FRESH (used by the step-up flow, which requests `max_age=0` so the
+   * IdP must include `auth_time`). A missing or stale `auth_time` is rejected. */
+  maxAuthAgeSeconds?: number;
   /** The nonce this process generated for the /auth/login that started this flow — must match
    * the id_token's `nonce` claim exactly, or the token is rejected (replay/injection guard). */
   nonce: string;
@@ -175,6 +187,15 @@ export async function verifyIdToken(idToken: string, opts: VerifyIdTokenInput): 
 
   if (!payload.sub) throw new Error("id_token missing required 'sub' claim");
   if (payload.nonce !== opts.nonce) throw new Error("id_token nonce mismatch");
+
+  if (opts.maxAuthAgeSeconds !== undefined) {
+    // Step-up: prove the authentication is FRESH. `auth_time` must be present (max_age was
+    // requested) and within the window; otherwise the IdP silently reused an old SSO session.
+    const authTime = typeof payload.auth_time === "number" ? payload.auth_time : undefined;
+    if (authTime === undefined) throw new Error("id_token missing 'auth_time' (step-up requires a fresh re-auth)");
+    const age = Math.floor(Date.now() / 1000) - authTime;
+    if (age > opts.maxAuthAgeSeconds) throw new Error(`stale auth_time: re-authentication was ${age}s ago`);
+  }
 
   return {
     sub: payload.sub,

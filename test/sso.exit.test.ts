@@ -21,6 +21,7 @@ import { attachWsHub } from "../src/ws/hub.ts";
 import type { Hub } from "../src/ws/hub.ts";
 import { makeAuthGateway } from "../src/auth/bff.ts";
 import type { AuthGatewayConfig } from "../src/auth/bff.ts";
+import { makeStepUp } from "../src/auth/stepup.ts";
 import { MemoryStore } from "../src/store/memory.ts";
 import type { Principal, VerifyToken } from "../src/types.ts";
 
@@ -34,6 +35,11 @@ const FLOW_COOKIE_NAME = "secchat_oidc_flow";
 const CLIENT_ID = "secchatng";
 const CLIENT_SECRET = "test-client-secret";
 const SESSION_SECRET = "test-session-secret-do-not-use-in-prod";
+const STEPUP_COOKIE_NAME = "secchat_stepup";
+
+// How stale the fake IdP's `auth_time` is (seconds). 0 = a fresh re-auth; a large value simulates
+// the IdP silently reusing an old SSO session (which the step-up callback must reject).
+let idpAuthTimeAgeSeconds = 0;
 
 // ── A minimal manual cookie jar ─────────────────────────────────────────────────────────────────
 // Applies Set-Cookie response headers into a name->value map and renders it back as a request
@@ -171,6 +177,9 @@ async function startFakeIdp(claims: FakeIdpClaims): Promise<{ server: Server; ba
           name: claims.name,
           groups: claims.groups,
           nonce: record.nonce,
+          // When the client requested max_age (the step-up flow), a real IdP includes auth_time.
+          // `idpAuthTimeAgeSeconds` lets a test simulate a fresh (0) or stale re-auth.
+          auth_time: now - idpAuthTimeAgeSeconds,
         })
           .setProtectedHeader({ alg: "RS256", kid: "fake-idp-1" })
           .setSubject(claims.sub)
@@ -204,7 +213,7 @@ const verifyToken: VerifyToken = async () => {
 
 async function startSecChat(cfg: AuthGatewayConfig, withHub: boolean): Promise<{ server: Server; baseUrl: string; hub?: Hub }> {
   const auth = makeAuthGateway(cfg);
-  const server = createHttpServer({ verifyToken, store: new MemoryStore(), auth });
+  const server = createHttpServer({ verifyToken, store: new MemoryStore(), auth, stepUp: cfg.stepUp });
   await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
   const { port } = server.address() as AddressInfo;
   // Only known now — but that's fine: makeAuthGateway's handlers read cfg.publicUrl fresh on
@@ -230,6 +239,7 @@ before(async () => {
     publicUrl: "",
     sessionSecret: SESSION_SECRET,
     sessionTtl: 28800,
+    stepUp: makeStepUp(SESSION_SECRET, 900),
   };
   enabled = await startSecChat(enabledCfg, true);
 
@@ -469,4 +479,46 @@ test("WS upgrade with neither a token nor a session cookie is rejected", async (
   });
 
   assert.equal(outcome, 401);
+});
+
+// ── Step-up re-authentication (genuine fresh OIDC re-auth) ───────────────────────────────────────
+
+test("step-up: /auth/stepup/start forces prompt=login+max_age=0; a FRESH re-auth mints a step-up cookie (not a session)", async () => {
+  idpAuthTimeAgeSeconds = 0; // the user just re-authenticated
+  const jar = new CookieJar();
+
+  const startRes = await fetch(`${enabled.baseUrl}/auth/stepup/start`, { redirect: "manual" });
+  assert.equal(startRes.status, 302, "GET /auth/stepup/start should 302 to the IdP");
+  jar.applySetCookies(startRes.headers);
+  const authorizeUrl = new URL(startRes.headers.get("location") ?? "");
+  assert.equal(authorizeUrl.searchParams.get("prompt"), "login", "step-up FORCES a fresh login");
+  assert.equal(authorizeUrl.searchParams.get("max_age"), "0");
+
+  const idpRes = await fetch(authorizeUrl, { redirect: "manual" });
+  const callbackUrl = new URL(idpRes.headers.get("location") ?? "");
+  const cbRes = await fetch(callbackUrl, { redirect: "manual", headers: { cookie: jar.header() } });
+  assert.equal(cbRes.status, 302);
+  const setCookies = cbRes.headers.getSetCookie();
+  const stepUp = setCookies.find((c) => c.startsWith(`${STEPUP_COOKIE_NAME}=`));
+  assert.ok(stepUp, "the callback mints a step-up proof cookie");
+  assert.ok(stepUp.toLowerCase().includes("httponly"), "the step-up cookie is httpOnly");
+  assert.ok(!setCookies.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`)), "step-up does NOT mint a session cookie");
+});
+
+test("step-up: a STALE auth_time (a silently-reused SSO session) is REJECTED — no step-up cookie", async () => {
+  idpAuthTimeAgeSeconds = 9999; // the IdP didn't really re-authenticate the user
+  try {
+    const jar = new CookieJar();
+    const startRes = await fetch(`${enabled.baseUrl}/auth/stepup/start`, { redirect: "manual" });
+    jar.applySetCookies(startRes.headers);
+    const authorizeUrl = new URL(startRes.headers.get("location") ?? "");
+    const idpRes = await fetch(authorizeUrl, { redirect: "manual" });
+    const callbackUrl = new URL(idpRes.headers.get("location") ?? "");
+    const cbRes = await fetch(callbackUrl, { redirect: "manual", headers: { cookie: jar.header() } });
+    assert.equal(cbRes.status, 302);
+    assert.equal(cbRes.headers.get("location"), "/?auth_error=login_failed", "a stale re-auth bounces to the error");
+    assert.ok(!cbRes.headers.getSetCookie().some((c) => c.startsWith(`${STEPUP_COOKIE_NAME}=`)), "no step-up cookie minted");
+  } finally {
+    idpAuthTimeAgeSeconds = 0; // reset for any later tests
+  }
 });

@@ -25,16 +25,24 @@ import { mintSession, parseCookies, serializeCookie, verifySession, type CookieO
 
 /** Everything makeAuthGateway needs from Config — a Pick, not the whole thing (mirrors
  * auth/jwks.ts's makeVerifyToken), so callers (index.ts, tests) don't have to fabricate unrelated
- * fields like `host`/`port`/`secrouterUrl` just to build a gateway. */
+ * fields like `host`/`port`/`secrouterUrl` just to build a gateway. `stepUp` (the token minter) is
+ * needed only by the interactive step-up re-auth flow. */
 export type AuthGatewayConfig = Pick<
   Config,
-  "ssoEnabled" | "oidcIssuer" | "oidcClientId" | "oidcClientSecret" | "publicUrl" | "sessionSecret" | "sessionTtl"
+  "ssoEnabled" | "oidcIssuer" | "oidcClientId" | "oidcClientSecret" | "publicUrl" | "sessionSecret" | "sessionTtl" | "stepUp"
 >;
 
 const SESSION_COOKIE = "secchat_session";
 const FLOW_COOKIE = "secchat_oidc_flow";
 const FLOW_TTL_SECONDS = 600; // 10 minutes — long enough for a human to complete the IdP hop, no longer
 const SCOPE = "openid profile email groups";
+
+// Step-up: the httpOnly cookie carrying the fresh-re-auth proof, and how recent the IdP's
+// `auth_time` must be for the callback to accept it as a genuine re-authentication (proof that
+// `prompt=login` forced a real login, not a silent SSO session reuse).
+const STEPUP_COOKIE = "secchat_stepup";
+const STEPUP_MAX_AUTH_AGE_SECONDS = 300;
+const STEPUP_COOKIE_TTL_SECONDS = 900;
 
 // The flow cookie's own iss/aud — deliberately DIFFERENT from session.ts's "secchat"/"secchat" so
 // a captured flow cookie can never be replayed as a session cookie (or vice versa) even though
@@ -47,6 +55,9 @@ interface FlowState {
   codeVerifier: string;
   nonce: string;
   next: string;
+  /** True when this flow is a step-up re-auth (prompt=login) rather than a fresh login — the
+   * callback then mints a step-up proof cookie instead of a session cookie. */
+  stepUp: boolean;
 }
 
 function flowKey(secret: string): Uint8Array {
@@ -55,7 +66,7 @@ function flowKey(secret: string): Uint8Array {
 
 async function signFlowCookie(flow: FlowState, secret: string): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ state: flow.state, codeVerifier: flow.codeVerifier, nonce: flow.nonce, next: flow.next })
+  return new SignJWT({ state: flow.state, codeVerifier: flow.codeVerifier, nonce: flow.nonce, next: flow.next, stepUp: flow.stepUp })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(FLOW_ISSUER)
     .setAudience(FLOW_ISSUER)
@@ -72,11 +83,11 @@ async function verifyFlowCookie(token: string, secret: string): Promise<FlowStat
     issuer: FLOW_ISSUER,
     audience: FLOW_ISSUER,
   });
-  const { state, codeVerifier, nonce, next } = payload;
+  const { state, codeVerifier, nonce, next, stepUp } = payload;
   if (typeof state !== "string" || typeof codeVerifier !== "string" || typeof nonce !== "string" || typeof next !== "string") {
     throw new Error("malformed OIDC flow cookie");
   }
-  return { state, codeVerifier, nonce, next };
+  return { state, codeVerifier, nonce, next, stepUp: stepUp === true };
 }
 
 function randomToken(): string {
@@ -167,7 +178,10 @@ function requireReady(cfg: AuthGatewayConfig): ReadyConfig {
   };
 }
 
-async function handleLogin(req: IncomingMessage, res: ServerResponse, cfg: AuthGatewayConfig): Promise<void> {
+/** Starts an Authorization Code + PKCE flow. `stepUp` distinguishes a fresh LOGIN (silent SSO
+ * allowed) from a step-up RE-AUTH — the latter adds `prompt=login` + `max_age=0` to FORCE a fresh
+ * authentication at the IdP (and to make it return an `auth_time` the callback verifies). */
+async function startFlow(req: IncomingMessage, res: ServerResponse, cfg: AuthGatewayConfig, stepUp: boolean): Promise<void> {
   try {
     const ready = requireReady(cfg);
     const url = new URL(req.url ?? "/", "http://internal");
@@ -188,9 +202,10 @@ async function handleLogin(req: IncomingMessage, res: ServerResponse, cfg: AuthG
       state,
       nonce,
       codeChallenge,
+      ...(stepUp ? { prompt: "login", maxAge: 0 } : {}),
     });
 
-    const flowCookie = await signFlowCookie({ state, codeVerifier, nonce, next }, ready.sessionSecret);
+    const flowCookie = await signFlowCookie({ state, codeVerifier, nonce, next, stepUp }, ready.sessionSecret);
     appendSetCookie(res, serializeCookie(FLOW_COOKIE, flowCookie, { ...cookieOpts(cfg), maxAge: FLOW_TTL_SECONDS }));
     redirect(res, authorizeUrl);
   } catch {
@@ -229,7 +244,20 @@ async function handleCallback(req: IncomingMessage, res: ServerResponse, cfg: Au
       issuer: ready.oidcIssuer,
       clientId: ready.oidcClientId,
       nonce: flow.nonce,
+      // A step-up flow demands a FRESH authentication — reject a silently-reused SSO session.
+      ...(flow.stepUp ? { maxAuthAgeSeconds: STEPUP_MAX_AUTH_AGE_SECONDS } : {}),
     });
+
+    if (flow.stepUp) {
+      // Fresh re-auth proven → mint a step-up proof cookie (NOT a session). If no minter is wired,
+      // the step-up flow was never really available — bounce to the generic error.
+      if (!cfg.stepUp) throw new Error("step-up minter not configured");
+      const stepUpToken = await cfg.stepUp.mint(principal.sub);
+      appendSetCookie(res, serializeCookie(STEPUP_COOKIE, stepUpToken, { ...cookieOpts(cfg), maxAge: STEPUP_COOKIE_TTL_SECONDS }));
+      appendSetCookie(res, serializeCookie(FLOW_COOKIE, "", { ...cookieOpts(cfg), maxAge: 0 })); // clear
+      redirect(res, flow.next);
+      return;
+    }
 
     const sessionToken = await mintSession(principal, ready.sessionSecret, ready.sessionTtl);
     appendSetCookie(res, serializeCookie(SESSION_COOKIE, sessionToken, { ...cookieOpts(cfg), maxAge: ready.sessionTtl }));
@@ -262,7 +290,7 @@ export function makeAuthGateway(cfg: AuthGatewayConfig): AuthGateway {
     }
 
     const isAuthRoute =
-      (method === "GET" && (pathname === "/auth/login" || pathname === "/auth/callback")) ||
+      (method === "GET" && (pathname === "/auth/login" || pathname === "/auth/callback" || pathname === "/auth/stepup/start")) ||
       (method === "POST" && pathname === "/auth/logout");
     if (!isAuthRoute) return false;
 
@@ -271,7 +299,8 @@ export function makeAuthGateway(cfg: AuthGatewayConfig): AuthGateway {
       return true;
     }
 
-    if (pathname === "/auth/login") await handleLogin(req, res, cfg);
+    if (pathname === "/auth/login") await startFlow(req, res, cfg, false);
+    else if (pathname === "/auth/stepup/start") await startFlow(req, res, cfg, true);
     else if (pathname === "/auth/callback") await handleCallback(req, res, cfg);
     else await handleLogout(req, res, cfg);
     return true;

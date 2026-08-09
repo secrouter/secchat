@@ -122,6 +122,22 @@ test("agent.manage gates BOTH spawn and grant-execute", async () => {
   });
 });
 
+test("the step-up proof is also accepted via the secchat_stepup cookie (the interactive OIDC flow's carrier)", async () => {
+  await withServer(async (base, store) => {
+    const { channel, message } = await seed(base);
+    await store.addMember({ channelId: channel.id, memberRef: "officer", memberType: "user", role: "member" });
+    // Mint a proof, then present it as a COOKIE (not the header) — mirroring how the /auth/stepup/start
+    // OIDC flow delivers it. It must satisfy the same freshness gate.
+    const proof = await stepUp.mint("officer");
+    const res = await fetch(`${base}/messages/${message.id}/redact`, {
+      method: "POST",
+      headers: { ...h("officer"), cookie: `secchat_stepup=${proof}` },
+      body: JSON.stringify({ reason: "spillage" }),
+    });
+    assert.equal(res.status, 200);
+  });
+});
+
 test("POST /auth/stepup is 503 when no step-up secret is configured", async () => {
   const store = new MemoryStore();
   const server = createHttpServer({ verifyToken, store }); // no stepUp dep

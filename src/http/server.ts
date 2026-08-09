@@ -23,6 +23,7 @@ import {
 import { DlpPolicy } from "../dlp/policy.ts";
 import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
 import type { StepUp } from "../auth/stepup.ts";
+import { parseCookies } from "../auth/session.ts";
 
 interface RouteContext {
   req: IncomingMessage;
@@ -187,11 +188,13 @@ function buildRouter(
 ): Router<Handler> {
   const router = new Router<Handler>();
 
-  // How long ago (seconds) this request's caller last re-authenticated, from the `X-Sec-StepUp`
-  // token — Infinity when there's no valid, matching step-up proof.
+  // How long ago (seconds) this request's caller last re-authenticated. The step-up proof arrives
+  // either as the `X-Sec-StepUp` header (bearer/dev clients, from POST /auth/stepup) or the
+  // `secchat_stepup` httpOnly cookie (the interactive OIDC re-auth flow, auth/bff.ts). Infinity
+  // when there's no valid, matching proof.
   const stepUpAge = async (req: IncomingMessage, sub: string): Promise<number> => {
     const header = req.headers["x-sec-stepup"];
-    const token = Array.isArray(header) ? header[0] : header;
+    const token = (Array.isArray(header) ? header[0] : header) || parseCookies(req.headers.cookie)["secchat_stepup"];
     if (!token || !stepUp) return Infinity;
     const proof = await stepUp.verify(token);
     return proof && proof.sub === sub ? proof.ageSeconds : Infinity;
@@ -231,11 +234,10 @@ function buildRouter(
     sendJson(res, 200, { ...principal, marking: { levels: marking.levels, default: marking.default } });
   });
 
-  // Establish a step-up proof (a short-lived token the client presents via `X-Sec-StepUp` on a
-  // step-up-gated action) and record it in the audit chain. NOTE: this mints on a deliberate
-  // re-affirmation by the already-authenticated caller — production should gate the mint behind an
-  // interactive OIDC re-auth (prompt=login via the BFF) for a genuinely FRESH credential; the
-  // capability + freshness enforcement is identical either way.
+  // Establish a step-up proof for NON-INTERACTIVE callers (a bearer/dev/service client presents the
+  // returned token via `X-Sec-StepUp`), recorded in the audit chain. Interactive browser clients use
+  // the genuine fresh-re-auth flow instead — GET /auth/stepup/start → OIDC prompt=login → the
+  // callback verifies a fresh `auth_time` and sets the `secchat_stepup` cookie (see auth/bff.ts).
   router.add("POST", "/auth/stepup", async ({ res, principal }) => {
     if (!stepUp) {
       sendJson(res, 503, { error: "stepup_unavailable" });

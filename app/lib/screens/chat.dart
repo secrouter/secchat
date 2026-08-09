@@ -332,8 +332,15 @@ class _ChatScreenState extends State<ChatScreen> {
       final ok = await showStepUpDialog(context, action: label);
       if (ok != true || !mounted) return false;
       await widget.api.stepUp();
-      await action(); // retry — the client now presents the fresh step-up proof
-      return true;
+      try {
+        await action(); // retry — bearer mode now presents the fresh proof
+        return true;
+      } on ApiException catch (retry) {
+        // In cookie/SSO mode stepUp() navigated to an interactive re-auth (the page is unloading),
+        // so the retry can still report stepup_required — that's expected, not an error to surface.
+        if (retry.isStepUpRequired) return false;
+        rethrow;
+      }
     }
   }
 

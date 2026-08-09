@@ -8,6 +8,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+
+import 'platform/browser_redirect.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
@@ -269,6 +271,16 @@ class HttpApiClient implements ApiClient {
 
   @override
   Future<void> stepUp() async {
+    if (token == null) {
+      // Cookie/SSO mode: a genuine FRESH proof requires an interactive OIDC re-auth (prompt=login).
+      // Navigate to the server flow; it re-authenticates the user and returns to the app with the
+      // httpOnly `secchat_stepup` cookie set, which the browser then sends automatically.
+      final next = Uri.base.path.isEmpty ? '/' : Uri.base.path;
+      redirectBrowserTo('/auth/stepup/start?next=${Uri.encodeQueryComponent(next)}');
+      return;
+    }
+    // Bearer/dev mode: no interactive re-auth is possible, so mint a deliberate-re-affirmation token
+    // and hold it for the X-Sec-StepUp header.
     final data = await _post('/auth/stepup') as Map<String, dynamic>;
     _stepUpToken = data['token'] as String?;
   }
