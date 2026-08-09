@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../consent.dart';
 import '../platform/browser_redirect.dart';
 import '../theme.dart';
 import '../widgets/brand_mark.dart';
@@ -50,6 +51,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usernameController = TextEditingController();
   bool _isAdmin = false;
   bool _submitting = false;
+  bool _consented = false; // DoD notice & consent must be acknowledged to sign in
   String? _error;
 
   bool get _showSso => widget.ssoAvailable || widget.ssoError != null;
@@ -74,7 +76,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _submit() async {
     final username = _usernameController.text.trim();
-    if (username.isEmpty || _submitting) return;
+    if (username.isEmpty || _submitting || !_consented) return;
     setState(() {
       _submitting = true;
       _error = null;
@@ -132,7 +134,15 @@ class _LoginScreenState extends State<LoginScreen> {
             'Secure multi-agent chat, gated by policy.',
             style: TextStyle(color: AppColors.textMuted, fontSize: 13.5),
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 20),
+          const _ConsentPanel(),
+          const SizedBox(height: 8),
+          _LabeledCheckbox(
+            value: _consented,
+            onChanged: (value) => setState(() => _consented = value),
+            label: kConsentAcknowledge,
+          ),
+          const SizedBox(height: 22),
           if (showSso) ..._buildSsoSection(),
           const _FieldLabel('Username'),
           const SizedBox(height: 7),
@@ -144,9 +154,10 @@ class _LoginScreenState extends State<LoginScreen> {
             onSubmitted: (_) => _submit(),
           ),
           const SizedBox(height: 16),
-          _AdminCheckbox(
+          _LabeledCheckbox(
             value: _isAdmin,
             onChanged: (value) => setState(() => _isAdmin = value),
+            label: 'Sign in as admin (secchat-admins)',
           ),
           const SizedBox(height: 8),
           SizedBox(
@@ -155,7 +166,8 @@ class _LoginScreenState extends State<LoginScreen> {
             child: ValueListenableBuilder<TextEditingValue>(
               valueListenable: _usernameController,
               builder: (context, value, _) {
-                final canSubmit = !_submitting && value.text.trim().isNotEmpty;
+                final canSubmit =
+                    _consented && !_submitting && value.text.trim().isNotEmpty;
                 return ElevatedButton(
                   onPressed: canSubmit ? _submit : null,
                   style: AppButtonStyles.primary,
@@ -223,7 +235,7 @@ class _LoginScreenState extends State<LoginScreen> {
         width: double.infinity,
         height: 44,
         child: ElevatedButton.icon(
-          onPressed: _signInWithSso,
+          onPressed: _consented ? _signInWithSso : null,
           style: AppButtonStyles.primary,
           icon: const Icon(Icons.shield_outlined, size: 18),
           label: const Text('Sign in with SecSSO'),
@@ -322,11 +334,16 @@ class _FieldLabel extends StatelessWidget {
   );
 }
 
-class _AdminCheckbox extends StatelessWidget {
-  const _AdminCheckbox({required this.value, required this.onChanged});
+class _LabeledCheckbox extends StatelessWidget {
+  const _LabeledCheckbox({
+    required this.value,
+    required this.onChanged,
+    required this.label,
+  });
 
   final bool value;
   final ValueChanged<bool> onChanged;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -336,6 +353,7 @@ class _AdminCheckbox extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
               width: 20,
@@ -350,13 +368,79 @@ class _AdminCheckbox extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            const Expanded(
+            Expanded(
               child: Text(
-                'Sign in as admin (secchat-admins)',
-                style: TextStyle(color: AppColors.textMuted, fontSize: 13.5),
+                label,
+                style: const TextStyle(color: AppColors.textMuted, fontSize: 13.5),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The DoD Standard Mandatory Notice and Consent Banner (see `lib/consent.dart`),
+/// shown at logon in a scrollable box; sign-in is gated on acknowledging it.
+class _ConsentPanel extends StatelessWidget {
+  const _ConsentPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 176),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceAlt,
+        border: Border.all(color: AppColors.warnBorder),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Scrollbar(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.gavel_outlined, size: 14, color: AppColors.warn),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      kConsentTitle,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.text,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                kConsentIntro,
+                style: TextStyle(fontSize: 11.5, color: AppColors.textMuted, height: 1.45),
+              ),
+              const SizedBox(height: 8),
+              for (final point in kConsentPoints)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('•  ', style: TextStyle(color: AppColors.textFaint, fontSize: 11.5)),
+                      Expanded(
+                        child: Text(
+                          point,
+                          style: const TextStyle(fontSize: 11, color: AppColors.textMuted, height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
