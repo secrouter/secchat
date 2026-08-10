@@ -1,0 +1,38 @@
+# SecChat RUNNER DAEMON — the standalone / container form of the runner. It attaches OUT to a
+# SecChat instance over the `/runner` WebSocket and runs coding agents HERE, while SecChat keeps the
+# execute-gate (only the owner authorizes execution). See docs/runner-daemon.md.
+#
+# The daemon's import graph is DEPENDENCY-FREE (node: builtins + local .ts — same set `npm run
+# bundle:runnerd` emits), so there is NO `npm ci`: the only runtime it needs is Node (which runs .ts
+# natively) plus the `pi` coding-agent CLI it spawns per session.
+#
+#   docker build -f Dockerfile.runnerd -t secchat-runnerd .
+#   docker run --rm \
+#     -e SECCHAT_URL=https://chat.example.mil \
+#     -e SECCHAT_RUNNER_TOKEN=<oidc-or-dev-token> \
+#     secchat-runnerd
+
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+
+# The pi coding-agent CLI the daemon spawns per session. Pin + install from the registry the
+# deployment uses; in an air-gapped/private setup this may need registry auth — pre-stage the binary
+# and point PI_BIN at it instead, or build with --build-arg INSTALL_PI=0 and run in relay/stub mode
+# (SECCHAT_RUNNER_STUB=1) for a smoke test.
+ARG PI_PACKAGE=@earendil-works/pi-coding-agent
+ARG INSTALL_PI=1
+RUN if [ "$INSTALL_PI" = "1" ]; then npm install -g "$PI_PACKAGE" || echo "pi install skipped — set PI_BIN to a provided binary"; fi
+
+# The daemon's reachable sources only (agent runner bits + daemon + types). Copying src wholesale is
+# fine — it's small and dependency-free; tsconfig lets Node resolve the .ts imports as the app does.
+COPY src ./src
+COPY tsconfig.json ./
+
+# Non-root, matching the backend image.
+USER node
+
+# Dials OUT to SecChat — no inbound port to expose. Override at run time.
+ENV SECCHAT_URL=http://127.0.0.1:47010
+
+CMD ["node", "src/daemon/main.ts"]

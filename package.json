@@ -11,7 +11,8 @@
   "scripts": {
     "test": "node --test",
     "typecheck": "tsc --noEmit",
-    "daemon": "node src/daemon/main.ts"
+    "daemon": "node src/daemon/main.ts",
+    "bundle:runnerd": "node scripts/bundle-runnerd.mjs"
   },
   "dependencies": {
     "jose": "6.2.3",

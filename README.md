@@ -52,10 +52,17 @@ src/
   store/          persistence behind the Store interface (memory now, Postgres later)
   auth/           SecSSO (Authentik) JWKS token verification
   http/           bare-Node HTTP server + routes
-  ws/             stdlib WebSocket hub (realtime)
+  ws/             stdlib WebSocket hub (realtime) + runner-daemon attach hub
+  agent/          coding-agent control plane + execute-gate + runner ports (server / remote)
+  daemon/         the runner daemon: attaches to SecChat, runs pi (see docs/runner-daemon.md)
 test/             node:test suites, one per module
 db/migrations/    SQL schema (applied by the Postgres store when it lands)
 ```
+
+The **runner daemon** runs coding agents on a machine of your choosing (bundled in the desktop app,
+or standalone on a server/container) and attaches out to SecChat, while the execute-gate stays on the
+server — see [docs/runner-daemon.md](docs/runner-daemon.md). Package it with `npm run bundle:runnerd`
+(desktop bundle) or `Dockerfile.runnerd` (container).
 
 ## Deploy (Docker Compose stack)
 
