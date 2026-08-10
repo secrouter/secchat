@@ -7,6 +7,7 @@ import '../commands.dart';
 import '../formatting.dart';
 import '../clipboard_guard.dart';
 import '../marking.dart';
+import '../platform/file_transfer.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
@@ -510,6 +511,17 @@ class _ChatScreenState extends State<ChatScreen> {
   /// lower-marked destination is guarded (the composer enforces the decision; the
   /// server still enforces the channel ceiling on post).
   final _clipboardGuard = ClipboardGuard();
+
+  /// Downloads an attachment's bytes (authenticated) and saves them (browser download on web).
+  Future<void> _downloadAttachment(Attachment attachment) async {
+    try {
+      final bytes = await widget.api.downloadAttachment(attachment.id);
+      if (!mounted) return;
+      saveBytes(attachment.filename, attachment.contentType, bytes);
+    } catch (error) {
+      if (mounted) _showError(error);
+    }
+  }
 
   /// Copies a message's text and records its marking as the clipboard provenance.
   void _copyMessage(Message message) {
@@ -1021,6 +1033,7 @@ class _ChatScreenState extends State<ChatScreen> {
       onEdit: canThread ? _editMessage : null,
       onViewHistory: canThread ? _openHistory : null,
       onCopy: _copyMessage,
+      onDownloadAttachment: _downloadAttachment,
       // Older-history paging: a cursor means there's more to load above.
       hasMore: _cursors[selected.id] != null,
       loadingOlder: _loadingOlder,
@@ -1056,6 +1069,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onEdit: _editMessage,
             onViewHistory: _openHistory,
             onCopy: _copyMessage,
+            onDownloadAttachment: _downloadAttachment,
             showMarking: !channel.isMarked,
             markingPolicy: widget.principal.marking,
             revealedIds: _revealedMessageIds,

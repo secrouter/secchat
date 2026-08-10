@@ -173,6 +173,37 @@ class User {
 /// A chat message. `content == null` means the row was redacted server-side
 /// -- the UI must render that as an explicit "message redacted" notice
 /// rather than an empty bubble.
+/// A file attached to a message (metadata only — bytes are fetched lazily from
+/// `GET /attachments/:id`). Carries its own classification [marking].
+class Attachment {
+  const Attachment({
+    required this.id,
+    required this.filename,
+    required this.contentType,
+    required this.byteSize,
+    required this.marking,
+    this.messageId,
+  });
+
+  final String id;
+  final String? messageId;
+  final String filename;
+  final String contentType;
+  final int byteSize;
+  final String marking;
+
+  bool get isImage => contentType.startsWith('image/');
+
+  factory Attachment.fromJson(Map<String, dynamic> json) => Attachment(
+    id: json['id'] as String,
+    messageId: json['messageId'] as String?,
+    filename: (json['filename'] ?? 'file').toString(),
+    contentType: (json['contentType'] ?? 'application/octet-stream').toString(),
+    byteSize: (json['byteSize'] as num?)?.toInt() ?? 0,
+    marking: (json['marking'] ?? 'UNCLASSIFIED').toString(),
+  );
+}
+
 class Message {
   const Message({
     required this.id,
@@ -187,6 +218,7 @@ class Message {
     this.marking = 'UNCLASSIFIED',
     this.dlpFlags = const [],
     this.reactions = const [],
+    this.attachments = const [],
   });
 
   final String id;
@@ -219,6 +251,10 @@ class Message {
   /// Reactions on this message, attached by the message-history endpoint.
   final List<Reaction> reactions;
 
+  /// Files attached to this message (metadata only), from the history endpoint /
+  /// the live `message` event. Empty for most messages.
+  final List<Attachment> attachments;
+
   bool get isRedacted => content == null;
   bool get isEdited => editedAt != null;
 
@@ -237,6 +273,7 @@ class Message {
     marking: marking,
     dlpFlags: dlpFlags,
     reactions: reactions,
+    attachments: const [], // redacted → files are purged server-side; drop them from the tombstone
   );
 
   /// A copy with [reactions] replaced — used to apply live reaction events /
@@ -254,6 +291,7 @@ class Message {
     marking: marking,
     dlpFlags: dlpFlags,
     reactions: reactions,
+    attachments: attachments,
   );
 
   /// A copy with new [content] and an [editedAt] stamp — applies an edit (live
@@ -271,6 +309,7 @@ class Message {
     marking: marking,
     dlpFlags: dlpFlags,
     reactions: reactions,
+    attachments: attachments,
   );
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
@@ -291,6 +330,9 @@ class Message {
         .toList(),
     reactions: (json['reactions'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => Reaction.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    attachments: (json['attachments'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => Attachment.fromJson(e as Map<String, dynamic>))
         .toList(),
   );
 }

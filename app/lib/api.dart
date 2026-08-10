@@ -68,7 +68,13 @@ abstract class ApiClient {
   /// Posts a message to a channel. A non-null [parentId] makes it a reply in
   /// that message's thread. [marking] is the requested per-message
   /// classification (ignored server-side when the channel is itself marked).
-  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking});
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking, List<String>? attachmentIds});
+
+  /// Upload a file to [channelId] (unclaimed until a message references it). Returns the attachment row.
+  Future<Attachment> uploadAttachment(String channelId, {required List<int> bytes, required String filename, required String contentType, String? marking});
+
+  /// Fetch an attachment's bytes (authenticated) — for image previews and downloads.
+  Future<List<int>> downloadAttachment(String id);
 
   /// Feeds free-text input to a running coding-agent *session* (as opposed
   /// to [postMessage], which posts a chat message to a *channel*). A coding
@@ -333,14 +339,43 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
-  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking}) async =>
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking, List<String>? attachmentIds}) async =>
       Message.fromJson(
         await _post('/channels/$channelId/messages', {
           'content': content,
           if (parentId != null) 'parentId': parentId,
           if (marking != null) 'marking': marking,
+          if (attachmentIds != null && attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
         }) as Map<String, dynamic>,
       );
+
+  @override
+  Future<Attachment> uploadAttachment(String channelId, {required List<int> bytes, required String filename, required String contentType, String? marking}) async {
+    final uri = origin.replace(path: '/channels/$channelId/attachments', queryParameters: {
+      'filename': filename,
+      'contentType': contentType,
+      if (marking != null) 'marking': marking,
+    });
+    final token = this.token;
+    final res = await _http.post(uri, headers: {
+      if (token != null) 'Authorization': 'Bearer $token',
+      if (_stepUpToken != null) 'X-Sec-StepUp': _stepUpToken!,
+      'Content-Type': contentType,
+    }, body: bytes);
+    return Attachment.fromJson(_decode(res) as Map<String, dynamic>);
+  }
+
+  @override
+  Future<List<int>> downloadAttachment(String id) async {
+    final token = this.token;
+    final res = await _http.get(_uri('/attachments/$id'), headers: {
+      if (token != null) 'Authorization': 'Bearer $token',
+    });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw ApiException(res.statusCode, _extractErrorMessage(res));
+    }
+    return res.bodyBytes;
+  }
 
   @override
   Future<void> sendInput(String sessionId, String text) async {

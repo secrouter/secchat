@@ -38,6 +38,7 @@ class MessageList extends StatefulWidget {
     this.onEdit,
     this.onViewHistory,
     this.onCopy,
+    this.onDownloadAttachment,
     this.onLoadOlder,
     this.hasMore = false,
     this.loadingOlder = false,
@@ -81,6 +82,7 @@ class MessageList extends StatefulWidget {
   /// Copy a message's text (null disables it). Records the copy's classification
   /// provenance so a later paste into a lower-marked destination is guarded.
   final void Function(Message message)? onCopy;
+  final void Function(Attachment attachment)? onDownloadAttachment;
 
   /// Load the next older page (scroll-back). Null disables paging (e.g. threads).
   final Future<void> Function()? onLoadOlder;
@@ -214,6 +216,7 @@ class _MessageListState extends State<MessageList> {
               onEdit: widget.onEdit,
               onViewHistory: widget.onViewHistory,
               onCopy: widget.onCopy,
+              onDownloadAttachment: widget.onDownloadAttachment,
               showMarking: widget.showMarking,
               markingPolicy: widget.markingPolicy,
               revealedIds: widget.revealedIds,
@@ -269,6 +272,7 @@ class _TranscriptTile extends StatelessWidget {
     this.onEdit,
     this.onViewHistory,
     this.onCopy,
+    this.onDownloadAttachment,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -285,6 +289,7 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
   final void Function(Message message)? onCopy;
+  final void Function(Attachment attachment)? onDownloadAttachment;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -307,6 +312,7 @@ class _TranscriptTile extends StatelessWidget {
         onEdit: onEdit,
         onViewHistory: onViewHistory,
         onCopy: onCopy,
+        onDownloadAttachment: onDownloadAttachment,
         showMarking: showMarking,
         markingPolicy: markingPolicy,
         revealedIds: revealedIds,
@@ -334,6 +340,7 @@ class _MessageBubble extends StatelessWidget {
     this.onEdit,
     this.onViewHistory,
     this.onCopy,
+    this.onDownloadAttachment,
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -351,6 +358,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onEdit;
   final void Function(Message message)? onViewHistory;
   final void Function(Message message)? onCopy;
+  final void Function(Attachment attachment)? onDownloadAttachment;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -463,6 +471,10 @@ class _MessageBubble extends StatelessWidget {
             padding: const EdgeInsets.only(top: 5),
             child: _DlpWarning(rules: message.dlpFlags),
           ),
+        // Attached files — marking-aware cards with a download affordance.
+        if (!message.isRedacted && message.attachments.isNotEmpty)
+          for (final a in message.attachments)
+            _AttachmentCard(attachment: a, onDownload: onDownloadAttachment),
         if (!message.isRedacted && onToggleReaction != null)
           Padding(
             padding: const EdgeInsets.only(top: 5),
@@ -991,6 +1003,85 @@ class _MessageMenu extends StatelessWidget {
 
 /// A compact DLP warning banner on a flagged message: names the rule(s) it
 /// tripped so a reviewer knows what to look for (and can redact it).
+/// A file attached to a message: icon + filename + size + a marking chip (above baseline) + a
+/// download affordance. Bytes are fetched lazily via [onDownload] (authenticated).
+class _AttachmentCard extends StatelessWidget {
+  const _AttachmentCard({required this.attachment, this.onDownload});
+
+  final Attachment attachment;
+  final void Function(Attachment attachment)? onDownload;
+
+  String get _size {
+    final b = attachment.byteSize;
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = markingStyle(attachment.marking);
+    final elevated = markingLevelOf(attachment.marking) != 'UNCLASSIFIED';
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      constraints: const BoxConstraints(maxWidth: 340),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceRaised,
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            attachment.isImage ? Icons.image_outlined : Icons.insert_drive_file_outlined,
+            size: 20,
+            color: AppColors.textMuted,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  attachment.filename,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.text, fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Text(_size, style: const TextStyle(color: AppColors.textFaint, fontSize: 11)),
+                    if (elevated) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(color: style.bg, borderRadius: BorderRadius.circular(3)),
+                        child: Text(
+                          attachment.marking.toUpperCase(),
+                          style: AppFonts.mono(fontSize: 9, color: style.fg).copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (onDownload != null)
+            IconButton(
+              icon: const Icon(Icons.download_outlined, size: 18),
+              tooltip: 'Download',
+              color: AppColors.textMuted,
+              onPressed: () => onDownload!(attachment),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DlpWarning extends StatelessWidget {
   const _DlpWarning({required this.rules});
 

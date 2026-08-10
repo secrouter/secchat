@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:secchat_app/api.dart';
 import 'package:secchat_app/models.dart';
@@ -121,11 +122,16 @@ class FakeApiClient implements ApiClient {
     return MessagePage(messages: page, nextCursor: hasOlder ? page.first.seq : null);
   }
 
+  /// Attachment ids passed to the most recent postMessage (for A1b assertions).
+  List<String>? lastPostAttachmentIds;
+
   @override
-  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking}) async {
+  Future<Message> postMessage(String channelId, String content, {String? parentId, String? marking, List<String>? attachmentIds}) async {
     _maybeThrow('postMessage');
     postMessageCalls.add((channelId: channelId, content: content, parentId: parentId, marking: marking));
+    lastPostAttachmentIds = attachmentIds;
     final existing = _messagesByChannel[channelId] ?? const [];
+    final files = (attachmentIds ?? const <String>[]).map((id) => _attachments[id]).whereType<Attachment>().toList();
     final message =
         postMessageResponder?.call(channelId, content) ??
         Message(
@@ -137,9 +143,34 @@ class FakeApiClient implements ApiClient {
           createdAt: DateTime(2026, 1, 1),
           parentId: parentId,
           marking: marking ?? 'UNCLASSIFIED',
+          attachments: files,
         );
     _messagesByChannel[channelId] = [...existing, message];
     return message;
+  }
+
+  final Map<String, Attachment> _attachments = {};
+  final List<({String channelId, String filename, String? marking})> uploadCalls = [];
+
+  @override
+  Future<Attachment> uploadAttachment(String channelId, {required List<int> bytes, required String filename, required String contentType, String? marking}) async {
+    _maybeThrow('uploadAttachment');
+    uploadCalls.add((channelId: channelId, filename: filename, marking: marking));
+    final att = Attachment(
+      id: 'att-${_attachments.length + 1}',
+      filename: filename,
+      contentType: contentType,
+      byteSize: bytes.length,
+      marking: marking ?? 'UNCLASSIFIED',
+    );
+    _attachments[att.id] = att;
+    return att;
+  }
+
+  @override
+  Future<List<int>> downloadAttachment(String id) async {
+    _maybeThrow('downloadAttachment');
+    return utf8.encode('bytes-for-$id');
   }
 
   @override
