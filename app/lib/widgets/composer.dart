@@ -194,6 +194,22 @@ class _MessageComposerState extends State<MessageComposer> {
       return KeyEventResult.handled;
     }
 
+    // Tab accepts the top autocomplete suggestion: a `@`-mention (username) if the caret is in one,
+    // else a `/`-command. With no suggestion showing, Tab falls through to normal focus traversal.
+    if (key == LogicalKeyboardKey.tab && !keys.isShiftPressed) {
+      final mentions = _mentionMatches;
+      if (mentions.isNotEmpty) {
+        _applyMention(mentions.first);
+        return KeyEventResult.handled;
+      }
+      final commands = suggestCommands(_controller.text);
+      if (commands.isNotEmpty) {
+        _applySuggestion(commands.first);
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
     final isEnter = key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;

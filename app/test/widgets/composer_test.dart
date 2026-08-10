@@ -345,6 +345,40 @@ void main() {
     expect(sent, 'hey @aliceng');
   });
 
+  testWidgets('Tab completes the top /command suggestion', (tester) async {
+    await _pumpComposer(tester);
+    await tester.enterText(find.byType(TextField), '/inv');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(_fieldText(tester), '/invite ');
+  });
+
+  testWidgets('Tab completes the top @-mention (username)', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking, _) async {},
+            mentionUsers: const [
+              User(sub: 'alice', email: 'alice@x.mil', displayName: 'Alice Ng'),
+              User(sub: 'bob', email: 'bob@x.mil', displayName: 'Bob Reyes'),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), 'hey @al');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(_fieldText(tester), 'hey @aliceng ');
+  });
+
   testWidgets('Ctrl+V of higher-marked in-app content into a marked channel is blocked', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;

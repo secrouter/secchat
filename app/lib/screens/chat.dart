@@ -1064,19 +1064,17 @@ class _ChatScreenState extends State<ChatScreen> {
       _showError("/invite doesn't work in a direct message — its two participants are fixed.");
       return;
     }
-    final q = query.toLowerCase();
-    final matches = _usersBySub.values
-        .where((u) =>
-            u.sub == query ||
-            (u.email != null && u.email!.toLowerCase() == q) ||
-            (u.displayName != null && u.displayName!.toLowerCase() == q))
-        .toList();
+    final candidates = _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList();
+    // Tiered match so a first name or partial works, but an exact hit always wins over a looser one:
+    // exact (sub/email/display name) → prefix on name/email → substring. Case-insensitive throughout.
+    final matches = _matchUsers(candidates, query);
     if (matches.isEmpty) {
       _showError('No user matching "$query" — they may need to sign in once first.');
       return;
     }
     if (matches.length > 1) {
-      _showError('"$query" matches ${matches.length} users — try their email to disambiguate.');
+      final names = matches.take(5).map((u) => u.label).join(', ');
+      _showError('"$query" matches ${matches.length}: $names — be more specific or use their email.');
       return;
     }
     final user = matches.first;
@@ -1090,6 +1088,29 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (error) {
       _showError(error);
     }
+  }
+
+  /// Finds directory [users] matching [query] case-insensitively, preferring the
+  /// tightest tier that yields a hit: exact (sub / email / display name), then a
+  /// prefix of the display name or email, then a substring. Empty when nothing
+  /// matches at any tier. Shared by `/invite` and username tab-completion so they
+  /// resolve names the same forgiving way (a first name or partial is enough).
+  List<User> _matchUsers(List<User> users, String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    String? name(User u) => u.displayName?.toLowerCase();
+    String? email(User u) => u.email?.toLowerCase();
+    final exact = users
+        .where((u) => u.sub.toLowerCase() == q || name(u) == q || email(u) == q)
+        .toList();
+    if (exact.isNotEmpty) return exact;
+    final prefix = users
+        .where((u) => (name(u)?.startsWith(q) ?? false) || (email(u)?.startsWith(q) ?? false))
+        .toList();
+    if (prefix.isNotEmpty) return prefix;
+    return users
+        .where((u) => (name(u)?.contains(q) ?? false) || (email(u)?.contains(q) ?? false))
+        .toList();
   }
 
   void _showCommandHelp() {

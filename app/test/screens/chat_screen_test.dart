@@ -524,6 +524,34 @@ void main() {
     },
   );
 
+  testWidgets('/invite matches a directory user by first name (fuzzy) and adds them', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]], // human channel 'c1', auto-selected
+      users: const [
+        User(sub: 'dev.alice', displayName: 'Alice Ng', groups: []),
+        User(sub: 'austin-sub', displayName: 'Austin Probe', email: 'austin@x.mil', groups: []),
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    final composer = find.descendant(
+      of: find.byType(MessageComposer),
+      matching: find.byType(TextField),
+    );
+    // A first name is enough now (was exact-match only, which silently found nothing).
+    await tester.enterText(composer, '/invite Austin');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+
+    final added = fake.memberCalls.where((c) => c.op == 'add').map((c) => c.ref);
+    expect(added, contains('austin-sub'));
+  });
+
   testWidgets('a reaction chip renders and tapping it toggles the reaction via the API', (tester) async {
     final fake = FakeApiClient(
       me: _principal, // dev.alice
