@@ -796,6 +796,38 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
 });
 
+test("POST /sessions/:id/input broadcasts the prompt as a message WITH plaintext content (not a redaction tombstone)", async () => {
+  // Regression: the stored row carries only the content HASH, so broadcasting it raw arrives with
+  // content == null and the client renders it as "message redacted". The route must re-attach the
+  // plaintext, exactly like the POST message route does.
+  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+  const server = createHttpServer({
+    verifyToken,
+    store,
+    control,
+    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const res = await fetch(`http://127.0.0.1:${port}/sessions/sess-1/input`, {
+      method: "POST",
+      headers: { authorization: "Bearer good", "content-type": "application/json" },
+      body: JSON.stringify({ text: "run the build" }),
+    });
+    assert.equal(res.status, 202);
+    const messageBroadcasts = broadcasts.filter(
+      (b) => (b.payload as { type?: string }).type === "message",
+    );
+    assert.equal(messageBroadcasts.length, 1, "exactly one message broadcast for the prompt");
+    const message = (messageBroadcasts[0]!.payload as { message: { content?: string } }).message;
+    assert.equal(message.content, "run the build", "broadcast must carry the plaintext, not a null-content tombstone");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {
   // "good2" (user-2) is authenticated but not a member of the session's channel.
   const res = await fetch(`${controlBaseUrl}/sessions/sess-1/input`, {

@@ -47,7 +47,10 @@ export function makeControlPlane(deps: {
         // to the ephemeral agent_output stream when no persister is wired (tests / bare deployments).
         if (deps.appendAgentMessage) {
           const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
-          deps.broadcast?.(session.channelId, { type: "message", message });
+          // The stored row carries only the content HASH (never the plaintext — see the POST message
+          // route). Re-attach the plaintext before broadcasting, or the client sees content == null
+          // and renders the message as a redaction tombstone.
+          deps.broadcast?.(session.channelId, { type: "message", message: { ...message, content: event.text } });
         } else {
           deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
         }

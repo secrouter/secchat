@@ -1320,7 +1320,9 @@ function buildRouter(
     // a session restart / reload and shows for everyone in the channel, not just the sender.
     if (text.trim() !== "") {
       const message = await store.appendMessage({ channelId: session.channelId, authorRef: principal.sub, authorType: "user", content: text });
-      broadcast?.(session.channelId, { type: "message", message });
+      // Re-attach the plaintext — the stored row carries only the content HASH (see the POST message
+      // route), so broadcasting it raw would arrive as content == null and render as a redaction.
+      broadcast?.(session.channelId, { type: "message", message: { ...message, content: text } });
     }
     await control.sendInput(params.id!, text);
     sendJson(res, 202, { status: "accepted" });
