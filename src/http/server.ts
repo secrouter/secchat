@@ -220,6 +220,39 @@ async function triggerAssistants(
   }
 }
 
+/** The coding-agent counterpart to triggerAssistants: forward a human message posted in a coding
+ * channel to that agent's pi session, prefixed with a header naming who posted it. A coding channel
+ * can have several members, so pi needs to know whose turn each message is. Ensures a live session
+ * first — reusing the running one, or spawning a fresh one if the prior died (e.g. a restart) — so a
+ * message never silently fails to reach pi. pi's REPLY comes back through the control plane and is
+ * persisted as a normal channel message (see control.ts), so the whole exchange lives in chat
+ * history exactly like the assistant path. Fire-and-forget from the route (the POST already
+ * returned); errors are swallowed here — the control plane surfaces session failures on its own. */
+async function triggerCodingAgents(
+  store: Store,
+  control: AgentControl,
+  hasRemoteRunner: ((ownerSub: string) => boolean) | undefined,
+  channelId: string,
+  authorSub: string,
+  content: string,
+): Promise<void> {
+  if (content.trim() === "") return;
+  const agentMember = (await store.listMembers(channelId)).find((m) => m.memberType === "agent");
+  if (!agentMember) return;
+  const agent = await store.getAgent(agentMember.memberRef);
+  if (agent?.kind !== "coding") return;
+  // Reuse the live session, or (re)spawn one so a post always reaches pi — even the first message
+  // after a reload/restart, when no session is running yet.
+  let session = await control.liveSession(channelId);
+  if (!session) {
+    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    session = await control.spawn({ agent, channelId, hostType });
+  }
+  const user = await store.getUser(authorSub);
+  const who = user?.displayName?.trim() || authorSub;
+  await control.sendInput(session.id, `[message from ${who}]\n${content}`);
+}
+
 function buildRouter(
   store: Store,
   marking: MarkingPolicy,
@@ -688,6 +721,10 @@ function buildRouter(
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
     if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel);
+    // Same shape for a coding agent: forward the message to its pi session with a "who posted it"
+    // header; pi's reply comes back as a persisted message. Fire-and-forget — errors are the control
+    // plane's to surface.
+    if (control) void triggerCodingAgents(store, control, hasRemoteRunner, channelId, principal.sub, content).catch(() => {});
   });
 
   // ── Attachments: upload (unclaimed) then reference from a message post (attach-on-post). Bytes are
@@ -1315,15 +1352,10 @@ function buildRouter(
     }
     const body = (await readJsonBody(req)) as { text?: string };
     const text = body.text ?? "";
-    // Persist the driver's prompt as a real message + broadcast it, so the coding-agent
-    // conversation (their prompts AND pi's replies — see control.ts's output persistence) survives
-    // a session restart / reload and shows for everyone in the channel, not just the sender.
-    if (text.trim() !== "") {
-      const message = await store.appendMessage({ channelId: session.channelId, authorRef: principal.sub, authorType: "user", content: text });
-      // Re-attach the plaintext — the stored row carries only the content HASH (see the POST message
-      // route), so broadcasting it raw would arrive as content == null and render as a redaction.
-      broadcast?.(session.channelId, { type: "message", message: { ...message, content: text } });
-    }
+    // Low-level passthrough: feed text straight to the runner session, WITHOUT persisting or adding
+    // an attribution header. The canonical, persisted path for a coding channel is POST
+    // /channels/:id/messages (triggerCodingAgents forwards it to pi with a "who posted it" header) —
+    // this route stays as a thin primitive for programmatic/test drivers.
     await control.sendInput(params.id!, text);
     sendJson(res, 202, { status: "accepted" });
   });

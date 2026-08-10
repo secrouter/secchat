@@ -317,8 +317,8 @@ void main() {
   );
 
   testWidgets(
-    'entering text and tapping Send in a coding-agent channel with a known '
-    'session calls sendInput, not postMessage',
+    'entering text and tapping Send in a coding-agent channel posts a normal '
+    'message (the backend forwards it to pi)',
     (tester) async {
       // CodingStrip's header row (session label + short id + the
       // grant-execute button) needs more width than the default 800x600
@@ -368,32 +368,20 @@ void main() {
       await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
       await pumpSettled(tester);
 
-      expect(fake.sendInputCalls, hasLength(1));
-      expect(fake.sendInputCalls.single.sessionId, 'session-1');
-      expect(fake.sendInputCalls.single.text, 'run the tests');
-      expect(fake.postMessageCalls, isEmpty);
+      // A coding channel now goes through the SAME message path as any channel:
+      // the client posts a normal message (the backend forwards it to pi and
+      // persists pi's reply). No client-side session drive any more.
+      expect(fake.postMessageCalls, hasLength(1));
+      expect(fake.postMessageCalls.single.content, 'run the tests');
+      expect(fake.sendInputCalls, isEmpty);
 
-      // The prompt is no longer echoed locally; the backend persists it and
-      // broadcasts it back as a real `message` (so it survives a reload and
-      // renders like any message). Simulate that echo and assert it appears.
-      fake.emitWs(WsMessageEvent(
-        Message(
-          id: 'srv-1',
-          seq: 1,
-          authorRef: _principal.sub,
-          authorType: AuthorType.user,
-          content: 'run the tests',
-          createdAt: DateTime(2026, 1, 1),
-        ),
-        channelId: 'agent-ch-1',
-      ));
-      await pumpSettled(tester);
+      // The posted message is appended from the POST response, so it shows.
       expect(find.text('run the tests'), findsOneWidget);
     },
   );
 
   testWidgets(
-    '/pi in a coding-agent channel passes its text straight through to sendInput',
+    '/pi in a coding-agent channel posts its text as a normal message (forwarded to pi)',
     (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
@@ -421,16 +409,16 @@ void main() {
       );
       // A leading slash inside the pi passthrough is preserved -- this is how
       // you send pi its own slash command (e.g. /model) past the client's
-      // command parser.
+      // command parser. It now posts as a normal message (the backend forwards
+      // it to pi), rather than driving the session directly.
       await tester.enterText(composerField, '/pi /model list');
       await tester.pump();
       await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
       await pumpSettled(tester);
 
-      expect(fake.sendInputCalls, hasLength(1));
-      expect(fake.sendInputCalls.single.sessionId, 'session-1');
-      expect(fake.sendInputCalls.single.text, '/model list');
-      expect(fake.postMessageCalls, isEmpty);
+      expect(fake.postMessageCalls, hasLength(1));
+      expect(fake.postMessageCalls.single.content, '/model list');
+      expect(fake.sendInputCalls, isEmpty);
     },
   );
 

@@ -307,10 +307,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (c.agentKind != null) {
           _agentKindByChannel[c.id] = c.agentKind!;
         }
-        // Recover a coding channel's live session id so a reloaded client routes
-        // input back to the running agent (see `_codingSessionIdFor`) instead of
-        // posting a plain message that never reaches pi. Absent ⇒ no live session;
-        // `_ensureCodingSession` (on select) starts one on demand.
+        // Recover a coding channel's live session id so the coding strip (grant
+        // execute) shows for a reloaded client. Message delivery to pi is handled
+        // server-side now; this is just for the session-scoped UI. Absent ⇒ no live
+        // session; `_ensureCodingSession` (on select) starts one on demand.
         if (c.sessionId != null) {
           _sessionIdByChannel[c.id] = c.sessionId!;
         }
@@ -943,16 +943,11 @@ class _ChatScreenState extends State<ChatScreen> {
     _transcripts[channelId] = [...existing, MessageEntry(message)];
   }
 
-  /// The session to drive with `sendInput` for [channelId], or `null` if
-  /// this channel should go through `postMessage` instead -- i.e. it isn't
-  /// a coding-agent channel, or it is one but its session id isn't known
-  /// locally (see the `_agentKindByChannel` doc above: that happens for a
-  /// coding-agent channel from before this session, which degrades to
-  /// looking like a plain agent channel).
-  String? _codingSessionIdFor(String channelId) =>
-      _agentKindByChannel[channelId] == AgentKind.coding
-          ? _sessionIdByChannel[channelId]
-          : null;
+  /// Whether [channelId] is a coding-agent channel. Coding channels disable
+  /// attachments and threads (a linear pi conversation), and `/pi` only works
+  /// in one.
+  bool _isCodingChannel(String channelId) =>
+      _agentKindByChannel[channelId] == AgentKind.coding;
 
   Future<void> _handleSend(String text, String marking, List<String> attachmentIds) async {
     final channel = _selected;
@@ -964,17 +959,9 @@ class _ChatScreenState extends State<ChatScreen> {
       await _runCommand(channel, command, marking);
       return;
     }
-    // In a coding-agent channel with a live session, EVERY message drives pi (not just /pi). The
-    // backend persists + broadcasts both the prompt and pi's reply, so no local echo is needed.
-    final sessionId = _codingSessionIdFor(channel.id);
-    if (sessionId != null) {
-      try {
-        await widget.api.sendInput(sessionId, text);
-      } catch (error) {
-        _showError(error);
-      }
-      return;
-    }
+    // Every channel — coding-agent channels included — posts through the same message path. The
+    // backend forwards a coding channel's messages to pi (with a "who posted it" header) and
+    // persists pi's reply, so there's no separate client-side session-drive path any more.
     await _sendPlain(channel, text, marking, attachmentIds);
   }
 
@@ -997,18 +984,12 @@ class _ChatScreenState extends State<ChatScreen> {
     return uploaded;
   }
 
-  /// Sends ordinary (non-command) text: to the coding-agent session when this
-  /// channel has one, otherwise as a chat message at classification [marking].
+  /// Sends ordinary (non-command) text as a chat message at classification
+  /// [marking]. A coding-agent channel is no different here: the message is
+  /// posted like any other, and the BACKEND forwards it to the agent's pi
+  /// session (with a "who posted it" header) and persists pi's reply — so the
+  /// whole exchange flows through the same message infrastructure.
   Future<void> _sendPlain(Channel channel, String text, String marking, List<String> attachmentIds) async {
-    final sessionId = _codingSessionIdFor(channel.id);
-    if (sessionId != null) {
-      // A coding agent is driven by its runner, not chat history: input goes to
-      // the session. The backend persists + broadcasts BOTH the prompt (as a real
-      // `message`) and pi's reply, so the line comes back over the channel socket
-      // -- no local echo (which would double it).
-      await widget.api.sendInput(sessionId, text);
-      return;
-    }
     // Append straight from the POST response rather than waiting for a WS
     // echo (some backends don't echo the sender's own message back to
     // them); `_appendMessageUnlessDuplicate` dedupes by id in case the
@@ -1060,15 +1041,13 @@ class _ChatScreenState extends State<ChatScreen> {
           );
           return;
         }
-        final sessionId = _codingSessionIdFor(channel.id);
-        if (sessionId == null) {
-          _showError(
-            '/pi works only in a coding-agent channel with an active session.',
-          );
+        if (_agentKindByChannel[channel.id] != AgentKind.coding) {
+          _showError('/pi works only in a coding-agent channel.');
           return;
         }
-        // The backend persists + broadcasts the prompt as a message, so no local echo.
-        await widget.api.sendInput(sessionId, input);
+        // Every message in a coding channel already goes to pi; `/pi` is now just an explicit way
+        // to post one. It flows through the normal message path (backend forwards it to pi).
+        await _sendPlain(channel, input, marking, const []);
     }
   }
 
@@ -1385,8 +1364,8 @@ class _ChatScreenState extends State<ChatScreen> {
             // Keyed per channel so switching re-creates the composer, seeding its own channel's draft.
             key: ValueKey('composer-${selected.id}'),
             onSend: _handleSend,
-            // Attach files on chat channels; coding-agent channels are runner-driven (no attach).
-            onAttach: _codingSessionIdFor(selected.id) == null ? () => _attachFiles(selected) : null,
+            // Attach files on chat channels; coding-agent channels are a linear pi conversation (no attach).
+            onAttach: _isCodingChannel(selected.id) ? null : () => _attachFiles(selected),
             onTyping: () => _emitTyping(selected.id),
             initialText: _draftsByChannel[selected.id] ?? '',
             onDraftChanged: (text) => _draftsByChannel[selected.id] = text,
@@ -1428,9 +1407,9 @@ class _ChatScreenState extends State<ChatScreen> {
         topLevel.add(entry);
       }
     }
-    // Threads are a chat-channel affordance; coding-agent channels are
-    // runner-driven, so no threading there.
-    final canThread = _codingSessionIdFor(selected.id) == null;
+    // Threads are a chat-channel affordance; a coding-agent channel is a linear
+    // pi conversation, so no threading there.
+    final canThread = !_isCodingChannel(selected.id);
     return MessageList(
       entries: topLevel,
       typing: _typing,

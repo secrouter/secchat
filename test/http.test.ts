@@ -125,6 +125,10 @@ const store = {
   async upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }) {
     return { ...input, lastSeenAt: new Date().toISOString() };
   },
+  // Used by triggerCodingAgents to resolve a poster's display name for the "who posted it" header.
+  async getUser(sub: string) {
+    return sub === "user-1" ? { sub, displayName: "Alice One", groups: [] } : null;
+  },
   async isMember(channelId: string, ref: string) {
     return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
   },
@@ -796,36 +800,28 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
 });
 
-test("POST /sessions/:id/input broadcasts the prompt as a message WITH plaintext content (not a redaction tombstone)", async () => {
-  // Regression: the stored row carries only the content HASH, so broadcasting it raw arrives with
-  // content == null and the client renders it as "message redacted". The route must re-attach the
-  // plaintext, exactly like the POST message route does.
-  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
-  const server = createHttpServer({
-    verifyToken,
-    store,
-    control,
-    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+test("posting a message in a coding channel forwards it to pi with a 'who posted it' header", async () => {
+  // The canonical path: a normal message post to a coding-agent channel is persisted like any
+  // message AND forwarded to the agent's pi session, prefixed with a header naming the poster.
+  // Make fakeSession's channel a coding-agent channel so triggerCodingAgents fires; the fake
+  // liveSession returns fakeSession for it, so the reuse (not spawn) path runs.
+  const coder = await store.createAgent({ ownerSub: "user-1", kind: "coding", name: "Builder" });
+  await store.addMember({ channelId: fakeSession.channelId, memberRef: coder.id, memberType: "agent", role: "member" });
+  const before = controlCalls.sendInput.length;
+  const res = await fetch(`${controlBaseUrl}/channels/${fakeSession.channelId}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "run the build" }),
   });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  try {
-    const address = server.address();
-    const port = typeof address === "object" && address !== null ? address.port : 0;
-    const res = await fetch(`http://127.0.0.1:${port}/sessions/sess-1/input`, {
-      method: "POST",
-      headers: { authorization: "Bearer good", "content-type": "application/json" },
-      body: JSON.stringify({ text: "run the build" }),
-    });
-    assert.equal(res.status, 202);
-    const messageBroadcasts = broadcasts.filter(
-      (b) => (b.payload as { type?: string }).type === "message",
-    );
-    assert.equal(messageBroadcasts.length, 1, "exactly one message broadcast for the prompt");
-    const message = (messageBroadcasts[0]!.payload as { message: { content?: string } }).message;
-    assert.equal(message.content, "run the build", "broadcast must carry the plaintext, not a null-content tombstone");
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+  assert.equal(res.status, 201);
+  // triggerCodingAgents is fire-and-forget after the 201 — let the microtasks/timer drain.
+  await new Promise((r) => setTimeout(r, 30));
+  const forwarded = controlCalls.sendInput
+    .slice(before)
+    .map((c) => c as { sessionId: string; text: string });
+  assert.equal(forwarded.length, 1, "exactly one forward to pi");
+  assert.equal(forwarded[0]!.sessionId, fakeSession.id);
+  assert.equal(forwarded[0]!.text, "[message from Alice One]\nrun the build");
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {
