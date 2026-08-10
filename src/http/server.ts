@@ -421,6 +421,9 @@ function buildRouter(
     await store.addMember({ channelId: channel.id, memberRef: other, memberType: "user", role: "member" });
     subscribe?.(principal.sub, channel.id);
     subscribe?.(other, channel.id);
+    // Tell the peer they're in a new DM so it appears in their sidebar live (same membership signal
+    // the invite path sends) — the creator adds it locally from this response.
+    notify?.(other, { type: "membership", channelId: channel.id, op: "add", memberRef: other, role: "member" });
     await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: other });
     sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });

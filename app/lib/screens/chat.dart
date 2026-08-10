@@ -98,6 +98,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // Whether the sidebar reveals archived channels (off by default — archiving is
   // the declutter path for heavy testing).
   bool _showArchived = false;
+  bool _sortByUnread = false;
   final Set<String> _endedSessionIds = {};
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
@@ -295,6 +296,29 @@ class _ChatScreenState extends State<ChatScreen> {
     _daemon.dispose();
     _wsSub?.cancel();
     super.dispose();
+  }
+
+  /// Pulls any channels not already in the sidebar (e.g. one you were just invited to) and appends
+  /// them, without disturbing the existing list or the current selection. Best-effort — driven by a
+  /// live `membership` add for the current user (see `_handleEvent`).
+  Future<void> _syncChannels() async {
+    try {
+      final fresh = await widget.api.getChannels();
+      if (!mounted) return;
+      final have = _channels.map((c) => c.id).toSet();
+      final added = fresh.where((c) => !have.contains(c.id)).toList();
+      if (added.isEmpty) return;
+      setState(() {
+        for (final c in added) {
+          if (c.agentKind != null) _agentKindByChannel[c.id] = c.agentKind!;
+          if (c.sessionId != null) _sessionIdByChannel[c.id] = c.sessionId!;
+        }
+        _channels = [..._channels, ...added];
+      });
+      unawaited(_loadUnread());
+    } catch (_) {
+      // Non-critical: the channel still appears on the next manual reload.
+    }
   }
 
   Future<void> _loadChannels() async {
@@ -623,6 +647,9 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             // A BACKGROUND channel got a new message → bump its unread badge live.
             _unreadByChannel[channelId] = (_unreadByChannel[channelId] ?? 0) + 1;
+            // Safety net: a message for a channel not in the sidebar means we were added to it
+            // without seeing the membership event — pull it in so it doesn't stay invisible.
+            if (!_channels.any((c) => c.id == channelId)) unawaited(_syncChannels());
           }
         // Content/social updates apply to any channel's cached transcript (no-op if unloaded), so a
         // background channel stays consistent when re-opened; they don't change unread.
@@ -679,6 +706,18 @@ class _ChatScreenState extends State<ChatScreen> {
           if (isOpen) {
             _typing = null;
             _append(channelId, ErrorEntry(error));
+          }
+        case WsMembershipEvent(:final op, :final memberRef):
+          // A channel I was just added to appears in the sidebar without a reload; one I was removed
+          // from disappears. (A role change needs no sidebar change.) Only my OWN membership matters
+          // here — other people joining/leaving a channel I already see changes nothing in the rail.
+          if (memberRef == widget.principal.sub) {
+            if (op == 'add' && !_channels.any((c) => c.id == channelId)) {
+              unawaited(_syncChannels());
+            } else if (op == 'remove') {
+              _channels = _channels.where((c) => c.id != channelId).toList();
+              if (_selected?.id == channelId) _selected = null;
+            }
           }
       }
     });
@@ -1359,6 +1398,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   showArchived: _showArchived,
                   onToggleShowArchived: () =>
                       setState(() => _showArchived = !_showArchived),
+                  sortByUnread: _sortByUnread,
+                  onToggleSort: () => setState(() => _sortByUnread = !_sortByUnread),
                 ),
                 Expanded(child: _buildMain()),
               ],

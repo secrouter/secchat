@@ -882,6 +882,22 @@ final class WsChannelMarkingEvent extends WsEvent {
   final String by;
 }
 
+/// A membership change on a channel — someone was added/removed or had their
+/// role changed. Delivered both to the channel and (for the affected user) to
+/// their per-user socket, so a client can pull a newly-joined channel into the
+/// sidebar live, or drop one it was removed from.
+final class WsMembershipEvent extends WsEvent {
+  const WsMembershipEvent({
+    required this.op,
+    required this.memberRef,
+    required this.role,
+    required super.channelId,
+  });
+  final String op; // 'add' | 'remove' | 'role'
+  final String memberRef;
+  final String role;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients. Every frame carries a top-level
@@ -966,6 +982,13 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsPinEvent(
         op: json['op'] as String? ?? 'pin',
         messageId: json['messageId'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'membership':
+      return WsMembershipEvent(
+        op: json['op'] as String? ?? 'add',
+        memberRef: json['memberRef'] as String? ?? '',
+        role: json['role'] as String? ?? 'member',
         channelId: channelId,
       );
     default:

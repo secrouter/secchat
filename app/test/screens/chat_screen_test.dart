@@ -8,6 +8,7 @@ import 'package:secchat_app/platform/daemon_supervisor.dart';
 import 'package:secchat_app/screens/chat.dart';
 import 'package:secchat_app/widgets/composer.dart';
 import 'package:secchat_app/widgets/marking_banner.dart';
+import 'package:secchat_app/widgets/sidebar.dart';
 
 import '../fakes/fake_api_client.dart';
 
@@ -637,6 +638,53 @@ void main() {
 
     final added = fake.memberCalls.where((c) => c.op == 'add').map((c) => c.ref);
     expect(added, contains('austin-sub'));
+  });
+
+  testWidgets('a membership add for me pulls the new channel into the sidebar live', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: [_channels[0]]); // c1 'general'
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+    expect(find.text('incident-room'), findsNothing);
+
+    // A new channel now exists server-side and I've been added to it → live membership event.
+    fake.channels = [...fake.channels, const Channel(id: 'c9', kind: ChannelKind.human, name: 'incident-room')];
+    fake.emitWs(const WsMembershipEvent(op: 'add', memberRef: 'dev.alice', role: 'member', channelId: 'c9'));
+    await pumpSettled(tester);
+
+    expect(find.text('incident-room'), findsWidgets); // appeared without a manual reload
+  });
+
+  testWidgets('sorting by unread orders channels with the most unread first', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: const [
+        Channel(id: 'a', kind: ChannelKind.human, name: 'alpha'),
+        Channel(id: 'z', kind: ChannelKind.human, name: 'zeta'),
+      ],
+    );
+    fake.unreadByChannel['z'] = 5; // zeta has unread; alpha has none
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    Finder inRail(String name) =>
+        find.descendant(of: find.byType(ChatSidebar), matching: find.text(name));
+
+    // Default order is alphabetical: alpha above zeta.
+    expect(tester.getTopLeft(inRail('alpha')).dy, lessThan(tester.getTopLeft(inRail('zeta')).dy));
+
+    // Switch to unread order — zeta (5 unread) rises above alpha (0).
+    await tester.tap(find.text('Unread'));
+    await pumpSettled(tester);
+    expect(tester.getTopLeft(inRail('zeta')).dy, lessThan(tester.getTopLeft(inRail('alpha')).dy));
   });
 
   testWidgets('a reaction chip renders and tapping it toggles the reaction via the API', (tester) async {
