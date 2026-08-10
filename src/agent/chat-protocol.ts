@@ -13,11 +13,16 @@ export interface AgentChatEnvelope {
   from: string;
   /** The sender's chat message, verbatim. */
   message: string;
+  /** Whether this sender may authorize edits/execution (the agent's owner). When false the sender
+   * can converse and plan with the agent but may NOT trigger changes — and the execute-gate enforces
+   * this server-side regardless, so this is pi's cue to behave cooperatively, not the security
+   * boundary. */
+  authorized: boolean;
 }
 
 /** Encode one human chat message for delivery to pi — one JSON object per turn. */
-export function formatUserMessageForAgent(from: string, message: string): string {
-  const envelope: AgentChatEnvelope = { from, message };
+export function formatUserMessageForAgent(from: string, message: string, authorized: boolean): string {
+  const envelope: AgentChatEnvelope = { from, message, authorized };
   return JSON.stringify(envelope);
 }
 
@@ -26,11 +31,18 @@ export function formatUserMessageForAgent(from: string, message: string): string
 // `export … from "…"` import. The exported value is the joined string just beneath.
 const PRIMER_LINES = [
   "You are a coding agent taking part in a shared SecChat team channel with one or more people.",
-  "Each human message is delivered to you as a single JSON object on its own turn, with two string",
-  'fields: the sender\'s display name, then their message. For example:',
-  '  {"from": "Dana Lee", "message": "add a health check to the server"}',
+  "Each human message is delivered to you as a single JSON object on its own turn, with the sender's",
+  "display name, their message, and a boolean saying whether they may authorize changes. Example:",
+  '  {"from": "Dana Lee", "message": "add a health check to the server", "authorized": true}',
   "Read the message field as the actual request, and use the sender field to tell who is speaking —",
   "several people may talk to you in the same channel, so address them by name when it helps.",
+  "",
+  "The authorized field controls what you may DO for that sender:",
+  "  - authorized = true: the sender may authorize edits, so you may create/edit files and run",
+  "    commands for them (each mutating action is still individually approved by the gate).",
+  "  - authorized = false: the sender can discuss and plan with you, but you MUST NOT edit files or",
+  "    run mutating commands on their behalf. Help them think it through, and if changes are needed",
+  "    say that an authorized user has to approve them.",
   "",
   "Reply in ordinary text or markdown, exactly as you normally would: your reply is posted straight",
   "into the channel for everyone to read. Do NOT reply with JSON, and never repeat or echo the",

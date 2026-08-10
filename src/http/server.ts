@@ -13,6 +13,7 @@ import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
 import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
+import { canGrantExecute } from "../agent/gate.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -251,9 +252,12 @@ async function triggerCodingAgents(
   }
   const user = await store.getUser(authorSub);
   const who = user?.displayName?.trim() || authorSub;
-  // Deliver as a JSON envelope naming the sender; pi was primed for this shape at spawn
-  // (AGENT_CHAT_PRIMER). Keeps multi-member channels legible to the agent.
-  await control.sendInput(session.id, formatUserMessageForAgent(who, content));
+  // "authorized" = may this sender authorize edits? That's exactly the gate's owner-only rule, reused
+  // here (not re-derived) so the envelope can't disagree with what the gate will actually enforce.
+  const authorized = canGrantExecute(agent, authorSub).allow;
+  // Deliver as a JSON envelope naming the sender + their edit authority; pi was primed for this shape
+  // at spawn (AGENT_CHAT_PRIMER). Keeps multi-member channels legible to the agent.
+  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized));
 }
 
 function buildRouter(

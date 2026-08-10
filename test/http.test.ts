@@ -821,8 +821,30 @@ test("posting a message in a coding channel forwards it to pi as a JSON envelope
     .map((c) => c as { sessionId: string; text: string });
   assert.equal(forwarded.length, 1, "exactly one forward to pi");
   assert.equal(forwarded[0]!.sessionId, fakeSession.id);
-  // Delivered as a JSON envelope naming the sender (pi is primed for this shape at spawn).
-  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build" });
+  // Delivered as a JSON envelope naming the sender + their edit authority (pi is primed for this
+  // shape at spawn). user-1 owns the agent, so authorized is true.
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build", authorized: true });
+});
+
+test("the envelope's authorized flag is false for a non-owner sender (only the owner may trigger edits)", async () => {
+  // A coding agent owned by user-1, in a channel where user-2 is a plain member. user-2 can talk to
+  // the agent (plan mode) but can't authorize edits — the envelope must say so, matching the gate.
+  const coder = await store.createAgent({ ownerSub: "user-1", kind: "coding", name: "Builder2" });
+  const chId = "coding-ch-nonowner";
+  knownChannelIds.add(chId);
+  await store.addMember({ channelId: chId, memberRef: coder.id, memberType: "agent", role: "member" });
+  await store.addMember({ channelId: chId, memberRef: "user-2", memberType: "user", role: "member" });
+  const before = controlCalls.sendInput.length;
+  const res = await fetch(`${controlBaseUrl}/channels/${chId}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({ content: "please edit the config" }),
+  });
+  assert.equal(res.status, 201);
+  await new Promise((r) => setTimeout(r, 30));
+  const forwarded = controlCalls.sendInput.slice(before).map((c) => c as { sessionId: string; text: string });
+  assert.equal(forwarded.length, 1);
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "user-2", message: "please edit the config", authorized: false });
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {
