@@ -10,7 +10,7 @@
 import { makePiRunner } from "../agent/pi-runner.ts";
 import { makeInteractiveRunner } from "../agent/interactive-runner.ts";
 import { makeRunnerClient } from "./runner-client.ts";
-import type { Runner } from "../types.ts";
+import type { Id, Runner } from "../types.ts";
 import type { RunnerMessage } from "../agent/runner-protocol.ts";
 
 const SECCHAT_URL = process.env.SECCHAT_URL?.trim() || "http://127.0.0.1:47010";
@@ -34,12 +34,18 @@ function selectRunner(): Runner {
   return process.env.SECCHAT_RUNNER_STUB === "1" ? makeInteractiveRunner() : makePiRunner();
 }
 
+/** The daemon's live-session set, shared across every reconnect so a rebuilt client still heartbeats
+ * the sessions whose pi processes are still running in the (lifetime-long) runner. Without this, a
+ * reconnect would reset it to empty and those sessions' leases would lapse. */
+const liveSessions = new Set<Id>();
+
 /** Open one attach connection and keep it wired until it drops; then reconnect. One runner for the
  * daemon's lifetime — each connection re-wires a fresh client (its onEvent replaces the prior one). */
 function connect(runner: Runner): void {
   const socket = new WebSocket(runnerWsUrl());
   const client = makeRunnerClient({
     runner,
+    live: liveSessions,
     send: (msg: RunnerMessage) => {
       try {
         socket.send(JSON.stringify(msg));
@@ -53,6 +59,10 @@ function connect(runner: Runner): void {
   socket.addEventListener("open", () => {
     console.error(`▸ attached to ${SECCHAT_URL}`);
     client.hello({ pid: process.pid, kind: "pi" });
+    // Beat immediately (don't wait a full interval) so the very first keepalive lands before a
+    // short proxy idle-timeout can close the fresh socket, and any surviving sessions' leases are
+    // renewed right away after a reconnect.
+    client.beat();
     beat = setInterval(() => client.beat(), HEARTBEAT_MS);
   });
   socket.addEventListener("message", (ev) => void client.handleCommand(String((ev as MessageEvent).data)));
