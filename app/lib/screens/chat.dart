@@ -22,6 +22,7 @@ import '../widgets/marking_picker.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
+import '../widgets/members_panel.dart';
 import '../widgets/mentions_panel.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
@@ -273,6 +274,17 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
     }
+  }
+
+  Future<void> _openMembers(Channel channel) async {
+    await showMembersPanel(
+      context,
+      api: widget.api,
+      channel: channel,
+      currentUserSub: widget.principal.sub,
+      isAdmin: widget.principal.isAdmin,
+      roster: _usersBySub.values.toList(),
+    );
   }
 
   Future<void> _openMentions() async {
@@ -1047,6 +1059,8 @@ class _ChatScreenState extends State<ChatScreen> {
           title: _channelTitle(selected),
           agentKind: _agentKindByChannel[selected.id],
           onMarkChannel: () => _markChannel(selected),
+          // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
+          onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
         ),
         // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
@@ -1224,6 +1238,7 @@ class _ChannelHeader extends StatelessWidget {
     required this.title,
     required this.agentKind,
     this.onMarkChannel,
+    this.onMembers,
   });
 
   final Channel channel;
@@ -1233,6 +1248,10 @@ class _ChannelHeader extends StatelessWidget {
   /// Opens the channel-classification picker (set/raise for members, downgrade
   /// for admins). Null disables the control.
   final VoidCallback? onMarkChannel;
+
+  /// Opens the members panel (view roster; owners/admins manage). Null hides it
+  /// (e.g. DMs — a fixed 1:1 pair).
+  final VoidCallback? onMembers;
 
   @override
   Widget build(BuildContext context) {
@@ -1264,6 +1283,16 @@ class _ChannelHeader extends StatelessWidget {
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
           const Spacer(),
+          if (onMembers != null) ...[
+            IconButton(
+              onPressed: onMembers,
+              icon: const Icon(Icons.group_outlined, size: 17),
+              tooltip: 'Members',
+              color: AppColors.textMuted,
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 4),
+          ],
           if (onMarkChannel != null) ...[
             _ChannelMarkingButton(channel: channel, onTap: onMarkChannel!),
             const SizedBox(width: 10),

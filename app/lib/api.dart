@@ -111,6 +111,16 @@ abstract class ApiClient {
   /// new unseen count so the badge can refresh in one round-trip.
   Future<int> markMentionsSeen({List<String>? ids});
 
+  /// A channel's members (enriched with display labels). Any member may read it.
+  Future<List<ChannelMember>> getMembers(String channelId);
+
+  /// Add a member, or change an existing member's role (idempotent upsert).
+  /// Owner-or-admin only server-side; throws on a last-owner demotion (409).
+  Future<void> addMember(String channelId, String userSub, {String role});
+
+  /// Remove a member. Owner-or-admin only; throws on removing the last owner (409).
+  Future<void> removeMember(String channelId, String memberRef);
+
   /// Redacts a message — a governed content purge (author or admin). [reason]
   /// is required (the audit record). The change is reflected live via a
   /// `redaction` WS event.
@@ -436,6 +446,22 @@ class HttpApiClient implements ApiClient {
     final body = ids != null && ids.isNotEmpty ? {'ids': ids} : const <String, dynamic>{};
     final data = await _post('/mentions/seen', body) as Map<String, dynamic>;
     return (data['unseen'] as num?)?.toInt() ?? 0;
+  }
+
+  @override
+  Future<List<ChannelMember>> getMembers(String channelId) async {
+    final data = await _get('/channels/$channelId/members') as List<dynamic>;
+    return data.map((e) => ChannelMember.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<void> addMember(String channelId, String userSub, {String role = 'member'}) async {
+    await _post('/channels/$channelId/members', {'user': userSub, 'role': role});
+  }
+
+  @override
+  Future<void> removeMember(String channelId, String memberRef) async {
+    await _delete('/channels/$channelId/members/${Uri.encodeComponent(memberRef)}');
   }
 
   @override

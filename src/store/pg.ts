@@ -494,6 +494,23 @@ export class PgStore implements Store, SessionStore {
     return rows.length > 0;
   }
 
+  async removeMember(channelId: Id, memberRef: string): Promise<boolean> {
+    const result = await this.#pool.query(
+      `DELETE FROM channel_members WHERE channel_id = $1 AND member_ref = $2`,
+      [channelId, memberRef],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async setMemberRole(channelId: Id, memberRef: string, role: Member["role"]): Promise<Member | null> {
+    const { rows } = await this.#pool.query<MemberRow>(
+      `UPDATE channel_members SET role = $3 WHERE channel_id = $1 AND member_ref = $2
+       RETURNING channel_id, member_ref, member_type, role`,
+      [channelId, memberRef, role],
+    );
+    return rows[0] ? rowToMember(rows[0]) : null;
+  }
+
   /** All channels, creation order (ins_seq — see db/migrations/0002_parity.sql) — for the admin /
    * audit-review console (AU 3.3.5/6), same idiom as listMembers/listAgentsByOwner. */
   async listChannels(): Promise<Channel[]> {

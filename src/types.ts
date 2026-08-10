@@ -271,6 +271,10 @@ export interface Store {
   addMember(m: Member): Promise<void>;
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;
+  /** Remove a member from a channel. No-op if they aren't a member. Returns whether a row was removed. */
+  removeMember(channelId: Id, memberRef: string): Promise<boolean>;
+  /** Change a member's role. Returns the updated member, or null if they aren't a member. */
+  setMemberRole(channelId: Id, memberRef: string, role: Member["role"]): Promise<Member | null>;
 
   // Directory of users seen via SSO (captured from their tokens) — powers DMs + the roster.
   /** Record or refresh a user from their token claims; `email`/`displayName` are preserved when

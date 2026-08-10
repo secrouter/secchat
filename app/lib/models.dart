@@ -486,6 +486,42 @@ class GrantExecuteResult {
 // time -- adding a new event type here is a compile error everywhere it
 // isn't yet handled, not a silent no-op at runtime.
 
+/// One member of a channel, as returned enriched by `GET /channels/:id/members`: the raw membership
+/// (ref + type + role) plus a display label resolved server-side (the user's directory name, or an
+/// agent's name) so the roster renders without a second lookup.
+class ChannelMember {
+  const ChannelMember({
+    required this.memberRef,
+    required this.memberType,
+    required this.role,
+    this.displayName,
+    this.email,
+    this.agentKind,
+  });
+
+  final String memberRef;
+  final String memberType; // 'user' | 'agent'
+  final String role; // 'owner' | 'member'
+  final String? displayName;
+  final String? email;
+  final String? agentKind;
+
+  bool get isOwner => role == 'owner';
+  bool get isAgent => memberType == 'agent';
+
+  /// A human label: the enriched display name, else the raw ref.
+  String get label => (displayName != null && displayName!.isNotEmpty) ? displayName! : memberRef;
+
+  factory ChannelMember.fromJson(Map<String, dynamic> json) => ChannelMember(
+    memberRef: json['memberRef'] as String? ?? '',
+    memberType: json['memberType'] as String? ?? 'user',
+    role: json['role'] as String? ?? 'member',
+    displayName: json['displayName'] as String?,
+    email: json['email'] as String?,
+    agentKind: json['agentKind'] as String?,
+  );
+}
+
 /// A record that the current user was @-mentioned, enriched for the inbox with the triggering
 /// message's content, seq, and channel name. `content` is null when that message has since been
 /// redacted (the row still shows who mentioned you, where, and when).

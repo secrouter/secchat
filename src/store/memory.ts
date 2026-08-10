@@ -118,7 +118,11 @@ export class MemoryStore implements Store, SessionStore {
   async addMember(m: Member): Promise<void> {
     const members = this.#members.get(m.channelId);
     if (!members) throw new Error(`MemoryStore.addMember: unknown channel ${m.channelId}`);
-    members.push(m);
+    // Idempotent per memberRef: re-adding an existing member updates their role rather than
+    // duplicating the row (matches PgStore's ON CONFLICT).
+    const existing = members.findIndex((x) => x.memberRef === m.memberRef);
+    if (existing >= 0) members[existing] = m;
+    else members.push(m);
   }
 
   async listMembers(channelId: Id): Promise<Member[]> {
@@ -127,6 +131,22 @@ export class MemoryStore implements Store, SessionStore {
 
   async isMember(channelId: Id, ref: string): Promise<boolean> {
     return (this.#members.get(channelId) ?? []).some((m) => m.memberRef === ref);
+  }
+
+  async removeMember(channelId: Id, memberRef: string): Promise<boolean> {
+    const members = this.#members.get(channelId);
+    if (!members) return false;
+    const i = members.findIndex((m) => m.memberRef === memberRef);
+    if (i < 0) return false;
+    members.splice(i, 1);
+    return true;
+  }
+
+  async setMemberRole(channelId: Id, memberRef: string, role: Member["role"]): Promise<Member | null> {
+    const member = this.#members.get(channelId)?.find((m) => m.memberRef === memberRef);
+    if (!member) return null;
+    member.role = role;
+    return { ...member };
   }
 
   /** All channels, creation order (Map iteration order == insertion order) — for the admin /

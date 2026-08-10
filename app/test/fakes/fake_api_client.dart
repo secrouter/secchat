@@ -246,6 +246,34 @@ class FakeApiClient implements ApiClient {
     return 0;
   }
 
+  /// Members per channel a test should see; the membership calls mutate these so a reload reflects them.
+  final Map<String, List<ChannelMember>> membersByChannel = {};
+
+  /// Every membership mutation, in order (op ∈ add/role/remove).
+  final List<({String op, String channelId, String ref, String? role})> memberCalls = [];
+
+  @override
+  Future<List<ChannelMember>> getMembers(String channelId) async {
+    _maybeThrow('getMembers');
+    return List.of(membersByChannel[channelId] ?? const []);
+  }
+
+  @override
+  Future<void> addMember(String channelId, String userSub, {String role = 'member'}) async {
+    _maybeThrow('addMember');
+    memberCalls.add((op: 'add', channelId: channelId, ref: userSub, role: role));
+    final list = membersByChannel.putIfAbsent(channelId, () => []);
+    list.removeWhere((m) => m.memberRef == userSub);
+    list.add(ChannelMember(memberRef: userSub, memberType: 'user', role: role, displayName: userSub));
+  }
+
+  @override
+  Future<void> removeMember(String channelId, String memberRef) async {
+    _maybeThrow('removeMember');
+    memberCalls.add((op: 'remove', channelId: channelId, ref: memberRef, role: null));
+    membersByChannel[channelId]?.removeWhere((m) => m.memberRef == memberRef);
+  }
+
   /// Every `redactMessage` call, in order.
   final List<({String messageId, String reason})> redactCalls = [];
 

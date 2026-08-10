@@ -152,6 +152,30 @@ if (!DATABASE_URL) {
     assert.equal(forM1.mentionedSub, "user-bob");
   });
 
+  test("membership: addMember upserts role, setMemberRole updates, removeMember deletes (idempotently)", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-bob", memberType: "user", role: "member" });
+
+    // addMember on an existing ref updates the role rather than duplicating (ON CONFLICT).
+    await store.addMember({ channelId: channel.id, memberRef: "user-bob", memberType: "user", role: "owner" });
+    let roster = await store.listMembers(channel.id);
+    assert.equal(roster.filter((m) => m.memberRef === "user-bob").length, 1);
+    assert.equal(roster.find((m) => m.memberRef === "user-bob")!.role, "owner");
+
+    // setMemberRole returns the updated row; unknown member ⇒ null.
+    const updated = await store.setMemberRole(channel.id, "user-bob", "member");
+    assert.equal(updated!.role, "member");
+    assert.equal(await store.setMemberRole(channel.id, "nobody", "member"), null);
+
+    // removeMember reports whether it removed a row; a second remove is a no-op.
+    assert.equal(await store.removeMember(channel.id, "user-bob"), true);
+    assert.equal(await store.removeMember(channel.id, "user-bob"), false);
+    roster = await store.listMembers(channel.id);
+    assert.deepEqual(roster.map((m) => m.memberRef), ["user-alice"]);
+    assert.equal(await store.isMember(channel.id, "user-bob"), false);
+  });
+
   test("getChannel returns null for an unknown id", async () => {
     assert.equal(await store.getChannel(randomUUID()), null);
   });

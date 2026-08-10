@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, User, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, VerifyToken } from "../types.ts";
 import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
@@ -902,6 +902,101 @@ function buildRouter(
     }
     const body = (await readJsonBody(req)) as { seq?: number };
     await store.setLastRead(channelId, principal.sub, body.seq ?? 0);
+    sendJson(res, 200, { ok: true });
+  });
+
+  // ── Channel membership management. Reading the roster needs only membership; CHANGING it (add /
+  // remove / role) is owner-or-admin — per-channel ownership is the right authority for membership
+  // (a global capability would let one group manage EVERY channel). A channel must always keep at
+  // least one owner, so the last owner can't be removed or demoted.
+  const adminGroup = admin?.adminGroup ?? "secchat-admins";
+  /** True if `principal` may change `channelId`'s membership: an owner member, or a platform admin. */
+  async function canManageMembers(channelId: string, principal: Principal): Promise<boolean> {
+    if (isAdmin(principal, adminGroup)) return true;
+    const members = await store.listMembers(channelId);
+    return members.some((m) => m.memberRef === principal.sub && m.memberType === "user" && m.role === "owner");
+  }
+
+  router.add("GET", "/channels/:id/members", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    // Enrich each member with a display label (user directory name / agent name) so the panel needs
+    // no second fetch; falls back to the raw ref when unknown.
+    const members = await store.listMembers(channelId);
+    const enriched = await Promise.all(
+      members.map(async (m) => {
+        if (m.memberType === "user") {
+          const u = await store.getUser(m.memberRef);
+          return { ...m, displayName: u?.displayName, email: u?.email };
+        }
+        const a = await store.getAgent(m.memberRef);
+        return { ...m, displayName: a?.name, agentKind: a?.kind };
+      }),
+    );
+    sendJson(res, 200, enriched);
+  });
+
+  // Add a member, or change an existing member's role (idempotent upsert). Owner-or-admin only.
+  router.add("POST", "/channels/:id/members", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.getChannel(channelId))) {
+      sendJson(res, 404, { error: "unknown_channel" });
+      return;
+    }
+    if (!(await canManageMembers(channelId, principal))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { user?: string; role?: string };
+    const memberRef = (body.user ?? "").trim();
+    if (!memberRef) {
+      sendJson(res, 400, { error: "user_required" });
+      return;
+    }
+    const role: Member["role"] = body.role === "owner" ? "owner" : "member";
+    // Guard the last owner: demoting the sole owner to member would orphan the channel.
+    if (role === "member") {
+      const members = await store.listMembers(channelId);
+      const owners = members.filter((m) => m.role === "owner");
+      if (owners.length === 1 && owners[0]!.memberRef === memberRef) {
+        sendJson(res, 409, { error: "last_owner", detail: "a channel must keep at least one owner" });
+        return;
+      }
+    }
+    const existed = await store.isMember(channelId, memberRef);
+    await store.addMember({ channelId, memberRef, memberType: "user", role });
+    await store.appendAudit({ actor: principal.sub, action: existed ? "channel.set_role" : "channel.add_member", target: channelId, detail: `${memberRef}:${role}` });
+    broadcast?.(channelId, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role });
+    notify?.(memberRef, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role }); // refresh the affected user's channel list
+    sendJson(res, existed ? 200 : 201, { channelId, memberRef, memberType: "user", role });
+  });
+
+  // Remove a member. Owner-or-admin only; the last owner can't be removed.
+  router.add("DELETE", "/channels/:id/members/:ref", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    const memberRef = decodeURIComponent(params.ref!);
+    if (!(await canManageMembers(channelId, principal))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const members = await store.listMembers(channelId);
+    const target = members.find((m) => m.memberRef === memberRef);
+    if (!target) {
+      sendJson(res, 404, { error: "not_a_member" });
+      return;
+    }
+    const owners = members.filter((m) => m.role === "owner");
+    if (target.role === "owner" && owners.length === 1) {
+      sendJson(res, 409, { error: "last_owner", detail: "a channel must keep at least one owner" });
+      return;
+    }
+    await store.removeMember(channelId, memberRef);
+    await store.appendAudit({ actor: principal.sub, action: "channel.remove_member", target: channelId, detail: memberRef });
+    broadcast?.(channelId, { type: "membership", channelId, op: "remove", memberRef });
+    notify?.(memberRef, { type: "membership", channelId, op: "remove", memberRef }); // let the removed user drop the channel
     sendJson(res, 200, { ok: true });
   });
 
