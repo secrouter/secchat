@@ -64,11 +64,20 @@ class Principal {
   const Principal({
     required this.sub,
     required this.groups,
+    this.displayName,
+    this.email,
     this.marking = MarkingPolicy.fallback,
   });
 
   final String sub;
   final List<String> groups;
+
+  /// The signed-in user's display name (`GET /me`'s `name` claim). Null when the
+  /// IdP didn't supply one — the [label] then falls back to the sub.
+  final String? displayName;
+
+  /// The signed-in user's email (`GET /me`), when the IdP supplied it.
+  final String? email;
 
   /// The deployment's classification-marking ladder (from `GET /me`) — drives
   /// the banners, the composer's marking picker, and local rank comparisons.
@@ -76,11 +85,21 @@ class Principal {
 
   bool get isAdmin => groups.contains('secchat-admins');
 
+  /// A human label for the top bar etc.: the display name, else the email, else
+  /// the raw sub (an opaque hash under sub_mode: hashed_user_id).
+  String get label => (displayName != null && displayName!.isNotEmpty)
+      ? displayName!
+      : (email != null && email!.isNotEmpty)
+      ? email!
+      : sub;
+
   factory Principal.fromJson(Map<String, dynamic> json) => Principal(
     sub: json['sub'] as String? ?? '',
     groups: (json['groups'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => e.toString())
         .toList(),
+    displayName: json['displayName'] as String?,
+    email: json['email'] as String?,
     marking: json['marking'] is Map<String, dynamic>
         ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
         : MarkingPolicy.fallback,

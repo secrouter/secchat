@@ -2,15 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<!-- Outbound: reach the SecChat backend (HTTPS + WebSocket). Without this a
-	     sandboxed app can make no network connection at all. -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<!-- Inbound: the native-SSO loopback listener (127.0.0.1) that captures the
-	     session token handed back by the browser login — see lib/platform/native_sso_io.dart. -->
-	<key>com.apple.security.network.server</key>
-	<true/>
+	<!-- NOT sandboxed: the desktop app supervises a bundled runner daemon that shells out to the
+	     external `pi` coding-agent CLI. The App Sandbox only permits execing binaries INSIDE the
+	     bundle, so a sandboxed build can't run pi (there's no entitlement for external exec — it's
+	     a process-execution limit, not a file-access one). This build targets NON-App-Store
+	     distribution (Developer ID + notarization / hardened runtime), where the sandbox isn't
+	     required. Re-add com.apple.security.app-sandbox (and bundle pi) only for the Mac App Store. -->
 </dict>
 </plist>

@@ -35,6 +35,20 @@ DaemonSupervisor createDaemonSupervisor({DaemonLauncher? launcher, String? execu
   );
 }
 
+/// The daemon's PATH with the common developer tool dirs (Homebrew, `~/.local/bin`, MacPorts)
+/// prepended to whatever the app inherited — so a Finder-launched app can still find `pi`.
+String _augmentedPath() {
+  final home = Platform.environment['HOME'] ?? '';
+  final inherited = Platform.environment['PATH'] ?? '';
+  final extra = <String>[
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    if (home.isNotEmpty) '$home/.local/bin',
+    '/opt/local/bin',
+  ];
+  return [...extra, if (inherited.isNotEmpty) inherited].join(':');
+}
+
 /// The runnerd embedded in the macOS .app bundle, or null (dev runs, other platforms, or a build
 /// without the bundle — fall through to the env/PATH default). Derived from the running executable:
 /// `…/SecChat.app/Contents/MacOS/<bin>` → `…/Contents/Resources/runnerd/`.
@@ -103,6 +117,10 @@ class _ProcessSupervisor implements DaemonSupervisor {
         ...Platform.environment,
         'SECCHAT_URL': _url!,
         'SECCHAT_RUNNER_TOKEN': _token!,
+        // The daemon shells out to the `pi` coding-agent CLI, but a GUI app launched from Finder
+        // inherits a minimal PATH (/usr/bin:/bin:…) that omits where pi is usually installed. Prepend
+        // the common tool dirs so the runner can find it. (SECCHAT_PI_RUNNER/PI_BIN still override.)
+        if (Platform.isMacOS || Platform.isLinux) 'PATH': _augmentedPath(),
       });
       if (_stopping) {
         proc.kill();
