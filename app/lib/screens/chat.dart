@@ -618,7 +618,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _sessionIdByChannel[channelId]
           : null;
 
-  Future<void> _handleSend(String text, String marking) async {
+  Future<void> _handleSend(String text, String marking, List<String> attachmentIds) async {
     final channel = _selected;
     if (channel == null) return;
     // A leading "/<known-command>" is a slash command; everything else
@@ -628,12 +628,31 @@ class _ChatScreenState extends State<ChatScreen> {
       await _runCommand(channel, command, marking);
       return;
     }
-    await _sendPlain(channel, text, marking);
+    await _sendPlain(channel, text, marking, attachmentIds);
+  }
+
+  /// Picks + uploads files for [channel] (at the channel's marking when it's marked), returning the
+  /// created attachments to stage. Used by the composer's attach affordance.
+  Future<List<Attachment>> _attachFiles(Channel channel) async {
+    final picked = await pickFiles();
+    if (picked.isEmpty) return const [];
+    final marking = channel.isMarked ? channel.cuiMarking : null;
+    final uploaded = <Attachment>[];
+    for (final f in picked) {
+      uploaded.add(await widget.api.uploadAttachment(
+        channel.id,
+        bytes: f.bytes,
+        filename: f.filename,
+        contentType: f.contentType,
+        marking: marking,
+      ));
+    }
+    return uploaded;
   }
 
   /// Sends ordinary (non-command) text: to the coding-agent session when this
   /// channel has one, otherwise as a chat message at classification [marking].
-  Future<void> _sendPlain(Channel channel, String text, String marking) async {
+  Future<void> _sendPlain(Channel channel, String text, String marking, List<String> attachmentIds) async {
     final sessionId = _codingSessionIdFor(channel.id);
     if (sessionId != null) {
       // A coding agent is driven by its runner, not chat history: input
@@ -651,14 +670,14 @@ class _ChatScreenState extends State<ChatScreen> {
     // echo (some backends don't echo the sender's own message back to
     // them); `_appendMessageUnlessDuplicate` dedupes by id in case the
     // socket *does* also deliver it.
-    final message = await widget.api.postMessage(channel.id, text, marking: marking);
+    final message = await widget.api.postMessage(channel.id, text, marking: marking, attachmentIds: attachmentIds);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
   }
 
   /// Posts a threaded reply to [parentId] at classification [marking].
-  Future<void> _sendReply(Channel channel, String parentId, String text, String marking) async {
-    final message = await widget.api.postMessage(channel.id, text, parentId: parentId, marking: marking);
+  Future<void> _sendReply(Channel channel, String parentId, String text, String marking, List<String> attachmentIds) async {
+    final message = await widget.api.postMessage(channel.id, text, parentId: parentId, marking: marking, attachmentIds: attachmentIds);
     if (!mounted) return;
     setState(() => _appendMessageUnlessDuplicate(channel.id, message));
   }
@@ -687,7 +706,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _showCommandHelp();
       case 'shrug':
         final base = command.args.trim();
-        await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug', marking);
+        await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug', marking, const []);
       case 'pi':
         final input = command.args;
         if (input.trim().isEmpty) {
@@ -980,6 +999,8 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(child: _buildTranscript(selected)),
           MessageComposer(
             onSend: _handleSend,
+            // Attach files on chat channels; coding-agent channels are runner-driven (no attach).
+            onAttach: _codingSessionIdFor(selected.id) == null ? () => _attachFiles(selected) : null,
             markingLevels: policy.levels,
             markingCategories: policy.categories,
             markingPolicy: policy,
@@ -1078,7 +1099,8 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         MessageComposer(
-          onSend: (text, marking) => _sendReply(channel, parent.id, text, marking),
+          onSend: (text, marking, attachmentIds) => _sendReply(channel, parent.id, text, marking, attachmentIds),
+          onAttach: () => _attachFiles(channel),
           markingLevels: widget.principal.marking.levels,
           markingCategories: widget.principal.marking.categories,
           markingPolicy: widget.principal.marking,

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../clipboard_guard.dart';
 import '../commands.dart';
 import '../marking.dart';
+import '../models.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'markdown_text.dart';
@@ -25,6 +26,7 @@ class MessageComposer extends StatefulWidget {
   const MessageComposer({
     super.key,
     required this.onSend,
+    this.onAttach,
     this.enabled = true,
     this.markingLevels = const [],
     this.markingCategories = const [],
@@ -34,11 +36,15 @@ class MessageComposer extends StatefulWidget {
     this.initialMarking = 'UNCLASSIFIED',
   });
 
-  /// Invoked with the trimmed message text. May throw -- the composer
-  /// surfaces that as a [SnackBar] and leaves the text in place so the user
-  /// can retry. Slash commands are passed through verbatim; the chat screen
-  /// interprets them (it has the channel/session context).
-  final Future<void> Function(String text, String marking) onSend;
+  /// Invoked with the trimmed message text, its marking, and the ids of any
+  /// staged attachments. May throw -- the composer surfaces that as a [SnackBar]
+  /// and leaves the text in place so the user can retry. Slash commands are
+  /// passed through verbatim; the chat screen interprets them.
+  final Future<void> Function(String text, String marking, List<String> attachmentIds) onSend;
+
+  /// Picks + uploads files, returning the created attachments to STAGE for the
+  /// next send. Null ⇒ no attach affordance (e.g. coding-agent channels).
+  final Future<List<Attachment>> Function()? onAttach;
 
   final bool enabled;
 
@@ -88,6 +94,11 @@ class _MessageComposerState extends State<MessageComposer> {
   /// sent). Cleared whenever the level changes.
   final Set<String> _categories = {};
 
+  /// Files uploaded and STAGED for the next send (their ids ride along with the
+  /// message); cleared on send. [_attaching] guards the picker while it's open.
+  final List<Attachment> _pending = [];
+  bool _attaching = false;
+
   /// The categories the deployment offers for the currently-selected level.
   List<MarkingCategory> get _availableCategories =>
       widget.markingCategories.where((c) => c.level == _marking.toUpperCase()).toList();
@@ -131,7 +142,7 @@ class _MessageComposerState extends State<MessageComposer> {
   void _onTextChanged() => setState(() {});
 
   bool get _canSend =>
-      widget.enabled && !_sending && _controller.text.trim().isNotEmpty;
+      widget.enabled && !_sending && (_controller.text.trim().isNotEmpty || _pending.isNotEmpty);
 
   // ── Keyboard ──────────────────────────────────────────────────────────
 
@@ -172,19 +183,42 @@ class _MessageComposerState extends State<MessageComposer> {
 
   Future<void> _handleSend() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _sending || !widget.enabled) return;
-    setState(() => _sending = true);
+    if ((text.isEmpty && _pending.isEmpty) || _sending || !widget.enabled) return;
+    final attachmentIds = _pending.map((a) => a.id).toList();
+    final staged = List<Attachment>.of(_pending);
+    setState(() {
+      _sending = true;
+      _pending.clear();
+    });
     _controller.clear();
     try {
-      await widget.onSend(text, _effectiveMarking);
+      await widget.onSend(text, _effectiveMarking, attachmentIds);
     } catch (error) {
       if (!mounted) return;
       _controller.text = text;
+      setState(() => _pending.addAll(staged)); // restore the staged files so the user can retry
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not send: $error')),
       );
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  /// Opens the file picker (via [MessageComposer.onAttach]), uploads, and STAGES the
+  /// returned attachments for the next send.
+  Future<void> _attach() async {
+    if (widget.onAttach == null || _attaching) return;
+    setState(() => _attaching = true);
+    try {
+      final added = await widget.onAttach!();
+      if (mounted && added.isNotEmpty) setState(() => _pending.addAll(added));
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _attaching = false);
     }
   }
 
@@ -326,6 +360,7 @@ class _MessageComposerState extends State<MessageComposer> {
           ),
           _toolbar(),
           _categoryBar(),
+          if (_pending.isNotEmpty) _pendingBar(),
           const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -367,6 +402,7 @@ class _MessageComposerState extends State<MessageComposer> {
               _toolButton(Icons.format_quote, 'Quote',
                   () => _linePrefix('> ')),
               if (widget.markingLevels.isNotEmpty) _portionButton(),
+              if (widget.onAttach != null) _attachButton(),
               _emojiButton(),
             ],
           ),
@@ -540,6 +576,46 @@ class _MessageComposerState extends State<MessageComposer> {
                 .copyWith(fontWeight: FontWeight.w700),
           ),
         ),
+      ),
+    );
+  }
+
+  /// The attach-file affordance (spinner while the picker/upload is in flight).
+  Widget _attachButton() {
+    return IconButton(
+      icon: _attaching
+          ? const SizedBox(
+              width: 16, height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.textMuted),
+            )
+          : const Icon(Icons.attach_file, size: 17),
+      tooltip: 'Attach file',
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+      color: AppColors.textMuted,
+      onPressed: _attaching ? null : _attach,
+    );
+  }
+
+  /// Chips for files STAGED to send with the next message (each removable).
+  Widget _pendingBar() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final a in _pending)
+            Chip(
+              avatar: const Icon(Icons.insert_drive_file_outlined, size: 14),
+              label: Text(a.filename, style: const TextStyle(fontSize: 11)),
+              onDeleted: () => setState(() => _pending.remove(a)),
+              deleteIcon: const Icon(Icons.close, size: 14),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+              backgroundColor: AppColors.surfaceRaised,
+            ),
+        ],
       ),
     );
   }

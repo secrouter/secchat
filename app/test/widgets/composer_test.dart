@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/clipboard_guard.dart';
 import 'package:secchat_app/marking.dart';
+import 'package:secchat_app/models.dart';
 import 'package:secchat_app/widgets/composer.dart';
 
 /// Pumps a composer wired to a capturing `onSend`; returns the list that
@@ -12,7 +13,7 @@ Future<List<String>> _pumpComposer(WidgetTester tester) async {
   await tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
-        body: MessageComposer(onSend: (text, marking) async => sent.add(text)),
+        body: MessageComposer(onSend: (text, marking, _) async => sent.add(text)),
       ),
     ),
   );
@@ -136,7 +137,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: MessageComposer(
-            onSend: (text, marking) async {},
+            onSend: (text, marking, _) async {},
             markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
           ),
         ),
@@ -164,7 +165,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: MessageComposer(
-            onSend: (text, marking) async => sentMarking = marking,
+            onSend: (text, marking, _) async => sentMarking = marking,
             markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
             markingCategories: const [
               MarkingCategory(code: 'SP-PRVCY', name: 'Privacy', level: 'CUI'),
@@ -198,6 +199,89 @@ void main() {
     expect(sentMarking, 'CUI//SP-PRVCY');
   });
 
+  testWidgets('attaching a file stages a removable chip, and sending forwards its id', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    var attachCalls = 0;
+    List<String>? sentIds;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking, ids) async => sentIds = ids,
+            // Simulate a pick+upload that stages one attachment.
+            onAttach: () async {
+              attachCalls++;
+              return const [
+                Attachment(
+                  id: 'att-1',
+                  filename: 'report.pdf',
+                  contentType: 'application/pdf',
+                  byteSize: 2048,
+                  marking: 'UNCLASSIFIED',
+                ),
+              ];
+            },
+          ),
+        ),
+      ),
+    );
+
+    // No staged chip until a file is attached.
+    expect(find.text('report.pdf'), findsNothing);
+
+    // Attach → the pending chip appears, and the picker/upload ran once.
+    await tester.tap(find.byTooltip('Attach file'));
+    await tester.pumpAndSettle();
+    expect(attachCalls, 1);
+    expect(find.text('report.pdf'), findsOneWidget);
+
+    // A staged attachment alone (no text) is enough to enable Send; its id rides along.
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await tester.pump();
+    expect(sentIds, ['att-1']);
+
+    // After the send the staged chip is cleared.
+    await tester.pump();
+    expect(find.text('report.pdf'), findsNothing);
+  });
+
+  testWidgets('a staged attachment can be removed before sending', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking, ids) async {},
+            onAttach: () async => const [
+              Attachment(
+                id: 'att-9',
+                filename: 'notes.txt',
+                contentType: 'text/plain',
+                byteSize: 12,
+                marking: 'UNCLASSIFIED',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Attach file'));
+    await tester.pumpAndSettle();
+    expect(find.text('notes.txt'), findsOneWidget);
+
+    // The chip's delete affordance unstages it.
+    await tester.tap(find.byIcon(Icons.close));
+    await tester.pump();
+    expect(find.text('notes.txt'), findsNothing);
+  });
+
   testWidgets('Ctrl+V of higher-marked in-app content into a marked channel is blocked', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
@@ -218,7 +302,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: MessageComposer(
-            onSend: (text, marking) async {},
+            onSend: (text, marking, _) async {},
             markingLevels: const ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
             markingPolicy: const MarkingPolicy(
               levels: ['UNCLASSIFIED', 'PROPRIETARY', 'CUI'],
