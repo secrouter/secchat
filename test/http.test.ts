@@ -189,6 +189,16 @@ const store = {
     }
     return out;
   },
+  // Attachments: this minimal fake carries none — the message routes it exercises never attach files.
+  async listAttachmentsForChannel(_channelId: string) {
+    return [];
+  },
+  async listAttachmentsForMessage(_messageId: string) {
+    return [];
+  },
+  async getAttachment(_id: string) {
+    return null;
+  },
   async setLastRead(channelId: string, userSub: string, seq: number) {
     lastReadByChannelUser.set(`${channelId}:${userSub}`, seq);
   },

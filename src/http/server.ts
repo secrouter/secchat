@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, VerifyToken } from "../types.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -20,6 +20,44 @@ import {
 } from "../marking/policy.ts";
 import { dominates, formatMarking, joinMarking, type Marking, parseMarking } from "../marking/caveats.ts";
 import { overallPortionMarking } from "../marking/portions.ts";
+import { type BlobStore, sha256Hex } from "../attachments/blobs.ts";
+import { attachmentsManifest } from "../attachments/manifest.ts";
+
+/** Attachment byte storage + the upload size cap (a deployment setting). Unset ⇒ the upload/download
+ * routes 501 (attachments not configured); tests inject a MemoryBlobStore. */
+interface AttachmentDeps {
+  blobs: BlobStore;
+  maxUploadBytes: number;
+}
+
+/** Read a raw (non-JSON) request body into a Buffer, rejecting once it exceeds `maxBytes`. Unlike
+ * readJsonBody (unbounded), this is the bounded path for binary uploads. */
+function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return; // over the cap already — ignore the rest (don't destroy: the 413 still needs to flush)
+      size += chunk.length;
+      if (size > maxBytes) {
+        settled = true;
+        reject(Object.assign(new Error("payload too large"), { tooLarge: true }));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!settled) resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+  });
+}
 import { DlpPolicy } from "../dlp/policy.ts";
 import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
 import type { StepUp } from "../auth/stepup.ts";
@@ -185,6 +223,7 @@ function buildRouter(
   control?: AgentControl,
   admin?: AdminDeps,
   search?: SearchFn,
+  attachments?: AttachmentDeps,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -420,7 +459,19 @@ function buildRouter(
       if (list) list.push(reaction);
       else byMessage.set(reaction.messageId, [reaction]);
     }
-    const enriched = messages.map((m) => ({ ...m, reactions: byMessage.get(m.id) ?? [] }));
+    // Same one-read enrichment for attachments (metadata only — bytes are fetched lazily via download).
+    const filesByMessage = new Map<string, Attachment[]>();
+    for (const a of await store.listAttachmentsForChannel(channelId)) {
+      if (!a.messageId) continue;
+      const list = filesByMessage.get(a.messageId);
+      if (list) list.push(a);
+      else filesByMessage.set(a.messageId, [a]);
+    }
+    const enriched = messages.map((m) => ({
+      ...m,
+      reactions: byMessage.get(m.id) ?? [],
+      ...(filesByMessage.has(m.id) ? { attachments: filesByMessage.get(m.id) } : {}),
+    }));
     if (limit == null) {
       sendJson(res, 200, enriched); // legacy: the whole channel as a bare array
       return;
@@ -439,7 +490,12 @@ function buildRouter(
     }
     const channel = await store.getChannel(channelId);
     const channelMarking = channel?.cuiMarking ? parseMarking(marking, channel.cuiMarking) : null;
-    const body = (await readJsonBody(req)) as { content?: string; parentId?: string; marking?: string };
+    const body = (await readJsonBody(req)) as {
+      content?: string;
+      parentId?: string;
+      marking?: string;
+      attachmentIds?: string[];
+    };
     const content = body.content ?? "";
     // Resolve + ENFORCE the classification marking (blocking). A requested marking is a full banner
     // (level + optional categories, e.g. "CUI//SP-PRVCY"); an invalid one is a 400.
@@ -479,6 +535,30 @@ function buildRouter(
         effective = joinMarking(marking, effective, portionMax);
       }
     }
+    // Attachments (attach-on-post): each requested id must be an UNCLAIMED upload in THIS channel; its
+    // marking is folded into the message's (a file can't out-classify the message carrying it — raise
+    // an unmarked channel's message to cover it, or spillage-block a marked channel). The manifest
+    // digest of the claimed set is bound into the message hash below.
+    const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds : [];
+    const attachedFiles: Attachment[] = [];
+    for (const aid of attachmentIds) {
+      const a = await store.getAttachment(aid);
+      if (!a || a.channelId !== channelId || a.messageId != null) {
+        sendJson(res, 400, { error: "invalid_attachment", attachmentId: aid });
+        return;
+      }
+      const am = parseMarking(marking, a.marking) ?? { level: marking.default, caveats: [] };
+      if (channelMarking) {
+        if (!dominates(marking, channelMarking, am)) {
+          sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel!.cuiMarking });
+          return;
+        }
+      } else if (!dominates(marking, effective, am)) {
+        effective = joinMarking(marking, effective, am);
+      }
+      attachedFiles.push(a);
+    }
+    const attachmentsSha256 = attachedFiles.length > 0 ? attachmentsManifest(attachedFiles) : "";
     // Local DLP scan (on-premise; matches only rule NAMES, never the content). In `block` mode a
     // match refuses the post before anything is written; in `flag` mode the post proceeds but is
     // recorded as an audited `message.dlp_flag` and the flag rides along for live display.
@@ -494,7 +574,10 @@ function buildRouter(
       content,
       parentId: body.parentId,
       marking: formatMarking(effective),
+      attachmentsSha256,
     });
+    // Claim the uploads for this message (sets their messageId) now that it exists.
+    const attachments = attachmentIds.length > 0 ? await store.claimAttachments(message.id, attachmentIds) : [];
     if (dlpHits.length > 0) {
       // flag mode (block already returned): a provable, content-free trail on the audit chain.
       await store.appendAudit({ actor: principal.sub, action: "message.dlp_flag", target: message.id, detail: dlpHits.join(",") });
@@ -502,11 +585,129 @@ function buildRouter(
     // Echo the plaintext the client just posted (the Message row carries only the content HASH),
     // and fan the same shape out to the channel's realtime subscribers. `dlpFlags` (when present)
     // drives a live warning indicator; the durable record is the audit event above.
-    const enriched = { ...message, content, ...(dlpHits.length ? { dlpFlags: dlpHits } : {}) };
+    const enriched = {
+      ...message,
+      content,
+      ...(dlpHits.length ? { dlpFlags: dlpHits } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    };
     broadcast?.(channelId, { type: "message", message: enriched });
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
     if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content);
+  });
+
+  // ── Attachments: upload (unclaimed) then reference from a message post (attach-on-post). Bytes are
+  // sent as the RAW body with metadata in the query (?filename&contentType&marking); a size cap, the
+  // channel marking ceiling, and DLP all apply. Returns the attachment row (id + sha256) to reference. ─
+  router.add("POST", "/channels/:id/attachments", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!attachments) {
+      sendJson(res, 501, { error: "attachments_not_configured" });
+      return;
+    }
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const channel = await store.getChannel(channelId);
+    const channelMarking = channel?.cuiMarking ? parseMarking(marking, channel.cuiMarking) : null;
+    const q = new URL(req.url ?? "", "http://localhost").searchParams;
+    const filename = (q.get("filename") ?? "file").slice(0, 255);
+    const ctHeader = req.headers["content-type"];
+    const contentType =
+      (Array.isArray(ctHeader) ? ctHeader[0] : ctHeader) || q.get("contentType") || "application/octet-stream";
+    // The file's marking: requested (query) or the channel's, defaulting to the floor. A marked
+    // channel is the ceiling — a file may not exceed it.
+    let fileMarking: Marking;
+    if (q.get("marking")?.trim()) {
+      const parsed = parseMarking(marking, q.get("marking")!);
+      if (!parsed) {
+        sendJson(res, 400, { error: "unknown marking", levels: marking.levels });
+        return;
+      }
+      fileMarking = parsed;
+    } else {
+      fileMarking = channelMarking ?? { level: marking.default, caveats: [] };
+    }
+    if (channelMarking && !dominates(marking, channelMarking, fileMarking)) {
+      sendJson(res, 422, { error: "marking_exceeds_channel", channel: channel!.cuiMarking });
+      return;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await readRawBody(req, attachments.maxUploadBytes);
+    } catch (err) {
+      if ((err as { tooLarge?: boolean }).tooLarge) {
+        sendJson(res, 413, { error: "payload_too_large", maxBytes: attachments.maxUploadBytes });
+        return;
+      }
+      throw err;
+    }
+    if (bytes.length === 0) {
+      sendJson(res, 400, { error: "empty_upload" });
+      return;
+    }
+    // DLP on TEXTUAL content only (on-prem, rule NAMES never content). `block` refuses the upload.
+    const isText = contentType.startsWith("text/") || contentType === "application/json";
+    const dlpHits = isText ? dlp.scan(bytes.toString("utf8")) : [];
+    if (dlpHits.length > 0 && dlp.mode === "block") {
+      sendJson(res, 422, { error: "dlp_blocked", rules: dlpHits });
+      return;
+    }
+    const sha = sha256Hex(bytes);
+    await attachments.blobs.write(sha, bytes);
+    const attachment = await store.addAttachment({
+      channelId,
+      uploadedBy: principal.sub,
+      filename,
+      contentType,
+      byteSize: bytes.length,
+      sha256: sha,
+      marking: formatMarking(fileMarking),
+    });
+    await store.appendAudit({ actor: principal.sub, action: "attachment.upload", target: attachment.id, detail: filename });
+    if (dlpHits.length > 0) {
+      await store.appendAudit({ actor: principal.sub, action: "attachment.dlp_flag", target: attachment.id, detail: dlpHits.join(",") });
+    }
+    sendJson(res, 201, dlpHits.length ? { ...attachment, dlpFlags: dlpHits } : attachment);
+  });
+
+  // Download an attachment's bytes. Membership on its channel is re-checked (attachments are CUI), and
+  // a claimed attachment whose message was redacted is treated as purged (404).
+  router.add("GET", "/attachments/:id", async ({ res, params, principal }) => {
+    if (!attachments) {
+      sendJson(res, 501, { error: "attachments_not_configured" });
+      return;
+    }
+    const attachment = await store.getAttachment(params.id!);
+    if (!attachment) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(attachment.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (attachment.messageId) {
+      const msg = await store.getMessage(attachment.messageId);
+      if (msg?.redactedAt) {
+        sendJson(res, 404, { error: "redacted" });
+        return;
+      }
+    }
+    const bytes = await attachments.blobs.read(attachment.sha256);
+    if (!bytes) {
+      sendJson(res, 404, { error: "bytes_missing" });
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": attachment.contentType,
+      "content-length": String(bytes.length),
+      "content-disposition": `attachment; filename="${attachment.filename.replace(/["\r\n]/g, "")}"`,
+      "cache-control": "private, no-store",
+    });
+    res.end(bytes);
   });
 
   // ── Threads: a reply carries `parentId` (read above); this lists a parent's replies in seq
@@ -867,11 +1068,13 @@ export function createHttpServer(deps: {
   /** Step-up token verifier/minter. Unset ⇒ POST /auth/stepup is unavailable and any capability that
    * requires step-up fails closed (can't be satisfied). */
   stepUp?: StepUp;
+  /** Attachment byte storage + upload size cap. Unset ⇒ the upload/download routes 501. */
+  attachments?: AttachmentDeps;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

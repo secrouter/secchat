@@ -80,6 +80,11 @@ export interface Config {
    * (`SECCHAT_STEPUP_SECRET`, else the session secret). Unset ⇒ step-up can't be satisfied, so any
    * capability configured to require it fails closed. */
   stepUp?: StepUp;
+
+  /** Directory for content-addressed attachment bytes (`SECCHAT_UPLOADS_DIR`, default `./uploads`). */
+  uploadsDir: string;
+  /** Max attachment upload size in bytes (`SECCHAT_MAX_UPLOAD_BYTES`, default 25 MiB). */
+  maxUploadBytes: number;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -165,5 +170,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dlp,
     capabilities,
     stepUp,
+    uploadsDir: opt(env, "SECCHAT_UPLOADS_DIR", "./uploads"),
+    maxUploadBytes: Number(opt(env, "SECCHAT_MAX_UPLOAD_BYTES", "26214400")), // 25 MiB
   };
 }

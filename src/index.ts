@@ -22,6 +22,7 @@ import { MemoryStore } from "./store/memory.ts";
 import { PgStore } from "./store/pg.ts";
 import { migrate } from "./db/migrate.ts";
 import { attachWsHub } from "./ws/hub.ts";
+import { FsBlobStore } from "./attachments/blobs.ts";
 import type { Hub } from "./ws/hub.ts";
 import type { Runner, SessionStore, Store } from "./types.ts";
 import { fileURLToPath } from "node:url";
@@ -168,6 +169,7 @@ const server = createHttpServer({
   dlp: config.dlp,
   capabilities: config.capabilities,
   stepUp: config.stepUp,
+  attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
 });
 hub = attachWsHub(server, {
   verifyToken,

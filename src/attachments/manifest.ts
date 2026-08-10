@@ -10,9 +10,11 @@ import type { Attachment } from "../types.ts";
 
 type ManifestPart = Pick<Attachment, "sha256" | "filename" | "byteSize" | "marking">;
 
-/** The manifest digest for `attachments` (in claim/upload order), or '' when there are none. */
+/** The manifest digest for `attachments`, or '' when there are none. The per-file lines are SORTED
+ * before hashing, so the digest is canonical and ORDER-INDEPENDENT — a verifier recomputing it from
+ * the stored rows (in any read order) gets the same value. */
 export function attachmentsManifest(attachments: ManifestPart[]): string {
   if (attachments.length === 0) return "";
-  const lines = attachments.map((a) => `${a.sha256}|${a.filename}|${a.byteSize}|${a.marking}`);
+  const lines = attachments.map((a) => `${a.sha256}|${a.filename}|${a.byteSize}|${a.marking}`).sort();
   return createHash("sha256").update(lines.join("\n"), "utf8").digest("hex");
 }
