@@ -1064,7 +1064,16 @@ class _ChatScreenState extends State<ChatScreen> {
       _showError("/invite doesn't work in a direct message — its two participants are fixed.");
       return;
     }
+    // Refresh the directory first — exactly like the "New DM" picker does — so a failed or raced
+    // initial load (it's fire-and-forget in initState, and errors are swallowed) can't leave invite
+    // matching against an empty roster while DMs, which reload, still work.
+    await _loadUsers();
+    if (!mounted) return;
     final candidates = _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList();
+    if (candidates.isEmpty) {
+      _showError('The user directory is empty or unavailable right now — try again in a moment.');
+      return;
+    }
     // Tiered match so a first name or partial works, but an exact hit always wins over a looser one:
     // exact (sub/email/display name) → prefix on name/email → substring. Case-insensitive throughout.
     final matches = _matchUsers(candidates, query);
