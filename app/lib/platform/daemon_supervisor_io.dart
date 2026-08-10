@@ -5,6 +5,13 @@ import 'package:flutter/foundation.dart';
 
 import 'daemon_supervisor_api.dart';
 
+/// Where the runner daemon's pi points its model calls, wired at build time. Empty (the default)
+/// leaves pi unconfigured — set these when the deployment's gateway (SecRouter) is reachable:
+///   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal
+///   --dart-define=SECCHAT_PI_MODEL=secllm/fast
+const String _secrouterOrigin = String.fromEnvironment('SECROUTER_ORIGIN');
+const String _piModel = String.fromEnvironment('SECCHAT_PI_MODEL');
+
 /// A spawned daemon process — just the bits the supervisor needs, so a test can inject a fake.
 abstract class DaemonProcess {
   Future<int> get exitCode;
@@ -121,6 +128,12 @@ class _ProcessSupervisor implements DaemonSupervisor {
         // inherits a minimal PATH (/usr/bin:/bin:…) that omits where pi is usually installed. Prepend
         // the common tool dirs so the runner can find it. (SECCHAT_PI_RUNNER/PI_BIN still override.)
         if (Platform.isMacOS || Platform.isLinux) 'PATH': _augmentedPath(),
+        // Point pi's model calls at the gateway. Without a base URL pi has no model endpoint, so a
+        // coding session just sits idle until its lease lapses. Set at build time:
+        //   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal
+        //   --dart-define=SECCHAT_PI_MODEL=secllm/fast
+        if (_secrouterOrigin.isNotEmpty) 'PI_BASE_URL': '$_secrouterOrigin/v1',
+        if (_piModel.isNotEmpty) 'PI_MODEL': _piModel,
       });
       if (_stopping) {
         proc.kill();
