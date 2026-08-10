@@ -3,8 +3,9 @@ Copyright 2026 Austin Probe
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-SecChat packages and integrates Mattermost (https://mattermost.com), Team Edition, as the
-suite's team-chat and chat-ops surface — wired to SecSSO for single sign-on and to SecAgent
-through the @whonixnetworks/pi-mattermost bridge. Mattermost is a third-party project under
-its own license; it is not included in this repository — its container images are pulled at
-deploy time.
+SecChat is a purpose-built Node.js + PostgreSQL application with a Flutter client — the suite's
+auditable team-chat and agentic-chat surface. It deploys a PostgreSQL (https://www.postgresql.org)
+container for durable storage, authenticates users through SecSSO via OpenID Connect, routes
+governed model calls through SecRouter, and drives coding agents with the pi agent runtime. Each
+of those is a separate project under its own license, integrated at run time rather than included
+in this repository — PostgreSQL's container image is pulled at deploy time.

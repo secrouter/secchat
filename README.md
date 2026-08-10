@@ -5,8 +5,9 @@ purpose-built replacement for the Mattermost-based `secchat` and the LibreChat-b
 `secassist`. One app: people talk to each other, spawn governed agents, and every message is
 tamper-evidently logged.
 
-> **Status: rearchitecture in progress** (this `rearchitecture` branch). The prior
-> Mattermost stack lives on `main` until this reaches parity. See `docs/` for the design.
+> **Status: this rebuild is the canonical SecChat.** SecDeploy ships it as the `secchat`
+> component, replacing the former Mattermost/LibreChat stacks. The work lives on the
+> `rearchitecture` branch pending promotion to the repo default. See `docs/` for the design.
 
 ## Why it exists
 
@@ -67,26 +68,26 @@ server — see [docs/runner-daemon.md](docs/runner-daemon.md). Package it with `
 ## Deploy (Docker Compose stack)
 
 SecChat packages as a two-container Compose stack — the app plus its own Postgres — for the
-SecRouter suite's orchestrator (SecDeploy). `bootstrap/secchatng.sh` is the control helper;
-SecDeploy drives the same verbs it exposes standalone. (`secchatng` — "SecChat, next-gen" — is
-this rebuild's SecDeploy component id while it ships alongside the incumbent Mattermost `secchat`
-during the transition; deploy it with `secdeploy … --with secchatng`. It becomes plain `secchat`
-at cutover.)
+SecRouter suite's orchestrator (SecDeploy). `bootstrap/secchat.sh` is the control helper;
+SecDeploy drives the same verbs it exposes standalone. (SecChat is the canonical `secchat`
+component in SecDeploy, replacing the former Mattermost `secchat` and LibreChat `secassist`. Its
+SecSSO OIDC client id stays `secchatng` — the retained Authentik client from this rebuild's
+transitional phase — so users only ever see "SecChat".)
 
 ```bash
 cp .env.example .env
 # set SECCHAT_OIDC_ISSUER / SECCHAT_OIDC_AUDIENCE (SecSSO) and PG_PASSWORD; $EDITOR .env
-./bootstrap/secchatng.sh up          # build + start, wait for /healthz, print the wiring readout
+./bootstrap/secchat.sh up          # build + start, wait for /healthz, print the wiring readout
 ```
 
 ```
-./bootstrap/secchatng.sh up             build + start, wait, print the SSO/gateway wiring
-./bootstrap/secchatng.sh status         compose ps
-./bootstrap/secchatng.sh wiring         reprint the SecSSO + SecRouter wiring readout
-./bootstrap/secchatng.sh backup <dir>   pg_dump + .env → <dir>
-./bootstrap/secchatng.sh restore <dir>  reinitialize the stack from <dir> (REPLACES state)
-./bootstrap/secchatng.sh logs [svc]     follow logs (secchat | postgres)
-./bootstrap/secchatng.sh down [-v]      stop (-v also wipes volumes/state)
+./bootstrap/secchat.sh up             build + start, wait, print the SSO/gateway wiring
+./bootstrap/secchat.sh status         compose ps
+./bootstrap/secchat.sh wiring         reprint the SecSSO + SecRouter wiring readout
+./bootstrap/secchat.sh backup <dir>   pg_dump + .env → <dir>
+./bootstrap/secchat.sh restore <dir>  reinitialize the stack from <dir> (REPLACES state)
+./bootstrap/secchat.sh logs [svc]     follow logs (secchat | postgres)
+./bootstrap/secchat.sh down [-v]      stop (-v also wipes volumes/state)
 ```
 
 **All state lives in Postgres** — channels, messages, agents, the audit log, everything (see

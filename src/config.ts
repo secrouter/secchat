@@ -47,7 +47,7 @@ export interface Config {
   /** Confidential-client secret for the BFF's server-side token exchange. Unset ⇒ SSO login is
    * disabled (see `ssoEnabled`) — only the bearer-JWT path (and dev tokens) work. */
   oidcClientSecret?: string;
-  /** External base URL this app is reachable at (e.g. https://secchatng.sec.internal) — builds
+  /** External base URL this app is reachable at (e.g. https://secchat.sec.internal) — builds
    * the OIDC redirect_uri (`${publicUrl}/auth/callback`) and decides the cookie `Secure` flag.
    * Unset ⇒ SSO login is disabled. */
   publicUrl?: string;

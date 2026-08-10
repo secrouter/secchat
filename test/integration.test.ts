@@ -82,7 +82,7 @@ test("end-to-end: authed POST → chained persist → realtime broadcast to a su
   }
 });
 
-// ── Sprint 2: the SecAssist-killer, end to end ───────────────────────────────────────────────
+// ── Sprint 2: the governed assistant path, end to end ────────────────────────────────────────
 // Spawn an assistant, post to its channel, and prove the model reply is (a) governed as the
 // OWNER at SecRouter (X-Sec-Acting-User), (b) streamed to the WS subscriber, and (c) persisted
 // into the tamper-evident chain — all against a STUB SecRouter (no network, no real gateway).

@@ -94,13 +94,13 @@ case "${1:-help}" in
   *)
     cat <<'EOF'
 SecChat — auditable team + agentic chat backend control helper
-  ./bootstrap/secchatng.sh up             build + start, wait, print the SSO/gateway wiring
-  ./bootstrap/secchatng.sh status         compose ps
-  ./bootstrap/secchatng.sh wiring         reprint the SecSSO + SecRouter wiring readout
-  ./bootstrap/secchatng.sh backup <dir>   pg_dump + .env → <dir>
-  ./bootstrap/secchatng.sh restore <dir>  reinitialize the stack from <dir> (REPLACES state)
-  ./bootstrap/secchatng.sh logs [svc]     follow logs (secchat | postgres)
-  ./bootstrap/secchatng.sh down [-v]      stop (-v also wipes volumes/state)
+  ./bootstrap/secchat.shup             build + start, wait, print the SSO/gateway wiring
+  ./bootstrap/secchat.shstatus         compose ps
+  ./bootstrap/secchat.shwiring         reprint the SecSSO + SecRouter wiring readout
+  ./bootstrap/secchat.shbackup <dir>   pg_dump + .env → <dir>
+  ./bootstrap/secchat.shrestore <dir>  reinitialize the stack from <dir> (REPLACES state)
+  ./bootstrap/secchat.shlogs [svc]     follow logs (secchat | postgres)
+  ./bootstrap/secchat.shdown [-v]      stop (-v also wipes volumes/state)
 EOF
     ;;
 esac
