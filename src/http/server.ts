@@ -12,6 +12,7 @@ import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
+import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -250,7 +251,9 @@ async function triggerCodingAgents(
   }
   const user = await store.getUser(authorSub);
   const who = user?.displayName?.trim() || authorSub;
-  await control.sendInput(session.id, `[message from ${who}]\n${content}`);
+  // Deliver as a JSON envelope naming the sender; pi was primed for this shape at spawn
+  // (AGENT_CHAT_PRIMER). Keeps multi-member channels legible to the agent.
+  await control.sendInput(session.id, formatUserMessageForAgent(who, content));
 }
 
 function buildRouter(

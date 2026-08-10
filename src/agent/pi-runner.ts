@@ -47,6 +47,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Id, Runner, RunnerEvent } from "../types.ts";
+import { AGENT_CHAT_PRIMER } from "./chat-protocol.ts";
 
 /** Prefix on the extension's `ctx.ui.confirm()` title that marks a request as OUR gate's (vs. some
  * hypothetical other dialog) — shared between the generated extension and the parser below so the
@@ -374,6 +375,10 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
       // Never trust project-local .pi/settings.json in the workspace being operated on.
       "--no-approve",
       "--name", `secchat-${agentId}`,
+      // Prime pi for the shared-channel chat protocol: each human message arrives as a JSON envelope
+      // naming who sent it (see chat-protocol.ts). Appended (not replacing) pi's default coding
+      // system prompt, so its coding ability is untouched — this only adds the channel context.
+      "--append-system-prompt", AGENT_CHAT_PRIMER,
       "-e", extensionPath,
       "--provider", provider,
       ...(model !== undefined ? ["--model", model] : []),

@@ -1052,15 +1052,16 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// `/invite <name-or-email>` — resolve the query against the seen-users directory and add that
-  /// user to the current team channel. Only human channels (a DM's pair is fixed; an agent channel
-  /// is owner+agent). A user who has never signed in isn't in the directory yet, so can't be found.
+  /// user to the current channel. Team channels AND agent/assistant channels are collaborative —
+  /// multiple people can share one agent — so both accept invites; only a DM (whose pair is fixed)
+  /// does not. A user who has never signed in isn't in the directory yet, so can't be found.
   Future<void> _inviteToChannel(Channel channel, String query) async {
     if (query.isEmpty) {
       _showError('Usage: /invite <name-or-email>');
       return;
     }
-    if (channel.kind != ChannelKind.human) {
-      _showError('/invite works in a team channel — not a DM or agent channel.');
+    if (channel.kind == ChannelKind.dm) {
+      _showError("/invite doesn't work in a direct message — its two participants are fixed.");
       return;
     }
     final q = query.toLowerCase();

@@ -800,7 +800,7 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
 });
 
-test("posting a message in a coding channel forwards it to pi with a 'who posted it' header", async () => {
+test("posting a message in a coding channel forwards it to pi as a JSON envelope naming who posted it", async () => {
   // The canonical path: a normal message post to a coding-agent channel is persisted like any
   // message AND forwarded to the agent's pi session, prefixed with a header naming the poster.
   // Make fakeSession's channel a coding-agent channel so triggerCodingAgents fires; the fake
@@ -821,7 +821,8 @@ test("posting a message in a coding channel forwards it to pi with a 'who posted
     .map((c) => c as { sessionId: string; text: string });
   assert.equal(forwarded.length, 1, "exactly one forward to pi");
   assert.equal(forwarded[0]!.sessionId, fakeSession.id);
-  assert.equal(forwarded[0]!.text, "[message from Alice One]\nrun the build");
+  // Delivered as a JSON envelope naming the sender (pi is primed for this shape at spawn).
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build" });
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {
