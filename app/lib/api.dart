@@ -35,9 +35,13 @@ abstract class ApiClient {
   /// The SecChat origin this client talks to — used to wire the bundled runner daemon (desktop).
   Uri get origin;
 
-  /// The bearer token this client authenticates with, or null in cookie-session mode (in which case
-  /// the bundled daemon has no token to attach with — a follow-on mints a scoped runner token).
+  /// The bearer token this client authenticates with, or null in cookie-session mode.
   String? get token;
+
+  /// Mint a short-lived, owner-scoped runner token for the bundled daemon (`POST /auth/runner-token`)
+  /// — the credential the daemon attaches with. Works in cookie mode (where there's no bearer) and
+  /// is least-privilege for bearer users too. Null when the server hasn't configured runner tokens.
+  Future<String?> mintRunnerToken();
 
   Future<Principal> getMe();
 
@@ -486,6 +490,16 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> removeMember(String channelId, String memberRef) async {
     await _delete('/channels/$channelId/members/${Uri.encodeComponent(memberRef)}');
+  }
+
+  @override
+  Future<String?> mintRunnerToken() async {
+    try {
+      final data = await _post('/auth/runner-token') as Map<String, dynamic>;
+      return data['token'] as String?;
+    } catch (_) {
+      return null; // 503 (feature off) or any error → no scoped token; the caller falls back
+    }
   }
 
   @override

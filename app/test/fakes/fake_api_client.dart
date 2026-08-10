@@ -16,6 +16,16 @@ class FakeApiClient implements ApiClient {
   @override
   String? get token => 'dev.alice.eng';
 
+  /// A minted runner token to return (null ⇒ feature off); records mint calls.
+  String? runnerTokenToMint;
+  int mintRunnerTokenCalls = 0;
+
+  @override
+  Future<String?> mintRunnerToken() async {
+    mintRunnerTokenCalls++;
+    return runnerTokenToMint;
+  }
+
   FakeApiClient({
     Principal? me,
     List<Channel>? channels,

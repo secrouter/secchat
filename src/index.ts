@@ -194,6 +194,7 @@ const server = createHttpServer({
   dlp: config.dlp,
   capabilities: config.capabilities,
   stepUp: config.stepUp,
+  runnerToken: config.runnerToken,
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
 });
 hub = attachWsHub(server, {
@@ -209,7 +210,14 @@ hub = attachWsHub(server, {
   },
 });
 // Runner daemons attach here (a separate `/runner` protocol; the client hub above skips that path).
-const runnerHub = attachRunnerHub(server, { verifyToken, registry: runnerRegistry, remote: remoteRunner });
+const runnerHub = attachRunnerHub(server, {
+  verifyToken,
+  registry: runnerRegistry,
+  remote: remoteRunner,
+  // A daemon may attach with a scoped runner token (minted via POST /auth/runner-token) as well as
+  // a full OIDC/dev bearer.
+  verifyRunnerToken: config.runnerToken ? (t) => config.runnerToken!.verify(t) : undefined,
+});
 
 server.listen(config.port, config.host, () => {
   console.error(`▸ SecChat listening on http://${config.host}:${config.port} (in-memory store)`);

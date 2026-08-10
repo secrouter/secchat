@@ -22,8 +22,6 @@ import '../widgets/marking_picker.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
-
 import '../platform/daemon_supervisor.dart';
 import '../widgets/members_panel.dart';
 import '../widgets/mentions_panel.dart';
@@ -156,11 +154,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
-    // Start the bundled runner daemon on desktop (needs a bearer token — cookie-session mode has
-    // none yet; a follow-on mints a scoped runner token there).
-    if (_daemon.supported) {
-      _daemon.start(secchatUrl: widget.api.origin.toString(), token: widget.api.token ?? '');
-    }
+    // Start the bundled runner daemon on desktop.
+    if (_daemon.supported) unawaited(_startDaemon());
     _loadChannels();
     _loadUsers();
     _loadMentions();
@@ -189,6 +184,15 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       // Non-critical: presence dots just stay off until the live events arrive.
     }
+  }
+
+  /// Mint a scoped runner token and start the bundled daemon with it. The scoped token works in
+  /// cookie-session mode (no bearer) and is least-privilege for bearer users; if the server hasn't
+  /// configured runner tokens, fall back to a bearer token when one exists.
+  Future<void> _startDaemon() async {
+    final token = (await widget.api.mintRunnerToken()) ?? widget.api.token ?? '';
+    if (!mounted || token.isEmpty) return;
+    _daemon.start(secchatUrl: widget.api.origin.toString(), token: token);
   }
 
   Future<void> _loadMentions() async {

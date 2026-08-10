@@ -62,6 +62,7 @@ function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 import { DlpPolicy } from "../dlp/policy.ts";
 import { authorizeCapability, type Capability, type CapabilityPolicy, defaultCapabilityPolicy } from "../auth/capabilities.ts";
 import type { StepUp } from "../auth/stepup.ts";
+import type { RunnerToken } from "../auth/runner-token.ts";
 import { parseCookies } from "../auth/session.ts";
 
 interface RouteContext {
@@ -233,6 +234,7 @@ function buildRouter(
   notify?: Notify,
   presence?: () => string[],
   hasRemoteRunner?: (ownerSub: string) => boolean,
+  runnerToken?: RunnerToken,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -301,6 +303,19 @@ function buildRouter(
     }
     const token = await stepUp.mint(principal.sub);
     await store.appendAudit({ actor: principal.sub, action: "auth.stepup" });
+    sendJson(res, 200, { token });
+  });
+
+  // Mint a short-lived, OWNER-SCOPED runner token the caller hands to its runner daemon so the daemon
+  // can attach at /runner AS this user — the session-cookie path (no bearer to give the daemon), and
+  // least-privilege for bearer users too (the daemon gets a runner-only credential, not the bearer).
+  router.add("POST", "/auth/runner-token", async ({ res, principal }) => {
+    if (!runnerToken) {
+      sendJson(res, 503, { error: "runner_token_unavailable" });
+      return;
+    }
+    const token = await runnerToken.mint(principal.sub);
+    await store.appendAudit({ actor: principal.sub, action: "auth.runner_token" });
     sendJson(res, 200, { token });
   });
 
@@ -1278,11 +1293,13 @@ export function createHttpServer(deps: {
   /** True when an owner has a runner daemon attached — lets a coding-agent spawn record hostType
    * "local" (routed to the daemon) vs "server". Unset ⇒ always "server". */
   hasRemoteRunner?: (ownerSub: string) => boolean;
+  /** Runner-token minter (POST /auth/runner-token). Unset ⇒ that route is 503. */
+  runnerToken?: RunnerToken;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

@@ -13,6 +13,7 @@ import {
 import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
 import { type CapabilityPolicy, type CapabilityRule, defaultCapabilityPolicy } from "./auth/capabilities.ts";
 import { makeStepUp, type StepUp } from "./auth/stepup.ts";
+import { makeRunnerToken, type RunnerToken } from "./auth/runner-token.ts";
 
 export interface Config {
   host: string;
@@ -80,6 +81,10 @@ export interface Config {
    * (`SECCHAT_STEPUP_SECRET`, else the session secret). Unset ⇒ step-up can't be satisfied, so any
    * capability configured to require it fails closed. */
   stepUp?: StepUp;
+
+  /** Runner token minter/verifier — the daemon credential a client mints (POST /auth/runner-token).
+   * Present when `SECCHAT_RUNNER_TOKEN_SECRET` (else the session secret) is set. */
+  runnerToken?: RunnerToken;
 
   /** Directory for content-addressed attachment bytes (`SECCHAT_UPLOADS_DIR`, default `./uploads`). */
   uploadsDir: string;
@@ -149,6 +154,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // Step-up signing: a dedicated secret, else the session secret. Absent ⇒ step-up unavailable.
   const stepUpSecret = env.SECCHAT_STEPUP_SECRET?.trim() || sessionSecret;
   const stepUp = stepUpSecret ? makeStepUp(stepUpSecret, Number(opt(env, "SECCHAT_STEPUP_TTL", "900"))) : undefined;
+  // Runner-token signing (the daemon credential a cookie-session user mints): a dedicated secret,
+  // else the session secret. Absent ⇒ POST /auth/runner-token is 503 (a bearer/dev daemon can still
+  // attach with its own token). Longer TTL than step-up — it authorizes a work-session's runner.
+  const runnerTokenSecret = env.SECCHAT_RUNNER_TOKEN_SECRET?.trim() || sessionSecret;
+  const runnerToken = runnerTokenSecret ? makeRunnerToken(runnerTokenSecret, Number(opt(env, "SECCHAT_RUNNER_TOKEN_TTL", "43200"))) : undefined;
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -170,6 +180,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dlp,
     capabilities,
     stepUp,
+    runnerToken,
     uploadsDir: opt(env, "SECCHAT_UPLOADS_DIR", "./uploads"),
     maxUploadBytes: Number(opt(env, "SECCHAT_MAX_UPLOAD_BYTES", "26214400")), // 25 MiB
   };

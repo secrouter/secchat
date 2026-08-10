@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/commands.dart';
@@ -34,6 +35,40 @@ void main() {
   // timers under the test binding).
   setUp(() => debugDaemonSupervisorFactory = () => NoopDaemonSupervisor());
   tearDownAll(() => debugDaemonSupervisorFactory = createDaemonSupervisor);
+
+  testWidgets('on desktop, the daemon starts with a minted scoped runner token', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900); // the runner chip widens the top bar
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final sup = _RecordingSupervisor();
+    debugDaemonSupervisorFactory = () => sup; // supported=true, records start()
+    final fake = FakeApiClient(me: _principal, channels: const [])..runnerTokenToMint = 'rtok-123';
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(fake.mintRunnerTokenCalls, 1, reason: 'minted a scoped runner token');
+    expect(sup.startedToken, 'rtok-123', reason: 'started the daemon with the scoped token, not the bearer');
+    expect(sup.startedUrl, isNotNull);
+  });
+
+  testWidgets('when runner tokens are unconfigured, the daemon falls back to the bearer token', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final sup = _RecordingSupervisor();
+    debugDaemonSupervisorFactory = () => sup;
+    final fake = FakeApiClient(me: _principal, channels: const [])..runnerTokenToMint = null; // 503 / off
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    expect(sup.startedToken, fake.token, reason: 'fell back to the bearer token');
+  });
 
   testWidgets(
     'ChatScreen renders channels and messages, including a redacted one as redacted text',
@@ -1105,4 +1140,30 @@ void main() {
     expect(fake.redactCalls, hasLength(1));
     expect(find.text('message redacted'), findsOneWidget);
   });
+}
+
+/// A DaemonSupervisor that reports itself as supported (like desktop) and records the start() args,
+/// without launching any real process — lets a widget test assert on how the daemon was wired.
+class _RecordingSupervisor implements DaemonSupervisor {
+  final _state = ValueNotifier<RunnerDaemonState>(RunnerDaemonState.off);
+  String? startedUrl;
+  String? startedToken;
+
+  @override
+  ValueListenable<RunnerDaemonState> get state => _state;
+
+  @override
+  bool get supported => true;
+
+  @override
+  void start({required String secchatUrl, required String token}) {
+    startedUrl = secchatUrl;
+    startedToken = token;
+  }
+
+  @override
+  Future<void> stop() async {}
+
+  @override
+  void dispose() => _state.dispose();
 }

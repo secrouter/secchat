@@ -28,6 +28,10 @@ export function attachRunnerHub(
     verifyToken: VerifyToken;
     registry: RunnerRegistry;
     remote: RemoteRunner;
+    /** Verify a scoped runner token (auth/runner-token.ts). Tried FIRST — a cookie-session desktop
+     * user mints one of these for its daemon; a standalone daemon on a server still authenticates
+     * with its own OIDC bearer via `verifyToken`. Unset ⇒ only the bearer path. */
+    verifyRunnerToken?: (token: string) => Promise<{ sub: string } | null>;
   },
 ): RunnerHub {
   // runnerId -> its socket, so a superseded daemon (same owner reconnecting) can be closed.
@@ -56,7 +60,9 @@ export function attachRunnerHub(
     try {
       const token = extractToken(req);
       if (!token) throw new Error("no token");
-      ownerSub = (await deps.verifyToken(token)).sub;
+      // A scoped runner token (the common desktop path) first; else a full OIDC/dev bearer.
+      const viaRunner = deps.verifyRunnerToken ? await deps.verifyRunnerToken(token) : null;
+      ownerSub = viaRunner ? viaRunner.sub : (await deps.verifyToken(token)).sub;
     } catch {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
