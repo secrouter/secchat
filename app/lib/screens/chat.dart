@@ -91,6 +91,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // model picker. Loaded once at boot; empty (or a failed load) just hides the
   // picker, leaving the deployment default in effect.
   List<ModelInfo> _models = const [];
+
+  // Whether the sidebar reveals archived channels (off by default — archiving is
+  // the declutter path for heavy testing).
+  bool _showArchived = false;
   final Set<String> _endedSessionIds = {};
   int _localEchoSeq = 0;
 
@@ -200,6 +204,30 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       // Non-critical: no gateway / list failed → the header picker just stays
       // hidden and the deployment default model applies.
+    }
+  }
+
+  /// Archive or restore a channel from the sidebar, updating the local list
+  /// optimistically so it hides/reappears immediately.
+  Future<void> _archiveChannel(Channel channel, bool archived) async {
+    setState(() {
+      _channels = [
+        for (final c in _channels) c.id == channel.id ? c.withArchived(archived) : c,
+      ];
+      if (_selected?.id == channel.id) _selected = _selected!.withArchived(archived);
+    });
+    try {
+      await widget.api.archiveChannel(channel.id, archived: archived);
+    } catch (error) {
+      // Roll back on failure.
+      if (!mounted) return;
+      setState(() {
+        _channels = [
+          for (final c in _channels) c.id == channel.id ? c.withArchived(!archived) : c,
+        ];
+        if (_selected?.id == channel.id) _selected = _selected!.withArchived(!archived);
+      });
+      _showError(error);
     }
   }
 
@@ -1214,6 +1242,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   onNewDm: _handleNewDm,
                   onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
                   onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
+                  onArchive: _archiveChannel,
+                  showArchived: _showArchived,
+                  onToggleShowArchived: () =>
+                      setState(() => _showArchived = !_showArchived),
                 ),
                 Expanded(child: _buildMain()),
               ],

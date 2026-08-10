@@ -105,6 +105,12 @@ const store = {
   async getChannel(id: string) {
     return channelsById.get(id) ?? null;
   },
+  async setChannelArchived(id: string, archived: boolean) {
+    const channel = channelsById.get(id) as (FakeChannel & { archived?: boolean }) | undefined;
+    if (!channel) throw new Error(`unknown channel ${id}`);
+    channel.archived = archived;
+    return channel;
+  },
   async addMember(m: { channelId: string; memberRef: string }) {
     const members = channelMembers.get(m.channelId) ?? new Set<string>();
     members.add(m.memberRef);
@@ -671,6 +677,44 @@ test("PATCH /agents/:id is 404 for an unknown agent and 400 without a model", as
     body: JSON.stringify({}),
   });
   assert.equal(bad.status, 400);
+});
+
+test("POST /channels/:id/archive toggles the archived flag (member only)", async () => {
+  const created = await (await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "to-archive" }),
+  })).json() as { id: string };
+
+  // Archive (default true).
+  const arch = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(arch.status, 200);
+  assert.equal((await arch.json() as { archived?: boolean }).archived, true);
+
+  // …and it shows on GET /channels.
+  const listed = await (await fetch(`${baseUrl}/channels`, { headers: { authorization: "Bearer good" } })).json() as
+    Array<{ id: string; archived?: boolean }>;
+  assert.equal(listed.find((c) => c.id === created.id)?.archived, true);
+
+  // Restore.
+  const restore = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ archived: false }),
+  });
+  assert.equal((await restore.json() as { archived?: boolean }).archived, false);
+
+  // A non-member may not.
+  const forbidden = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(forbidden.status, 403);
 });
 
 test("an unmatched route is 404", async () => {

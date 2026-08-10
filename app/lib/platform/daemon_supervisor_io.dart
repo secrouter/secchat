@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -89,8 +90,43 @@ String? _bundledCaPath() {
   return null;
 }
 
-Future<DaemonProcess> _spawnReal(String executable, List<String> args, Map<String, String> environment) async =>
-    _RealDaemonProcess(await Process.start(executable, args, environment: environment));
+Future<DaemonProcess> _spawnReal(String executable, List<String> args, Map<String, String> environment) async {
+  final proc = await Process.start(executable, args, environment: environment);
+  // The runner daemon's stdout/stderr (and pi's, via SECCHAT_PI_DEBUG) is otherwise discarded.
+  // Tee it to ~/Library/Logs/SecChat/runnerd.log so a coding session that dies can be diagnosed.
+  final sink = _daemonLog();
+  if (sink != null) {
+    void tee(Stream<List<int>> s, String tag) {
+      s
+          .transform(systemEncoding.decoder)
+          .transform(const LineSplitter())
+          .listen((line) => sink.writeln('[$tag] $line'), onError: (_) {});
+    }
+    tee(proc.stdout, 'out');
+    tee(proc.stderr, 'err');
+  }
+  return _RealDaemonProcess(proc);
+}
+
+IOSink? _cachedDaemonLog;
+bool _daemonLogTried = false;
+
+/// Append-mode log sink at ~/Library/Logs/SecChat/runnerd.log (macOS) / $HOME/.secchat (else),
+/// opened once. Null if it can't be created (the daemon still runs; just unlogged).
+IOSink? _daemonLog() {
+  if (_daemonLogTried) return _cachedDaemonLog;
+  _daemonLogTried = true;
+  try {
+    final home = Platform.environment['HOME'];
+    if (home == null) return null;
+    final dir = Directory(Platform.isMacOS ? '$home/Library/Logs/SecChat' : '$home/.secchat');
+    dir.createSync(recursive: true);
+    _cachedDaemonLog = File('${dir.path}/runnerd.log').openWrite(mode: FileMode.append);
+  } catch (_) {
+    _cachedDaemonLog = null;
+  }
+  return _cachedDaemonLog;
+}
 
 class _RealDaemonProcess implements DaemonProcess {
   _RealDaemonProcess(this._p);
@@ -153,6 +189,9 @@ class _ProcessSupervisor implements DaemonSupervisor {
         // pi's offline lockdown (see pi-runner's PI_OFFLINE) — the gateway is the one allowed
         // egress.
         'SECCHAT_PI_ALLOW_EGRESS': '1',
+        // Log pi's spawn args + raw stdout/stderr through the daemon (captured to the runner log
+        // below) — so a coding session that misbehaves can actually be diagnosed.
+        'SECCHAT_PI_DEBUG': '1',
         // …and it verifies the gateway's TLS against the suite CA (SecCert). pi is its own Node
         // process that doesn't consult the macOS keychain, so hand it the CA bundled in the app.
         if (_bundledCaPath() case final ca?) 'NODE_EXTRA_CA_CERTS': ca,

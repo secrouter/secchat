@@ -118,6 +118,13 @@ export class MemoryStore implements Store, SessionStore {
     return channel;
   }
 
+  async setChannelArchived(channelId: Id, archived: boolean): Promise<Channel> {
+    const channel = this.#channels.get(channelId);
+    if (!channel) throw new Error(`MemoryStore.setChannelArchived: unknown channel ${channelId}`);
+    channel.archived = archived;
+    return channel;
+  }
+
   async addMember(m: Member): Promise<void> {
     const members = this.#members.get(m.channelId);
     if (!members) throw new Error(`MemoryStore.addMember: unknown channel ${m.channelId}`);

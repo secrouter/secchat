@@ -168,6 +168,10 @@ abstract class ApiClient {
   /// from [listModels], including `auto` (router-chosen). Owner-only server-side.
   Future<void> setAgentModel(String agentId, String model);
 
+  /// Archive (or, with `archived: false`, restore) a channel — a soft-hide for
+  /// the sidebar (`POST /channels/:id/archive`).
+  Future<void> archiveChannel(String channelId, {bool archived = true});
+
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {
     String scope = 'once',
@@ -591,6 +595,11 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> setAgentModel(String agentId, String model) async {
     await _patch('/agents/$agentId', {'model': model});
+  }
+
+  @override
+  Future<void> archiveChannel(String channelId, {bool archived = true}) async {
+    await _post('/channels/$channelId/archive', {'archived': archived});
   }
 
   @override

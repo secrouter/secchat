@@ -121,6 +121,7 @@ class Channel {
     this.agentKind,
     this.agentId,
     this.agentModel,
+    this.archived = false,
   });
 
   final String id;
@@ -144,6 +145,10 @@ class Channel {
   /// Null ⇒ unset (the deployment default applies).
   final String? agentModel;
 
+  /// Archived channels are hidden from the sidebar by default (a soft-hide for
+  /// decluttering). Toggled via `POST /channels/:id/archive`.
+  final bool archived;
+
   /// The channel's classification level, when marked. When set, the channel IS
   /// the portion — every message inherits it — and the composer locks its
   /// marking picker to this level. Null ⇒ unmarked (per-message marking).
@@ -160,6 +165,7 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: agentModel,
+    archived: archived,
   );
 
   /// A copy with a new [agentModel] — used after the header picker switches the
@@ -173,6 +179,7 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: model,
+    archived: archived,
   );
 
   /// For a DM, the participant sub that isn't [me] (the person you're talking
@@ -197,6 +204,21 @@ class Channel {
         : AgentKind.fromWire(json['agentKind'] as String?),
     agentId: json['agentId'] as String?,
     agentModel: json['agentModel'] as String?,
+    archived: json['archived'] as bool? ?? false,
+  );
+
+  /// A copy with a new [archived] state — used after the sidebar toggles it so
+  /// the list updates without a full reload.
+  Channel withArchived(bool value) => Channel(
+    id: id,
+    kind: kind,
+    name: name,
+    members: members,
+    cuiMarking: cuiMarking,
+    agentKind: agentKind,
+    agentId: agentId,
+    agentModel: agentModel,
+    archived: value,
   );
 }
 

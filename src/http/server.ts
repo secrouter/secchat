@@ -412,6 +412,27 @@ function buildRouter(
   // marking or RAISE it; only an admin may DOWNGRADE (lower the level) — loosening a control is a
   // privileged act. Validated against the ladder; audited (`channel.mark`) by the store; a live
   // `channel_marking` event updates every viewer's banner.
+  // Archive / unarchive a channel (a member soft-hide for decluttering — see Channel.archived).
+  // Any member may toggle it; nothing is deleted.
+  router.add("POST", "/channels/:id/archive", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    const channel = await store.getChannel(channelId);
+    if (!channel) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { archived?: boolean };
+    const archived = body.archived !== false; // default true (archive); pass {archived:false} to restore
+    const updated = await store.setChannelArchived(channelId, archived);
+    await store.appendAudit({ actor: principal.sub, action: archived ? "channel.archive" : "channel.unarchive", target: channelId });
+    broadcast?.(channelId, { type: "channel_archived", channelId, archived });
+    sendJson(res, 200, updated);
+  });
+
   router.add("POST", "/channels/:id/marking", async ({ req, res, params, principal }) => {
     const channelId = params.id!;
     const channel = await store.getChannel(channelId);

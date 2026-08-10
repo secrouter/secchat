@@ -438,6 +438,15 @@ class FakeApiClient implements ApiClient {
     setAgentModelCalls.add((agentId: agentId, model: model));
   }
 
+  /// Every `archiveChannel` call, in order, as `(channelId, archived)`.
+  final List<({String channelId, bool archived})> archiveChannelCalls = [];
+
+  @override
+  Future<void> archiveChannel(String channelId, {bool archived = true}) async {
+    _maybeThrow('archiveChannel');
+    archiveChannelCalls.add((channelId: channelId, archived: archived));
+  }
+
   @override
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {

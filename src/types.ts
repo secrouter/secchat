@@ -57,6 +57,9 @@ export interface Channel {
    * marking/policy.ts). When set, the channel IS the portion — every message inherits it and no
    * message may exceed it (spillage block). Unset ("unspecified") ⇒ marking is per-message. */
   cuiMarking?: string;
+  /** Archived channels are hidden from the default sidebar list (a member can still reopen them
+   * via "show archived"). A soft-hide for decluttering — nothing is deleted. */
+  archived?: boolean;
   createdBy: string; // Principal.sub
   createdAt: string; // ISO-8601 UTC
 }
@@ -285,6 +288,8 @@ export interface Store {
    * The route owns authz (member to set/raise; admin to downgrade) and validates the level against
    * the policy; the store just persists + audits atomically. Returns the updated channel. */
   setChannelMarking(channelId: Id, marking: string, by: string): Promise<Channel>;
+  /** Archive or unarchive a channel (soft-hide for the sidebar — see Channel.archived). */
+  setChannelArchived(channelId: Id, archived: boolean): Promise<Channel>;
   addMember(m: Member): Promise<void>;
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;
