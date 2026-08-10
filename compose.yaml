@@ -32,11 +32,22 @@ services:
       DATABASE_URL: postgres://secchat:${PG_PASSWORD}@postgres:5432/secchat
       SECCHAT_HOST: 0.0.0.0
       SECCHAT_PORT: "47010"
+      # OIDC discovery/token-exchange fetches SECCHAT_OIDC_ISSUER + SECROUTER_URL (sec.internal)
+      # — that DNS only resolves via the HOST's resolver (macOS /etc/resolver, or SecDNS on
+      # fedora-fips), invisible to a container's own DNS. host-gateway reaches secproxy, the only
+      # thing that actually terminates TLS for these hostnames; the suite CA below lets Node
+      # verify that cert instead of failing with UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+      NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-/etc/ssl/certs/suite-ca.pem}
+    extra_hosts:
+      - "secsso.sec.internal:host-gateway"
+      - "secrouter.sec.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "${SECCHAT_HTTP_PORT:-47010}:47010"
+    volumes:
+      - ${SUITE_CA_PATH:-../../out/seccert-root.pem}:/etc/ssl/certs/suite-ca.pem:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:47010/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

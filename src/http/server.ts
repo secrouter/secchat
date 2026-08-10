@@ -205,6 +205,7 @@ async function triggerAssistants(
   channelId: string,
   promptedBy: string,
   userText: string,
+  defaultModel?: string,
 ): Promise<void> {
   const members = await store.listMembers(channelId);
   for (const m of members) {
@@ -212,7 +213,7 @@ async function triggerAssistants(
     const agent = await store.getAgent(m.memberRef);
     if (agent?.kind !== "assistant") continue;
     try {
-      await handleAssistantTurn({ store, llm, broadcast }, { channelId, agent, promptedBy, userText });
+      await handleAssistantTurn({ store, llm, broadcast, defaultModel }, { channelId, agent, promptedBy, userText });
     } catch (err) {
       broadcast?.(channelId, { type: "assistant_error", agentId: agent.id, error: String(err) });
     }
@@ -235,6 +236,7 @@ function buildRouter(
   presence?: () => string[],
   hasRemoteRunner?: (ownerSub: string) => boolean,
   runnerToken?: RunnerToken,
+  assistantModel?: string,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -446,7 +448,7 @@ function buildRouter(
   // Store method — the same isMember gate every per-channel route below already applies.
   router.add("GET", "/channels", async ({ res, principal }) => {
     const chans = await store.listChannels();
-    const mine: Array<Channel & { members?: string[] }> = [];
+    const mine: Array<Channel & { members?: string[]; agentKind?: AgentKind; agentId?: string; agentModel?: string }> = [];
     for (const c of chans) {
       if (!(await store.isMember(c.id, principal.sub))) continue;
       if (c.kind === "dm") {
@@ -456,6 +458,14 @@ function buildRouter(
           .filter((m) => m.memberType === "user")
           .map((m) => m.memberRef);
         mine.push({ ...c, members });
+      } else if (c.kind === "agent") {
+        // `kind: "agent"` alone doesn't say assistant vs coding — recover the agent's kind, id, and
+        // current model from its channel membership so a client reloading (or a user who didn't
+        // create the agent) renders the right channel type AND can show/switch the model in the
+        // header (see the model picker) instead of defaulting every agent channel to assistant.
+        const agentMember = (await store.listMembers(c.id)).find((m) => m.memberType === "agent");
+        const agent = agentMember ? await store.getAgent(agentMember.memberRef) : null;
+        mine.push(agent ? { ...c, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model } : c);
       } else {
         mine.push(c);
       }
@@ -642,7 +652,7 @@ function buildRouter(
     broadcast?.(channelId, { type: "message", message: enriched });
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
-    if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content);
+    if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel);
   });
 
   // ── Attachments: upload (unclaimed) then reference from a message post (attach-on-post). Bytes are
@@ -1150,6 +1160,45 @@ function buildRouter(
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
   });
 
+  // The models the gateway offers, for the chat window's model picker. Proxies SecRouter's
+  // /v1/models (see secrouter/client.ts). Returns [] when no LLM gateway is wired or the client
+  // can't list; a 502 when SecRouter is wired but the call fails, so the picker can say so.
+  router.add("GET", "/models", async ({ res }) => {
+    if (!llm?.listModels) {
+      sendJson(res, 200, { data: [] });
+      return;
+    }
+    try {
+      sendJson(res, 200, { data: await llm.listModels() });
+    } catch (err) {
+      sendJson(res, 502, { error: "models_unavailable", reason: String(err) });
+    }
+  });
+
+  // Change an assistant's model live (the chat window's header picker). Owner-only — an agent
+  // always acts as its owner, so only they may repoint its model. `model` is any id GET /models
+  // offered, including "auto" (SecRouter classifies + picks per turn).
+  router.add("PATCH", "/agents/:id", async ({ req, res, params, principal }) => {
+    const agent = await store.getAgent(params.id!);
+    if (!agent) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (agent.ownerSub !== principal.sub) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { model?: string };
+    const model = typeof body.model === "string" ? body.model.trim() : "";
+    if (!model) {
+      sendJson(res, 400, { error: "bad_request", reason: "model is required" });
+      return;
+    }
+    const updated = await store.updateAgentModel(agent.id, model);
+    await store.appendAudit({ actor: principal.sub, action: "agent.set_model", target: agent.id });
+    sendJson(res, 200, updated);
+  });
+
   // ── Coding-agent session routes (Sprint 4). `control` is the injected AgentControl port; a
   // deployment/test that doesn't wire one gets a clean 404 on every session route rather than a
   // crash on an undefined `control`.
@@ -1295,11 +1344,13 @@ export function createHttpServer(deps: {
   hasRemoteRunner?: (ownerSub: string) => boolean;
   /** Runner-token minter (POST /auth/runner-token). Unset ⇒ that route is 503. */
   runnerToken?: RunnerToken;
+  /** Default model for an assistant with no explicit one (config.assistantModel). Unset ⇒ "auto". */
+  assistantModel?: string;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

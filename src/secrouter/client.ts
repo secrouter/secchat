@@ -5,7 +5,7 @@
 // service identity — this header is set unconditionally, regardless of who prompted the turn.
 
 import type { Config } from "../config.ts";
-import type { LlmClient, LlmCompleteRequest } from "../types.ts";
+import type { LlmClient, LlmCompleteRequest, LlmModel } from "../types.ts";
 
 type SecRouterClientConfig = Pick<Config, "secrouterUrl" | "secrouterToken">;
 
@@ -23,7 +23,24 @@ export function makeLlmClient(cfg: SecRouterClientConfig): LlmClient {
     complete(req: LlmCompleteRequest): AsyncIterable<string> {
       return streamCompletion(cfg, req);
     },
+    listModels(): Promise<LlmModel[]> {
+      return listModels(cfg);
+    },
   };
+}
+
+/** GETs SecRouter's OpenAI-compatible `/v1/models` and returns the offered models for the chat
+ * window's picker. Presents the same service token as `complete`. Throws on a non-2xx response so
+ * the route can surface a clean error rather than an empty list that looks like "no models". */
+async function listModels(cfg: SecRouterClientConfig): Promise<LlmModel[]> {
+  const headers: Record<string, string> = {};
+  if (cfg.secrouterToken) headers["Authorization"] = `Bearer ${cfg.secrouterToken}`;
+  const response = await fetch(`${cfg.secrouterUrl}/v1/models`, { headers });
+  if (!response.ok) throw new Error(`SecRouter list models failed with status ${response.status}`);
+  const body = (await response.json()) as { data?: Array<{ id?: string; owned_by?: string }> };
+  return (body.data ?? [])
+    .filter((m): m is { id: string; owned_by?: string } => typeof m.id === "string")
+    .map((m) => ({ id: m.id, ownedBy: m.owned_by }));
 }
 
 async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteRequest): AsyncGenerator<string> {

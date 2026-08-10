@@ -10,6 +10,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'platform/browser_redirect.dart';
+import 'platform/ws_connect.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
@@ -159,6 +160,14 @@ abstract class ApiClient {
     required String name,
   });
 
+  /// The models the gateway offers (`GET /models`), for the header's model
+  /// picker. Empty when no gateway is wired.
+  Future<List<ModelInfo>> listModels();
+
+  /// Switch an assistant's model live (`PATCH /agents/:id`). `model` is any id
+  /// from [listModels], including `auto` (router-chosen). Owner-only server-side.
+  Future<void> setAgentModel(String agentId, String model);
+
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {
     String scope = 'once',
@@ -219,12 +228,21 @@ abstract class ApiClient {
 /// interpretation consistent with "one connect+subscribe per opened
 /// channel" and the events' own shapes.
 class HttpApiClient implements ApiClient {
-  HttpApiClient({this.token, Uri? origin}) : origin = origin ?? Uri.base;
+  HttpApiClient({this.token, this.sessionToken, Uri? origin}) : origin = origin ?? Uri.base;
 
   /// The bearer token, or `null` for session (cookie) mode. See the class
   /// doc for what each mode sends on the wire.
   @override
   final String? token;
+
+  /// The SecChat session token from a NATIVE (desktop) SSO login — see
+  /// `platform/native_sso.dart`. On the web the `secchat_session` cookie is
+  /// httpOnly and rides same-origin requests automatically; a desktop app can't
+  /// read that cookie, so it captures the token via the loopback handoff and
+  /// this client re-attaches it as a `Cookie: secchat_session=…` header it sets
+  /// itself (on both HTTP requests and the WebSocket upgrade). Null on web and in
+  /// bearer/dev mode.
+  final String? sessionToken;
   @override
   final Uri origin;
 
@@ -239,12 +257,20 @@ class HttpApiClient implements ApiClient {
     final token = this.token;
     return <String, String>{
       if (token != null) 'Authorization': 'Bearer $token',
+      if (sessionToken != null) 'Cookie': 'secchat_session=$sessionToken',
       if (_stepUpToken != null) 'X-Sec-StepUp': _stepUpToken!,
       'Content-Type': 'application/json',
     };
   }
 
-  Uri _uri(String path) => origin.replace(path: path);
+  // Parse the path so a `?query` in it becomes a real query, not part of the
+  // path. `origin.replace(path: '/x/messages?limit=50')` would percent-encode
+  // the `?` to `%3F` and the request would 404 (the route never matches). Callers
+  // like getMessagePage/search legitimately pass a query string here.
+  Uri _uri(String path) {
+    final ref = Uri.parse(path);
+    return origin.replace(path: ref.path, query: ref.hasQuery ? ref.query : null);
+  }
 
   dynamic _decode(http.Response res) {
     if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -283,6 +309,15 @@ class HttpApiClient implements ApiClient {
 
   Future<dynamic> _delete(String path) async {
     final res = await _http.delete(_uri(path), headers: _headers);
+    return _decode(res);
+  }
+
+  Future<dynamic> _patch(String path, [Object? body]) async {
+    final res = await _http.patch(
+      _uri(path),
+      headers: _headers,
+      body: body == null ? null : jsonEncode(body),
+    );
     return _decode(res);
   }
 
@@ -546,6 +581,19 @@ class HttpApiClient implements ApiClient {
   );
 
   @override
+  Future<List<ModelInfo>> listModels() async {
+    final data = await _get('/models') as Map<String, dynamic>;
+    return (data['data'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => ModelInfo.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  @override
+  Future<void> setAgentModel(String agentId, String model) async {
+    await _patch('/agents/$agentId', {'model': model});
+  }
+
+  @override
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {
     String scope = 'once',
@@ -594,7 +642,16 @@ class HttpApiClient implements ApiClient {
           ? {'token': token}
           : const <String, String>{},
     );
-    final socket = WebSocketChannel.connect(wsUri);
+    // Native session mode (desktop): the httpOnly session cookie can't ride the
+    // upgrade on its own (no browser cookie jar), so attach it as a header — the
+    // io WebSocket honours it; on web the browser already sends the cookie and
+    // the header arg is ignored (see platform/ws_connect.dart).
+    final socket = wsConnect(
+      wsUri,
+      headers: sessionToken != null
+          ? {'Cookie': 'secchat_session=$sessionToken'}
+          : null,
+    );
     _sockets.add(socket);
     // The all-channels socket is the one typing frames ride out on — keep a handle to it.
     if (firstFrame['type'] == 'subscribeAll') _globalSocket = socket;
