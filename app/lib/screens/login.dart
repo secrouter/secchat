@@ -21,6 +21,7 @@ class LoginScreen extends StatefulWidget {
   const LoginScreen({
     super.key,
     required this.onSignIn,
+    this.onSsoLogin,
     this.ssoAvailable = false,
     this.ssoError,
   });
@@ -28,6 +29,14 @@ class LoginScreen extends StatefulWidget {
   /// Called with the trimmed username and the admin checkbox state.
   /// Returns an error message to display, or `null` on success.
   final Future<String?> Function(String username, bool isAdmin) onSignIn;
+
+  /// Drives the "Sign in with SecSSO" button. On the web this is null and the
+  /// button falls back to [redirectBrowserTo] (a same-origin browser
+  /// navigation to `/auth/login`, whose cookie the browser keeps). On desktop
+  /// app.dart supplies the native loopback flow (see `platform/native_sso.dart`);
+  /// it returns an error message to display, or null on success (the app has
+  /// already swapped to the chat screen by then).
+  final Future<String?> Function()? onSsoLogin;
 
   /// Whether the backend reports SSO as configured (`GET /auth/status` ->
   /// `{"sso": true}`). Controls whether the primary "Sign in with SecSSO"
@@ -62,9 +71,26 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  void _signInWithSso() {
-    // A path-absolute target, not a full "<origin>/auth/login" string: the
-    // browser resolves a path-absolute navigation against the current
+  Future<void> _signInWithSso() async {
+    // Desktop: run the native loopback flow app.dart wired up. It drives the
+    // whole thing and swaps to the chat screen itself on success; we only
+    // surface an error string here.
+    final onSso = widget.onSsoLogin;
+    if (onSso != null) {
+      setState(() {
+        _submitting = true;
+        _error = null;
+      });
+      final error = await onSso();
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _error = error;
+      });
+      return;
+    }
+    // Web: a path-absolute target, not a full "<origin>/auth/login" string:
+    // the browser resolves a path-absolute navigation against the current
     // origin on its own, which is exactly the backend's origin here (the
     // backend serves this app), so there is nothing to gain by
     // reconstructing that origin by hand -- and doing so via `Uri.base`

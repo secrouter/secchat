@@ -58,6 +58,14 @@ interface FlowState {
   /** True when this flow is a step-up re-auth (prompt=login) rather than a fresh login — the
    * callback then mints a step-up proof cookie instead of a session cookie. */
   stepUp: boolean;
+  /** Native (desktop) login loopback: when set, the callback hands the freshly minted session
+   * token back to a local `http://127.0.0.1:<nativePort>/` listener (the desktop app started one
+   * per RFC 8252) instead of setting an httpOnly cookie a native app could never read. The
+   * browser still runs the whole OIDC dance (this flow cookie round-trips in the browser); only
+   * the final step differs. `nativeState` is echoed to the loopback so the app confirms the
+   * response belongs to the login it initiated (a local-process CSRF guard). */
+  nativePort?: number;
+  nativeState?: string;
 }
 
 function flowKey(secret: string): Uint8Array {
@@ -66,7 +74,10 @@ function flowKey(secret: string): Uint8Array {
 
 async function signFlowCookie(flow: FlowState, secret: string): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ state: flow.state, codeVerifier: flow.codeVerifier, nonce: flow.nonce, next: flow.next, stepUp: flow.stepUp })
+  return new SignJWT({
+    state: flow.state, codeVerifier: flow.codeVerifier, nonce: flow.nonce, next: flow.next,
+    stepUp: flow.stepUp, nativePort: flow.nativePort, nativeState: flow.nativeState,
+  })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(FLOW_ISSUER)
     .setAudience(FLOW_ISSUER)
@@ -83,11 +94,15 @@ async function verifyFlowCookie(token: string, secret: string): Promise<FlowStat
     issuer: FLOW_ISSUER,
     audience: FLOW_ISSUER,
   });
-  const { state, codeVerifier, nonce, next, stepUp } = payload;
+  const { state, codeVerifier, nonce, next, stepUp, nativePort, nativeState } = payload;
   if (typeof state !== "string" || typeof codeVerifier !== "string" || typeof nonce !== "string" || typeof next !== "string") {
     throw new Error("malformed OIDC flow cookie");
   }
-  return { state, codeVerifier, nonce, next, stepUp: stepUp === true };
+  return {
+    state, codeVerifier, nonce, next, stepUp: stepUp === true,
+    nativePort: typeof nativePort === "number" ? nativePort : undefined,
+    nativeState: typeof nativeState === "string" ? nativeState : undefined,
+  };
 }
 
 function randomToken(): string {
@@ -117,6 +132,15 @@ function safeNext(raw: string | null): string {
   if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
   if (hasControlOrSpace(raw)) return "/";
   return raw;
+}
+
+/** Parse a native-login loopback port, accepting ONLY an unprivileged port a local app could bind
+ * (1024–65535). Returns undefined for anything else, so the callback's loopback host stays a
+ * hardcoded 127.0.0.1:<validated-port> — never an attacker-influenced target (no open redirect). */
+function parseLoopbackPort(raw: string | null): number | undefined {
+  if (!raw || !/^\d{4,5}$/.test(raw)) return undefined;
+  const port = Number(raw);
+  return port >= 1024 && port <= 65535 ? port : undefined;
 }
 
 function cookieOpts(cfg: AuthGatewayConfig): CookieOptions {
@@ -186,6 +210,11 @@ async function startFlow(req: IncomingMessage, res: ServerResponse, cfg: AuthGat
     const ready = requireReady(cfg);
     const url = new URL(req.url ?? "/", "http://internal");
     const next = safeNext(url.searchParams.get("next"));
+    // Native (desktop) loopback login (RFC 8252): the app passes the local port it's listening on
+    // plus a state token. Only accept a sane loopback port; ignore anything malformed so a
+    // browser login is unaffected.
+    const nativePort = parseLoopbackPort(url.searchParams.get("native_port"));
+    const nativeState = nativePort ? (url.searchParams.get("native_state") ?? "").slice(0, 128) : undefined;
 
     const endpoints = await discover(ready.oidcIssuer);
     const state = randomToken();
@@ -205,10 +234,11 @@ async function startFlow(req: IncomingMessage, res: ServerResponse, cfg: AuthGat
       ...(stepUp ? { prompt: "login", maxAge: 0 } : {}),
     });
 
-    const flowCookie = await signFlowCookie({ state, codeVerifier, nonce, next, stepUp }, ready.sessionSecret);
+    const flowCookie = await signFlowCookie({ state, codeVerifier, nonce, next, stepUp, nativePort, nativeState }, ready.sessionSecret);
     appendSetCookie(res, serializeCookie(FLOW_COOKIE, flowCookie, { ...cookieOpts(cfg), maxAge: FLOW_TTL_SECONDS }));
     redirect(res, authorizeUrl);
-  } catch {
+  } catch (err) {
+    console.error("[bff login error]", err instanceof Error ? err.stack : err);
     // Never leak internals (discovery failures, network errors, ...) — same generic error
     // redirect the callback uses below.
     redirect(res, "/?auth_error=login_failed");
@@ -260,10 +290,24 @@ async function handleCallback(req: IncomingMessage, res: ServerResponse, cfg: Au
     }
 
     const sessionToken = await mintSession(principal, ready.sessionSecret, ready.sessionTtl);
-    appendSetCookie(res, serializeCookie(SESSION_COOKIE, sessionToken, { ...cookieOpts(cfg), maxAge: ready.sessionTtl }));
     appendSetCookie(res, serializeCookie(FLOW_COOKIE, "", { ...cookieOpts(cfg), maxAge: 0 })); // clear
+
+    if (flow.nativePort) {
+      // Native (desktop) login: hand the session token to the app's loopback listener instead of
+      // setting an httpOnly cookie a native app can't read. Host is a hardcoded 127.0.0.1 with a
+      // validated unprivileged port (see parseLoopbackPort) — not an open redirect. The app sends
+      // this token back as a `Cookie: secchat_session=…` header it sets itself. `state` lets the
+      // app confirm the response belongs to the login IT started.
+      const params = new URLSearchParams({ session: sessionToken });
+      if (flow.nativeState) params.set("state", flow.nativeState);
+      redirect(res, `http://127.0.0.1:${flow.nativePort}/?${params.toString()}`);
+      return;
+    }
+
+    appendSetCookie(res, serializeCookie(SESSION_COOKIE, sessionToken, { ...cookieOpts(cfg), maxAge: ready.sessionTtl }));
     redirect(res, flow.next);
-  } catch {
+  } catch (err) {
+    console.error("[bff callback error]", err instanceof Error ? err.stack : err);
     redirect(res, "/?auth_error=login_failed");
   }
 }

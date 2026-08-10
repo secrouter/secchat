@@ -22,6 +22,9 @@ export async function handleAssistantTurn(
     store: Store;
     llm: LlmClient;
     broadcast?: (channelId: string, payload: unknown) => void;
+    /** Model for an agent with no explicit one — the deployment default (config.assistantModel).
+     * Falls back to "auto" if not wired. */
+    defaultModel?: string;
   },
   args: { channelId: string; agent: Agent; promptedBy: string; userText: string },
 ): Promise<Message> {
@@ -45,7 +48,9 @@ export async function handleAssistantTurn(
   // who owns it (decision #2), so SecRouter's policy/budget/audit land on the owner regardless
   // of who prompted this particular turn.
   const stream = deps.llm.complete({
-    model: args.agent.model ?? "default",
+    // Per-agent model (set via the picker) wins; else the deployment default; else "auto". Never
+    // "default" — SecRouter treats that as a passthrough to an unconfigured provider and 502s.
+    model: args.agent.model ?? deps.defaultModel ?? "auto",
     messages,
     actingUser: args.agent.ownerSub,
   });

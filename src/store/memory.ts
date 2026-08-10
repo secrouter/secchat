@@ -210,6 +210,14 @@ export class MemoryStore implements Store, SessionStore {
     return this.#agents.get(id) ?? null;
   }
 
+  async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
+    const agent = this.#agents.get(id);
+    if (!agent) return null;
+    const updated: Agent = { ...agent, model };
+    this.#agents.set(id, updated);
+    return updated;
+  }
+
   /** Owner's agents, in creation order (Map iteration order == insertion order). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     return [...this.#agents.values()].filter((a) => a.ownerSub === ownerSub);

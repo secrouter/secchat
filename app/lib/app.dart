@@ -1,12 +1,26 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'platform/native_sso.dart';
 import 'screens/chat.dart';
 import 'screens/login.dart';
 import 'theme.dart';
+
+/// Backend origin for builds with no page origin to inherit (desktop/mobile,
+/// where `Uri.base` is a `file://` path, not the server). Set at build time:
+///   flutter build macos --dart-define=SECCHAT_ORIGIN=https://secchat.sec.internal
+/// Empty — the default, and always the case on web — makes every [HttpApiClient]
+/// fall back to `Uri.base` (the same origin that served the app), preserving the
+/// web behaviour exactly. Without this, a desktop build resolves `/auth/status`,
+/// `/me`, and every API/agent call against `file://…` and they all fail — the
+/// login screen degrades to the dev form and the assistant/agent pages 404.
+const String _secchatOrigin = String.fromEnvironment('SECCHAT_ORIGIN');
+Uri? get backendOrigin =>
+    _secchatOrigin.isEmpty ? null : Uri.parse(_secchatOrigin);
 
 /// App root: an auth gate between [LoginScreen] and [ChatScreen], holding
 /// the signed-in [ApiClient] + [Principal] in memory only (nothing is
@@ -65,7 +79,7 @@ class _SecChatAppState extends State<SecChatApp> {
   /// [LoginScreen] instead of hanging or crashing.
   Future<void> _boot() async {
     final ssoError = Uri.base.queryParameters['auth_error'];
-    final probe = HttpApiClient(); // session mode: no token, cookie only.
+    final probe = HttpApiClient(origin: backendOrigin); // session mode: no token, cookie only.
 
     var ssoAvailable = false;
     try {
@@ -106,7 +120,31 @@ class _SecChatAppState extends State<SecChatApp> {
   Future<String?> _handleSignIn(String username, bool isAdmin) async {
     final groups = isAdmin ? 'secchat-admins' : '';
     final token = 'dev.$username.$groups';
-    final api = HttpApiClient(token: token);
+    final api = HttpApiClient(token: token, origin: backendOrigin);
+    try {
+      final principal = await api.getMe();
+      if (!mounted) return null;
+      setState(() {
+        _api = api;
+        _principal = principal;
+      });
+      return null;
+    } catch (error) {
+      api.dispose();
+      return error is ApiException ? error.message : 'Sign-in failed: $error';
+    }
+  }
+
+  /// Desktop "Sign in with SecSSO": runs the native loopback flow (opens the
+  /// system browser, captures the session token handed back to a local
+  /// 127.0.0.1 listener — see `platform/native_sso.dart`), then validates it
+  /// with `GET /me` in session-token mode before committing. Returns an error
+  /// string to show on the login screen, or null on success (already swapped to
+  /// chat). Only wired on desktop; web keeps the same-origin browser redirect.
+  Future<String?> _handleSsoLogin() async {
+    final token = await nativeSsoLogin(backendOrigin ?? Uri.base);
+    if (token == null) return "SecSSO sign-in was cancelled or didn't complete.";
+    final api = HttpApiClient(sessionToken: token, origin: backendOrigin);
     try {
       final principal = await api.getMe();
       if (!mounted) return null;
@@ -179,6 +217,10 @@ class _SecChatAppState extends State<SecChatApp> {
     }
     return LoginScreen(
       onSignIn: _handleSignIn,
+      // Web has a real browser + cookie: leave onSsoLogin null so the button
+      // does a same-origin redirect to /auth/login. Desktop has neither, so it
+      // gets the native loopback flow instead.
+      onSsoLogin: kIsWeb ? null : _handleSsoLogin,
       ssoAvailable: _ssoAvailable,
       ssoError: _ssoError,
     );
