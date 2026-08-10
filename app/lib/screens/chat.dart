@@ -8,6 +8,7 @@ import '../formatting.dart';
 import '../clipboard_guard.dart';
 import '../marking.dart';
 import '../platform/file_transfer.dart';
+import '../mentions.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
@@ -1106,20 +1107,31 @@ class _ChatScreenState extends State<ChatScreen> {
   /// matches at any tier. Shared by `/invite` and username tab-completion so they
   /// resolve names the same forgiving way (a first name or partial is enough).
   List<User> _matchUsers(List<User> users, String query) {
-    final q = query.trim().toLowerCase();
+    // Accept an @-handle too — that's what mention autocomplete inserts (e.g. "@aliceng", spaces
+    // stripped) and what shows in the suggestion strip, so `/invite @aliceng` must resolve
+    // "Alice Ng". Strip a leading "@" and match the derived mention handle alongside name/email/sub.
+    final raw = query.trim();
+    final q = (raw.startsWith('@') ? raw.substring(1) : raw).toLowerCase();
     if (q.isEmpty) return const [];
     String? name(User u) => u.displayName?.toLowerCase();
     String? email(User u) => u.email?.toLowerCase();
+    String handle(User u) => mentionHandle(u); // already lowercased, [a-z0-9._-]
     final exact = users
-        .where((u) => u.sub.toLowerCase() == q || name(u) == q || email(u) == q)
+        .where((u) => u.sub.toLowerCase() == q || name(u) == q || email(u) == q || handle(u) == q)
         .toList();
     if (exact.isNotEmpty) return exact;
     final prefix = users
-        .where((u) => (name(u)?.startsWith(q) ?? false) || (email(u)?.startsWith(q) ?? false))
+        .where((u) =>
+            (name(u)?.startsWith(q) ?? false) ||
+            (email(u)?.startsWith(q) ?? false) ||
+            handle(u).startsWith(q))
         .toList();
     if (prefix.isNotEmpty) return prefix;
     return users
-        .where((u) => (name(u)?.contains(q) ?? false) || (email(u)?.contains(q) ?? false))
+        .where((u) =>
+            (name(u)?.contains(q) ?? false) ||
+            (email(u)?.contains(q) ?? false) ||
+            handle(u).contains(q))
         .toList();
   }
 

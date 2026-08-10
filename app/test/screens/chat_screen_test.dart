@@ -610,6 +610,35 @@ void main() {
     expect(added, contains('austin-sub'));
   });
 
+  testWidgets('/invite resolves an @-handle (what autocomplete inserts) and adds the user', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice
+      channels: [_channels[0]],
+      users: const [
+        User(sub: 'dev.alice', displayName: 'Alice Ng', groups: []),
+        User(sub: 'austin-sub', displayName: 'Austin Probe', email: 'austin@x.mil', groups: []),
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    final composer = find.descendant(
+      of: find.byType(MessageComposer),
+      matching: find.byType(TextField),
+    );
+    // "@austinprobe" is the mention handle for "Austin Probe" (spaces stripped) — the exact token
+    // the composer inserts. It must resolve the same user /invite would by name.
+    await tester.enterText(composer, '/invite @austinprobe');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await pumpSettled(tester);
+
+    final added = fake.memberCalls.where((c) => c.op == 'add').map((c) => c.ref);
+    expect(added, contains('austin-sub'));
+  });
+
   testWidgets('a reaction chip renders and tapping it toggles the reaction via the API', (tester) async {
     final fake = FakeApiClient(
       me: _principal, // dev.alice
