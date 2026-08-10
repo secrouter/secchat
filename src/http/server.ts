@@ -231,6 +231,7 @@ function buildRouter(
   search?: SearchFn,
   attachments?: AttachmentDeps,
   notify?: Notify,
+  presence?: () => string[],
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -905,6 +906,13 @@ function buildRouter(
     sendJson(res, 200, { ok: true });
   });
 
+  // ── Presence: the subs currently online (≥1 live socket). Seeds the client's presence set before
+  // the live connect/disconnect `presence` events take over. Any authenticated caller may read it
+  // (single-tenant deployment — it's just who's connected, no channel-scoped data).
+  router.add("GET", "/presence", async ({ res }) => {
+    sendJson(res, 200, { online: presence?.() ?? [] });
+  });
+
   // ── Channel membership management. Reading the roster needs only membership; CHANGING it (add /
   // remove / role) is owner-or-admin — per-channel ownership is the right authority for membership
   // (a global capability would let one group manage EVERY channel). A channel must always keep at
@@ -1224,11 +1232,14 @@ export function createHttpServer(deps: {
   /** Per-user realtime delivery (wired to hub.deliverToUser). Unset ⇒ @mentions are still recorded
    * durably (the inbox route), just not pushed live. */
   notify?: Notify;
+  /** The currently-online subs (wired to hub.onlineSubs) — seeds GET /presence. Unset ⇒ nobody shows
+   * as online until the live presence events arrive. */
+  presence?: () => string[];
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

@@ -282,6 +282,30 @@ void main() {
     expect(find.text('notes.txt'), findsNothing);
   });
 
+  testWidgets('onTyping fires while editing a non-empty draft (for the typing indicator)', (tester) async {
+    var typingCount = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking, _) async {},
+            onTyping: () => typingCount++,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), 'drafting a message');
+    await tester.pump();
+    expect(typingCount, greaterThan(0));
+
+    // Clearing to empty does NOT signal typing (nothing to type about).
+    final before = typingCount;
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pump();
+    expect(typingCount, before);
+  });
+
   testWidgets('@-autocomplete: typing @ lists members and picking inserts the handle', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;

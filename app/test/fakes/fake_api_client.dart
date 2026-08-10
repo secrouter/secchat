@@ -246,6 +246,21 @@ class FakeApiClient implements ApiClient {
     return 0;
   }
 
+  /// Every channelId passed to sendTyping, in order.
+  final List<String> typingCalls = [];
+
+  /// Subs a test should report as online from getPresence.
+  List<String> presenceOnline = [];
+
+  @override
+  void sendTyping(String channelId) => typingCalls.add(channelId);
+
+  @override
+  Future<List<String>> getPresence() async {
+    _maybeThrow('getPresence');
+    return List.of(presenceOnline);
+  }
+
   /// Members per channel a test should see; the membership calls mutate these so a reload reflects them.
   final Map<String, List<ChannelMember>> membersByChannel = {};
 

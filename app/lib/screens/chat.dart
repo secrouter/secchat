@@ -101,6 +101,31 @@ class _ChatScreenState extends State<ChatScreen> {
   List<User> get _mentionUsers =>
       _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList();
 
+  // Presence: the subs currently online (seeded from /presence, kept live by `presence` events).
+  Set<String> _onlineSubs = {};
+
+  // Ephemeral human-typing state: channelId → (sub → last time they were seen typing). A single
+  // periodic pruner ([_typingPrune]) drops stale entries so "X is typing…" fades on its own.
+  final Map<String, Map<String, DateTime>> _typingByChannel = {};
+  Timer? _typingPrune;
+  DateTime? _lastTypingSent; // debounces our OWN outbound typing signal
+
+  /// Subs actively typing in [channelId] right now (within the freshness window), excluding self.
+  List<String> _typersIn(String channelId) {
+    final now = DateTime.now();
+    final perSub = _typingByChannel[channelId];
+    if (perSub == null) return const [];
+    return [
+      for (final e in perSub.entries)
+        if (e.key != widget.principal.sub && now.difference(e.value) < _typingTtl) e.key,
+    ];
+  }
+
+  static const _typingTtl = Duration(seconds: 5);
+
+  /// A human label for a sub (directory display name, else the raw sub).
+  String _labelForSub(String sub) => _usersBySub[sub]?.label ?? sub;
+
   // The id of the message whose thread is open (the transcript is replaced by
   // the thread view), or null for the normal channel view. Cleared on switch.
   String? _threadParentId;
@@ -112,6 +137,31 @@ class _ChatScreenState extends State<ChatScreen> {
     _loadChannels();
     _loadUsers();
     _loadMentions();
+    _loadPresence();
+    // Prune stale typing entries a couple times per TTL so "X is typing…" fades without new events.
+    _typingPrune = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      final now = DateTime.now();
+      var changed = false;
+      for (final perSub in _typingByChannel.values) {
+        perSub.removeWhere((_, at) {
+          final stale = now.difference(at) >= _typingTtl;
+          if (stale) changed = true;
+          return stale;
+        });
+      }
+      if (changed) setState(() {});
+    });
+  }
+
+  Future<void> _loadPresence() async {
+    try {
+      final online = await widget.api.getPresence();
+      if (!mounted) return;
+      setState(() => _onlineSubs = online.toSet());
+    } catch (_) {
+      // Non-critical: presence dots just stay off until the live events arrive.
+    }
   }
 
   Future<void> _loadMentions() async {
@@ -140,6 +190,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _typingPrune?.cancel();
     _wsSub?.cancel();
     super.dispose();
   }
@@ -276,6 +327,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Emit a typing signal for [channelId], debounced to at most one every 2.5s (the server relays
+  /// each; peers hold "typing" for the 5s TTL, so this keeps it alive without spamming the socket).
+  void _emitTyping(String channelId) {
+    final now = DateTime.now();
+    if (_lastTypingSent != null && now.difference(_lastTypingSent!) < const Duration(milliseconds: 2500)) {
+      return;
+    }
+    _lastTypingSent = now;
+    widget.api.sendTyping(channelId);
+  }
+
   Future<void> _openMembers(Channel channel) async {
     await showMembersPanel(
       context,
@@ -284,6 +346,7 @@ class _ChatScreenState extends State<ChatScreen> {
       currentUserSub: widget.principal.sub,
       isAdmin: widget.principal.isAdmin,
       roster: _usersBySub.values.toList(),
+      onlineSubs: _onlineSubs,
     );
   }
 
@@ -388,6 +451,16 @@ class _ChatScreenState extends State<ChatScreen> {
           // of MINE — light the badge and prepend it to the inbox (de-duped by id).
           _mentions = [mention, ..._mentions.where((m) => m.id != mention.id)];
           _unseenMentions++;
+        case WsTypingEvent(:final userSub):
+          // Record the peer's typing time; the periodic pruner clears it after the TTL. (Our own
+          // echoed typing is ignored at render time via _typersIn.)
+          (_typingByChannel[channelId] ??= {})[userSub] = DateTime.now();
+        case WsPresenceEvent(:final userSub, :final online):
+          if (online) {
+            _onlineSubs.add(userSub);
+          } else {
+            _onlineSubs.remove(userSub);
+          }
         // Agent-stream / typing events drive the OPEN channel's ephemeral UI only.
         case WsAssistantDeltaEvent(:final agentId, :final delta):
           if (isOpen) {
@@ -1004,6 +1077,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   currentUserSub: widget.principal.sub,
                   usersBySub: _usersBySub,
                   unreadByChannel: _unreadByChannel,
+                  onlineSubs: _onlineSubs,
                   onSelect: _selectChannel,
                   onNewChannel: _handleNewChannel,
                   onNewDm: _handleNewDm,
@@ -1069,10 +1143,12 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(child: _buildThread(selected, threadParent))
         else ...[
           Expanded(child: _buildTranscript(selected)),
+          _TypingLine(labels: _typersIn(selected.id).map(_labelForSub).toList()),
           MessageComposer(
             onSend: _handleSend,
             // Attach files on chat channels; coding-agent channels are runner-driven (no attach).
             onAttach: _codingSessionIdFor(selected.id) == null ? () => _attachFiles(selected) : null,
+            onTyping: () => _emitTyping(selected.id),
             markingLevels: policy.levels,
             markingCategories: policy.categories,
             markingPolicy: policy,
@@ -1228,6 +1304,28 @@ class _ThreadHeader extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The ephemeral "X is typing…" line shown just above the composer (empty when nobody's typing).
+class _TypingLine extends StatelessWidget {
+  const _TypingLine({required this.labels});
+
+  final List<String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    if (labels.isEmpty) return const SizedBox.shrink();
+    final text = switch (labels.length) {
+      1 => '${labels.first} is typing…',
+      2 => '${labels[0]} and ${labels[1]} are typing…',
+      _ => 'Several people are typing…',
+    };
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 2, 22, 4),
+      alignment: Alignment.centerLeft,
+      child: Text(text, style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint)),
     );
   }
 }

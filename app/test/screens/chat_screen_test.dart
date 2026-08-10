@@ -114,6 +114,29 @@ void main() {
   );
 
   testWidgets(
+    'a peer typing shows the typing line, and editing emits our own typing signal',
+    (tester) async {
+      final fake = FakeApiClient(me: _principal, channels: [_channels[0]]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatScreen(api: fake, principal: _principal, onSignOut: () {}),
+        ),
+      );
+      await pumpSettled(tester);
+
+      // A peer typing in the open channel surfaces the ephemeral "…is typing" line.
+      fake.emitWs(const WsTypingEvent(userSub: 'dev.bob', channelId: 'c1'));
+      await pumpSettled(tester);
+      expect(find.textContaining('is typing'), findsOneWidget);
+
+      // Editing the composer emits our own (debounced) typing signal for this channel.
+      await tester.enterText(find.byType(TextField), 'hi');
+      await pumpSettled(tester);
+      expect(fake.typingCalls, contains('c1'));
+    },
+  );
+
+  testWidgets(
     'a pre-existing agent channel with no locally-known session still calls postMessage',
     (tester) async {
       // c2 ("release-bot") is a bare `kind: agent` channel from

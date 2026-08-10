@@ -17,6 +17,7 @@ class ChatSidebar extends StatelessWidget {
     required this.currentUserSub,
     required this.usersBySub,
     required this.unreadByChannel,
+    this.onlineSubs = const {},
     required this.onSelect,
     required this.onNewChannel,
     required this.onNewAssistant,
@@ -39,6 +40,9 @@ class ChatSidebar extends StatelessWidget {
 
   /// Per-channel unread counts (channelId -> count); rendered as a badge.
   final Map<String, int> unreadByChannel;
+
+  /// The subs currently online — drives the presence dot on a DM's rail entry.
+  final Set<String> onlineSubs;
 
   final ValueChanged<Channel> onSelect;
   final VoidCallback onNewChannel;
@@ -144,14 +148,21 @@ class ChatSidebar extends StatelessWidget {
     final dms = channels.where((c) => c.kind == ChannelKind.dm).toList();
     final rest = channels.where((c) => c.kind != ChannelKind.dm).toList();
 
-    Widget item(Channel channel, {String? labelOverride}) => _ChannelListItem(
+    Widget item(Channel channel, {String? labelOverride, bool present = false}) => _ChannelListItem(
       channel: channel,
       label: labelOverride ?? (channel.name.isEmpty ? '(unnamed)' : channel.name),
       isSelected: channel.id == selectedChannelId,
       agentKind: agentKindByChannel[channel.id],
       unread: unreadByChannel[channel.id] ?? 0,
+      present: present,
       onTap: () => onSelect(channel),
     );
+
+    // A DM peer's online state → the rail dot.
+    bool dmPresent(Channel channel) {
+      final peer = channel.peer(currentUserSub);
+      return peer != null && onlineSubs.contains(peer);
+    }
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
@@ -162,7 +173,7 @@ class ChatSidebar extends StatelessWidget {
         ],
         if (dms.isNotEmpty) ...[
           const _SectionHeader('DIRECT MESSAGES'),
-          for (final channel in dms) item(channel, labelOverride: _dmLabel(channel)),
+          for (final channel in dms) item(channel, labelOverride: _dmLabel(channel), present: dmPresent(channel)),
         ],
       ],
     );
@@ -254,6 +265,7 @@ class _ChannelListItem extends StatelessWidget {
     required this.agentKind,
     required this.unread,
     required this.onTap,
+    this.present = false,
   });
 
   final Channel channel;
@@ -262,6 +274,9 @@ class _ChannelListItem extends StatelessWidget {
   final AgentKind? agentKind;
   final int unread;
   final VoidCallback onTap;
+
+  /// A DM peer who's online — shows a small presence dot on the channel icon.
+  final bool present;
 
   @override
   Widget build(BuildContext context) {
@@ -285,10 +300,29 @@ class _ChannelListItem extends StatelessWidget {
               children: [
                 SizedBox(
                   width: 18,
-                  child: Icon(
-                    iconForChannel(channel.kind, agentKind),
-                    size: 14,
-                    color: isSelected ? AppColors.accent : AppColors.textFaint,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(
+                        iconForChannel(channel.kind, agentKind),
+                        size: 14,
+                        color: isSelected ? AppColors.accent : AppColors.textFaint,
+                      ),
+                      if (present)
+                        Positioned(
+                          right: -1,
+                          bottom: -2,
+                          child: Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: AppColors.ok,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: AppColors.surface, width: 1.5),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),

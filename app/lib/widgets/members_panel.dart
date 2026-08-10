@@ -16,6 +16,7 @@ Future<void> showMembersPanel(
   required String currentUserSub,
   required bool isAdmin,
   required List<User> roster,
+  Set<String> onlineSubs = const {},
 }) {
   return showDialog<void>(
     context: context,
@@ -25,6 +26,7 @@ Future<void> showMembersPanel(
       currentUserSub: currentUserSub,
       isAdmin: isAdmin,
       roster: roster,
+      onlineSubs: onlineSubs,
     ),
   );
 }
@@ -36,6 +38,7 @@ class _MembersDialog extends StatefulWidget {
     required this.currentUserSub,
     required this.isAdmin,
     required this.roster,
+    required this.onlineSubs,
   });
 
   final ApiClient api;
@@ -43,6 +46,7 @@ class _MembersDialog extends StatefulWidget {
   final String currentUserSub;
   final bool isAdmin;
   final List<User> roster;
+  final Set<String> onlineSubs;
 
   @override
   State<_MembersDialog> createState() => _MembersDialogState();
@@ -176,6 +180,7 @@ class _MembersDialogState extends State<_MembersDialog> {
       itemBuilder: (context, i) => _MemberRow(
         member: members[i],
         isSelf: members[i].memberRef == widget.currentUserSub,
+        online: !members[i].isAgent && widget.onlineSubs.contains(members[i].memberRef),
         canManage: canManage && !_busy,
         onMakeOwner: () => _run(() => widget.api.addMember(widget.channel.id, members[i].memberRef, role: 'owner')),
         onMakeMember: () => _run(() => widget.api.addMember(widget.channel.id, members[i].memberRef, role: 'member')),
@@ -189,6 +194,7 @@ class _MemberRow extends StatelessWidget {
   const _MemberRow({
     required this.member,
     required this.isSelf,
+    required this.online,
     required this.canManage,
     required this.onMakeOwner,
     required this.onMakeMember,
@@ -197,6 +203,7 @@ class _MemberRow extends StatelessWidget {
 
   final ChannelMember member;
   final bool isSelf;
+  final bool online;
   final bool canManage;
   final VoidCallback onMakeOwner;
   final VoidCallback onMakeMember;
@@ -208,7 +215,26 @@ class _MemberRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
       child: Row(
         children: [
-          Icon(member.isAgent ? Icons.smart_toy_outlined : Icons.person_outline, size: 18, color: AppColors.textMuted),
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(member.isAgent ? Icons.smart_toy_outlined : Icons.person_outline, size: 18, color: AppColors.textMuted),
+              if (online)
+                Positioned(
+                  right: -1,
+                  bottom: -1,
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: AppColors.ok,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppColors.surface, width: 1.5),
+                    ),
+                  ),
+                ),
+            ],
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(

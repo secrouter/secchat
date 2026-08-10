@@ -660,6 +660,19 @@ final class WsMentionEvent extends WsEvent {
   final Mention mention;
 }
 
+/// A human is typing in a channel (ephemeral — never persisted). Drives the "X is typing…" line.
+final class WsTypingEvent extends WsEvent {
+  const WsTypingEvent({required this.userSub, required super.channelId});
+  final String userSub;
+}
+
+/// A user's online/offline transition, fanned to every channel they belong to — drives presence dots.
+final class WsPresenceEvent extends WsEvent {
+  const WsPresenceEvent({required this.userSub, required this.online, required super.channelId});
+  final String userSub;
+  final bool online;
+}
+
 /// A channel's classification level was set/changed — every viewer updates the
 /// banner (and the composer's marking lock) live.
 final class WsChannelMarkingEvent extends WsEvent {
@@ -744,6 +757,14 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       final raw = json['mention'];
       if (raw is! Map<String, dynamic>) return null;
       return WsMentionEvent(mention: Mention.fromJson(raw), channelId: channelId);
+    case 'typing':
+      return WsTypingEvent(userSub: json['userSub'] as String? ?? '', channelId: channelId);
+    case 'presence':
+      return WsPresenceEvent(
+        userSub: json['userSub'] as String? ?? '',
+        online: json['online'] as bool? ?? false,
+        channelId: channelId,
+      );
     default:
       return null;
   }

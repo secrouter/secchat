@@ -36,6 +36,7 @@ class MessageComposer extends StatefulWidget {
     this.channelMarking,
     this.initialMarking = 'UNCLASSIFIED',
     this.mentionUsers = const [],
+    this.onTyping,
   });
 
   /// Invoked with the trimmed message text, its marking, and the ids of any
@@ -81,6 +82,10 @@ class MessageComposer extends StatefulWidget {
   /// MINUS the current user. Empty ⇒ no autocomplete (typing `@` is just text). The inserted token
   /// is `@<mentionHandle>` (derived from the display name), which the server resolves on post.
   final List<User> mentionUsers;
+
+  /// Called as the user edits a non-empty draft, so the screen can emit a (debounced) typing signal.
+  /// Null ⇒ no typing indicator wired.
+  final VoidCallback? onTyping;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -146,7 +151,11 @@ class _MessageComposerState extends State<MessageComposer> {
     super.dispose();
   }
 
-  void _onTextChanged() => setState(() {});
+  void _onTextChanged() {
+    // A non-empty edit means the user is typing — let the screen emit a (debounced) signal.
+    if (_controller.text.trim().isNotEmpty) widget.onTyping?.call();
+    setState(() {});
+  }
 
   bool get _canSend =>
       widget.enabled && !_sending && (_controller.text.trim().isNotEmpty || _pending.isNotEmpty);

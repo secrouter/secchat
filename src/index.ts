@@ -113,6 +113,9 @@ const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channe
 // of which channel they have open. Like `broadcast`, resolved lazily so the server can be created
 // before the hub (which needs the server) — see the note above.
 const notify = (sub: string, payload: unknown) => hub?.deliverToUser(sub, payload);
+// Presence roster (who's online) — reads the hub's live connection set for GET /presence; the live
+// online/offline transitions ride the hub's own `presence` broadcasts.
+const presence = () => hub?.onlineSubs() ?? [];
 // Coding-agent control plane (Sprint 5: the real pi runner). The execute-gate (plan-mode default,
 // owner-authorized mutation) is fully real either way — selectRunner() only decides what's on the
 // other end of the Runner port: the real pi CLI when it's usable, else the interactive demo stub
@@ -165,7 +168,7 @@ const webRoot = existsSync(`${flutterWeb}/index.html`) ? flutterWeb : minimalWeb
 if (config.devMode) console.error(`▸ web client: ${webRoot === flutterWeb ? "Flutter build" : "minimal JS (fallback)"} — ${webRoot}`);
 
 const server = createHttpServer({
-  verifyToken, store, llm, control, broadcast, notify, auth,
+  verifyToken, store, llm, control, broadcast, notify, presence, auth,
   search: (userSub, q) => searchMessages(store, userSub, q),
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },

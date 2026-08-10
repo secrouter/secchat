@@ -248,3 +248,96 @@ test("hub: subscribeAll subscribes a connection to every channel its principal i
     await stopServer(server);
   }
 });
+
+// Two-user verifier for the typing + presence tests.
+const twoUsers: VerifyToken = async (token) => {
+  if (token === "u1") return { sub: "user-1", groups: [] };
+  if (token === "u2") return { sub: "user-2", groups: [] };
+  throw new Error("invalid token");
+};
+
+const opened = (socket: WebSocket) =>
+  new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(), { once: true });
+    socket.addEventListener("error", () => reject(new Error("errored before open")), { once: true });
+  });
+const nextMessage = (socket: WebSocket) =>
+  new Promise<unknown>((resolve) =>
+    socket.addEventListener("message", (ev) => resolve(JSON.parse(ev.data as string)), { once: true }),
+  );
+
+test("hub: a client's typing frame is relayed to the channel it's subscribed to", async () => {
+  const server = createServer((_req, res) => res.writeHead(404).end());
+  const hub = attachWsHub(server, { verifyToken: twoUsers, channelsForSub: async () => [] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/?token=u1`);
+  try {
+    await opened(socket);
+    hub.subscribe("user-1", "chan-A"); // subscribe explicitly (no self-presence to race with)
+    const got = nextMessage(socket);
+    socket.send(JSON.stringify({ type: "typing", channelId: "chan-A" }));
+    // The relayed typing signal names the sender and carries the routing channelId.
+    assert.deepEqual(await got, { channelId: "chan-A", type: "typing", userSub: "user-1" });
+  } finally {
+    socket.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("hub: a typing frame for a channel the sender ISN'T subscribed to is dropped (no spoofing)", async () => {
+  const server = createServer((_req, res) => res.writeHead(404).end());
+  const hub = attachWsHub(server, { verifyToken: twoUsers, channelsForSub: async () => [] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  // A watcher subscribed to chan-A; the sender is NOT subscribed to chan-A.
+  const watcher = new WebSocket(`ws://127.0.0.1:${port}/?token=u2`);
+  const sender = new WebSocket(`ws://127.0.0.1:${port}/?token=u1`);
+  try {
+    await Promise.all([opened(watcher), opened(sender)]);
+    hub.subscribe("user-2", "chan-A");
+    let watcherGot: unknown = null;
+    watcher.addEventListener("message", (ev) => (watcherGot = JSON.parse(ev.data as string)), { once: true });
+    sender.send(JSON.stringify({ type: "typing", channelId: "chan-A" })); // sender isn't in chan-A
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(watcherGot, null, "typing into a non-subscribed channel is not relayed");
+  } finally {
+    watcher.close();
+    sender.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("hub: presence — a peer connecting/disconnecting reaches a member of a shared channel", async () => {
+  const server = createServer((_req, res) => res.writeHead(404).end());
+  // Only user-2 has chan-A in their channel set, so user-2's connect/disconnect announces to chan-A;
+  // user-1 (subscribed to chan-A) is the watcher and never self-announces.
+  const hub = attachWsHub(server, {
+    verifyToken: twoUsers,
+    channelsForSub: async (sub) => (sub === "user-2" ? ["chan-A"] : []),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const watcher = new WebSocket(`ws://127.0.0.1:${port}/?token=u1`);
+  try {
+    await opened(watcher);
+    hub.subscribe("user-1", "chan-A");
+
+    // user-2 comes online → the watcher sees a presence(online) for user-2.
+    const online = nextMessage(watcher);
+    const peer = new WebSocket(`ws://127.0.0.1:${port}/?token=u2`);
+    await opened(peer);
+    assert.deepEqual(await online, { channelId: "chan-A", type: "presence", userSub: "user-2", online: true });
+
+    // user-2 goes offline (last socket closes) → the watcher sees presence(offline).
+    const offline = nextMessage(watcher);
+    peer.close();
+    assert.deepEqual(await offline, { channelId: "chan-A", type: "presence", userSub: "user-2", online: false });
+  } finally {
+    watcher.close();
+    hub.close();
+    await stopServer(server);
+  }
+});

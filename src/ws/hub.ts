@@ -55,6 +55,9 @@ export interface Hub {
    * `sub` has no open connection right now (the hub has no offline queueing; durable delivery is the
    * caller's job, e.g. the mentions table). */
   deliverToUser(sub: string, payload: unknown): void;
+  /** The subs with at least one live connection right now — the presence roster (seeds GET /presence
+   * before the live connect/disconnect events take over). */
+  onlineSubs(): string[];
   /** Close every open connection and detach from the server's `"upgrade"` event. */
   close(): void;
 }
@@ -81,11 +84,13 @@ export function attachWsHub(
   function trackConnection(conn: Connection): void {
     connections.add(conn);
     let bySub = connectionsBySub.get(conn.sub);
+    const firstForSub = !bySub || bySub.size === 0; // this connection brings the principal online
     if (!bySub) {
       bySub = new Set();
       connectionsBySub.set(conn.sub, bySub);
     }
     bySub.add(conn);
+    if (firstForSub) void announcePresence(conn.sub, true);
   }
 
   function untrackConnection(conn: Connection): void {
@@ -94,12 +99,29 @@ export function attachWsHub(
     const bySub = connectionsBySub.get(conn.sub);
     if (bySub) {
       bySub.delete(conn);
-      if (bySub.size === 0) connectionsBySub.delete(conn.sub);
+      if (bySub.size === 0) {
+        connectionsBySub.delete(conn.sub);
+        void announcePresence(conn.sub, false); // last socket closed ⇒ the principal went offline
+      }
     }
 
     for (const channelId of conn.channels) {
       channelSubscriptions.get(channelId)?.delete(conn);
     }
+  }
+
+  /** Fan a presence change out to every channel the principal belongs to, so members subscribed to
+   * those channels (via subscribeAll) see them go online/offline live. Fire-and-forget; a channel
+   * lookup failure just drops the announcement. */
+  async function announcePresence(sub: string, online: boolean): Promise<void> {
+    if (!deps.channelsForSub) return;
+    let channelIds: string[];
+    try {
+      channelIds = await deps.channelsForSub(sub);
+    } catch {
+      return;
+    }
+    for (const channelId of channelIds) broadcast(channelId, { type: "presence", channelId, userSub: sub, online });
   }
 
   /** Token comes from `?token=` on the request URL, or else the Sec-WebSocket-Protocol
@@ -148,6 +170,13 @@ export function attachWsHub(
       subscribe(conn.sub, channelId);
     } else if (type === "subscribeAll") {
       void subscribeAll(conn);
+    } else if (type === "typing" && typeof channelId === "string") {
+      // Relay an ephemeral typing signal to the channel — but ONLY into a channel the sender is
+      // actually subscribed to (a member), so typing can't be spoofed into arbitrary channels. Not
+      // persisted; every recipient (incl. the sender, who filters its own) sees it live and briefly.
+      if (conn.channels.has(channelId)) {
+        broadcast(channelId, { type: "typing", channelId, userSub: conn.sub });
+      }
     }
   }
 
@@ -293,5 +322,9 @@ export function attachWsHub(
     channelSubscriptions.clear();
   }
 
-  return { subscribe, broadcast, deliverToUser, close };
+  function onlineSubs(): string[] {
+    return [...connectionsBySub.keys()];
+  }
+
+  return { subscribe, broadcast, deliverToUser, onlineSubs, close };
 }

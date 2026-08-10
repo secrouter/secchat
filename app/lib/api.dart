@@ -157,6 +157,14 @@ abstract class ApiClient {
   /// (each carries its `channelId`), so background channels update unread live.
   Stream<WsEvent> subscribeAll();
 
+  /// Emit an ephemeral "I'm typing" signal for [channelId] over the live socket (best-effort; a
+  /// no-op if the socket isn't open). Debounce calls at the call site.
+  void sendTyping(String channelId);
+
+  /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
+  /// arrive as `presence` WS events.
+  Future<List<String>> getPresence();
+
   /// Releases any resources (HTTP client, any still-open sockets). Owned by
   /// whoever constructed this client -- typically the app root, on sign-out.
   void dispose();
@@ -507,6 +515,24 @@ class HttpApiClient implements ApiClient {
   @override
   Stream<WsEvent> subscribeAll() => _openSocket({'type': 'subscribeAll'});
 
+  /// The long-lived subscribeAll socket, kept so [sendTyping] can push inbound frames over it.
+  WebSocketChannel? _globalSocket;
+
+  @override
+  void sendTyping(String channelId) {
+    try {
+      _globalSocket?.sink.add(jsonEncode({'type': 'typing', 'channelId': channelId}));
+    } catch (_) {
+      // Best-effort: a closed/closing socket just drops the ephemeral signal.
+    }
+  }
+
+  @override
+  Future<List<String>> getPresence() async {
+    final data = await _get('/presence') as Map<String, dynamic>;
+    return (data['online'] as List<dynamic>? ?? const []).map((e) => e.toString()).toList();
+  }
+
   /// Opens one authenticated WebSocket, sends [firstFrame] on ready (a per-channel
   /// `subscribe` or an all-channels `subscribeAll`), and streams parsed events.
   Stream<WsEvent> _openSocket(Map<String, dynamic> firstFrame) {
@@ -524,11 +550,14 @@ class HttpApiClient implements ApiClient {
     );
     final socket = WebSocketChannel.connect(wsUri);
     _sockets.add(socket);
+    // The all-channels socket is the one typing frames ride out on — keep a handle to it.
+    if (firstFrame['type'] == 'subscribeAll') _globalSocket = socket;
 
     late final StreamController<WsEvent> controller;
     controller = StreamController<WsEvent>(
       onCancel: () {
         _sockets.remove(socket);
+        if (identical(_globalSocket, socket)) _globalSocket = null;
         unawaited(socket.sink.close());
       },
     );
