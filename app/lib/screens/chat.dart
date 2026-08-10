@@ -86,6 +86,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // execute-gate strip -- there is no API to recover that after the fact.
   final Map<String, AgentKind> _agentKindByChannel = {};
   final Map<String, String> _sessionIdByChannel = {};
+
+  // Models the gateway offers (GET /models) — populates the assistant header's
+  // model picker. Loaded once at boot; empty (or a failed load) just hides the
+  // picker, leaving the deployment default in effect.
+  List<ModelInfo> _models = const [];
   final Set<String> _endedSessionIds = {};
   int _localEchoSeq = 0;
 
@@ -160,6 +165,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _loadUsers();
     _loadMentions();
     _loadPresence();
+    _loadModels();
     // Prune stale typing entries a couple times per TTL so "X is typing…" fades without new events.
     _typingPrune = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted) return;
@@ -183,6 +189,39 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _onlineSubs = online.toSet());
     } catch (_) {
       // Non-critical: presence dots just stay off until the live events arrive.
+    }
+  }
+
+  Future<void> _loadModels() async {
+    try {
+      final models = await widget.api.listModels();
+      if (!mounted) return;
+      setState(() => _models = models);
+    } catch (_) {
+      // Non-critical: no gateway / list failed → the header picker just stays
+      // hidden and the deployment default model applies.
+    }
+  }
+
+  /// Switch an assistant channel's model (header picker → PATCH /agents/:id),
+  /// then reflect it locally so the header updates without a reload.
+  Future<void> _setAgentModel(Channel channel, String model) async {
+    final agentId = channel.agentId;
+    if (agentId == null || model == channel.agentModel) return;
+    try {
+      await widget.api.setAgentModel(agentId, model);
+      if (!mounted) return;
+      setState(() {
+        _channels = [
+          for (final c in _channels)
+            c.id == channel.id ? c.withAgentModel(model) : c,
+        ];
+        if (_selected?.id == channel.id) {
+          _selected = _selected!.withAgentModel(model);
+        }
+      });
+    } catch (error) {
+      _showError(error);
     }
   }
 
@@ -231,6 +270,15 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final channels = await widget.api.getChannels();
       if (!mounted) return;
+      // Recover each agent channel's kind from the server (GET /channels now
+      // reports it) so a reloaded client renders coding vs assistant correctly,
+      // rather than defaulting every agent channel to assistant. Locally-created
+      // agents already populated this from POST /agents; this fills the rest.
+      for (final c in channels) {
+        if (c.agentKind != null) {
+          _agentKindByChannel[c.id] = c.agentKind!;
+        }
+      }
       setState(() {
         _channels = channels;
         _loadingChannels = false;
@@ -1215,6 +1263,9 @@ class _ChatScreenState extends State<ChatScreen> {
           channel: selected,
           title: _channelTitle(selected),
           agentKind: _agentKindByChannel[selected.id],
+          models: _models,
+          currentModel: selected.agentModel,
+          onModelChanged: (model) => _setAgentModel(selected, model),
           onMarkChannel: () => _markChannel(selected),
           // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
           onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
@@ -1426,6 +1477,9 @@ class _ChannelHeader extends StatelessWidget {
     required this.channel,
     required this.title,
     required this.agentKind,
+    this.models = const [],
+    this.currentModel,
+    this.onModelChanged,
     this.onMarkChannel,
     this.onMembers,
     this.onPins,
@@ -1434,6 +1488,18 @@ class _ChannelHeader extends StatelessWidget {
   final Channel channel;
   final String title;
   final AgentKind? agentKind;
+
+  /// Models the gateway offers (`GET /models`) — populates the assistant model
+  /// picker. Empty ⇒ the picker isn't shown.
+  final List<ModelInfo> models;
+
+  /// The assistant's current model id (`channel.agentModel`), or null for the
+  /// deployment default. Selected in the picker.
+  final String? currentModel;
+
+  /// Switch the assistant's model (→ `PATCH /agents/:id`). Null ⇒ no picker (a
+  /// non-assistant channel, or models not loaded).
+  final ValueChanged<String>? onModelChanged;
 
   /// Opens the channel-classification picker (set/raise for members, downgrade
   /// for admins). Null disables the control.
@@ -1475,6 +1541,16 @@ class _ChannelHeader extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
+          if (agentKind == AgentKind.assistant &&
+              onModelChanged != null &&
+              models.isNotEmpty) ...[
+            const SizedBox(width: 12),
+            _ModelPicker(
+              models: models,
+              current: currentModel,
+              onChanged: onModelChanged!,
+            ),
+          ],
           const Spacer(),
           if (onPins != null) ...[
             IconButton(
@@ -1505,6 +1581,62 @@ class _ChannelHeader extends StatelessWidget {
             style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The assistant channel's model selector (header). Lists what the gateway
+/// offers (`GET /models`), including `auto` for router-chosen routing; picking
+/// one PATCHes the agent's model live. If the current model isn't in the
+/// offered list (an unknown/stale id, or the deployment default when null), it's
+/// added so the dropdown always has a valid selection to show.
+class _ModelPicker extends StatelessWidget {
+  const _ModelPicker({
+    required this.models,
+    required this.current,
+    required this.onChanged,
+  });
+
+  final List<ModelInfo> models;
+  final String? current;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final ids = <String>[for (final m in models) m.id];
+    // The effective selection: the current model, or "auto" if unset (router-
+    // chosen is the natural default). Ensure it's present as an option.
+    final selected = current ?? 'auto';
+    if (!ids.contains(selected)) ids.insert(0, selected);
+
+    String labelFor(String id) {
+      for (final m in models) {
+        if (m.id == id) return m.label;
+      }
+      return id == 'auto' ? 'Auto (router picks)' : id;
+    }
+
+    return Tooltip(
+      message: 'Model for this assistant',
+      child: DropdownButton<String>(
+        value: selected,
+        isDense: true,
+        underline: const SizedBox.shrink(),
+        borderRadius: BorderRadius.circular(8),
+        dropdownColor: AppColors.surface,
+        icon: const Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
+        style: AppFonts.mono(fontSize: 12, color: AppColors.text),
+        items: [
+          for (final id in ids)
+            DropdownMenuItem<String>(
+              value: id,
+              child: Text(labelFor(id)),
+            ),
+        ],
+        onChanged: (id) {
+          if (id != null && id != current) onChanged(id);
+        },
       ),
     );
   }

@@ -25,7 +25,9 @@ export interface OidcEndpoints {
 const discoveryCache = new Map<string, Promise<OidcEndpoints>>();
 
 async function fetchDiscovery(issuer: string): Promise<OidcEndpoints> {
-  const res = await fetch(`${issuer}/.well-known/openid-configuration`);
+  // The issuer is kept canonical (may end with "/", e.g. Authentik). Strip a trailing slash only
+  // when composing the well-known URL so we don't emit a `…//.well-known/…` double slash.
+  const res = await fetch(`${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`);
   if (!res.ok) throw new Error(`OIDC discovery returned ${res.status}`);
   const json = (await res.json()) as Partial<OidcEndpoints>;
   if (!json.authorization_endpoint || !json.token_endpoint || !json.jwks_uri) {

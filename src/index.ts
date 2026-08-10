@@ -195,6 +195,7 @@ const server = createHttpServer({
   capabilities: config.capabilities,
   stepUp: config.stepUp,
   runnerToken: config.runnerToken,
+  assistantModel: config.assistantModel,
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
 });
 hub = attachWsHub(server, {

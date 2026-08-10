@@ -29,6 +29,11 @@ export interface Config {
   /** Service token SecChat presents to SecRouter (the assistant path needs it; a bare chat
    * without agents does not). The real client-credentials flow replaces the static token later. */
   secrouterToken?: string;
+  /** Default model for an assistant agent created without an explicit one (the picker sets a
+   * per-agent model; this is the fallback). `"auto"` lets SecRouter classify + route; set it to a
+   * concrete id (e.g. `secllm/fast`) for a deployment whose SecRouter `auto` tiers reference
+   * models the local SecLLM hasn't loaded. */
+  assistantModel: string;
   /** Postgres DSN for the PgStore (unset ⇒ in-memory store; dev/test only). */
   databaseUrl?: string;
   /** SecSSO group whose members may read the admin / audit-review console (/admin*). */
@@ -105,7 +110,11 @@ function opt(env: NodeJS.ProcessEnv, key: string, fallback: string): string {
 
 /** Build a Config from an env bag (defaults to process.env). Throws on missing required keys. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const issuer = req(env, "SECCHAT_OIDC_ISSUER").replace(/\/+$/, "");
+  // Keep the issuer EXACTLY as configured (trailing slash included). OIDC's `iss` is an exact-
+  // match identifier: Authentik's canonical issuer ends with "/" and its id_tokens carry that
+  // slash, so stripping it here made jose's issuer check fail every login. The discovery URL is
+  // built by stripping a trailing slash locally (see auth/oidc.ts) so this stays canonical.
+  const issuer = req(env, "SECCHAT_OIDC_ISSUER").trim();
   const oidcAudience = req(env, "SECCHAT_OIDC_AUDIENCE");
   const oidcClientSecret = env.SECCHAT_OIDC_CLIENT_SECRET?.trim() || undefined;
   const publicUrl = env.SECCHAT_PUBLIC_URL?.trim().replace(/\/+$/, "") || undefined;
@@ -164,9 +173,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
     oidcIssuer: issuer,
     oidcAudience,
-    jwksUrl: opt(env, "SECCHAT_JWKS_URL", `${issuer}/.well-known/jwks.json`),
+    // Strip a trailing slash off the issuer only when composing this URL — the issuer itself is
+    // kept canonical (may end with "/", e.g. Authentik) for the exact-match `iss` check, but a
+    // literal `${issuer}/.well-known/…` would double the slash.
+    jwksUrl: opt(env, "SECCHAT_JWKS_URL", `${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`),
     secrouterUrl: opt(env, "SECROUTER_URL", "http://127.0.0.1:47002"),
     secrouterToken: env.SECROUTER_TOKEN?.trim() || undefined,
+    assistantModel: opt(env, "SECCHAT_ASSISTANT_MODEL", "auto"),
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
     adminGroup,
     devMode: (env.SECCHAT_DEV_MODE?.trim() || "") === "1",

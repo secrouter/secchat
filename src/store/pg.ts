@@ -595,6 +595,15 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToAgent(rows[0]) : null;
   }
 
+  async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
+    const { rows } = await this.#pool.query<AgentRow>(
+      `UPDATE agents SET model = $2 WHERE id = $1
+       RETURNING id, owner_sub, kind, name, model, created_at`,
+      [id, model],
+    );
+    return rows[0] ? rowToAgent(rows[0]) : null;
+  }
+
   /** Owner's agents, creation order (ins_seq). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(

@@ -99,12 +99,31 @@ class Channel {
     required this.name,
     this.members = const [],
     this.cuiMarking,
+    this.agentKind,
+    this.agentId,
+    this.agentModel,
   });
 
   final String id;
   final ChannelKind kind;
   final String name;
   final List<String> members;
+
+  /// For an agent channel (`kind == ChannelKind.agent`), which kind of agent it
+  /// hosts — assistant vs coding. `GET /channels` reports this so a client that
+  /// reloaded (or didn't create the agent) can still render the right channel
+  /// type instead of defaulting every agent channel to assistant. Null for
+  /// non-agent channels (and older backends that don't send it).
+  final AgentKind? agentKind;
+
+  /// For an agent channel, the backing agent's id — so the header's model picker
+  /// can `PATCH /agents/:id` to switch its model. Null for non-agent channels.
+  final String? agentId;
+
+  /// For an agent channel, the agent's current model id (e.g. `secllm/fast`, or
+  /// `auto` for router-chosen). Drives the header picker's current selection.
+  /// Null ⇒ unset (the deployment default applies).
+  final String? agentModel;
 
   /// The channel's classification level, when marked. When set, the channel IS
   /// the portion — every message inherits it — and the composer locks its
@@ -119,6 +138,22 @@ class Channel {
     name: name,
     members: members,
     cuiMarking: marking,
+    agentKind: agentKind,
+    agentId: agentId,
+    agentModel: agentModel,
+  );
+
+  /// A copy with a new [agentModel] — used after the header picker switches the
+  /// model (PATCH /agents/:id) so the channel reflects it without a full reload.
+  Channel withAgentModel(String? model) => Channel(
+    id: id,
+    kind: kind,
+    name: name,
+    members: members,
+    cuiMarking: cuiMarking,
+    agentKind: agentKind,
+    agentId: agentId,
+    agentModel: model,
   );
 
   /// For a DM, the participant sub that isn't [me] (the person you're talking
@@ -138,6 +173,30 @@ class Channel {
         .map((e) => e.toString())
         .toList(),
     cuiMarking: json['cuiMarking'] as String?,
+    agentKind: json['agentKind'] == null
+        ? null
+        : AgentKind.fromWire(json['agentKind'] as String?),
+    agentId: json['agentId'] as String?,
+    agentModel: json['agentModel'] as String?,
+  );
+}
+
+/// A model the gateway offers (`GET /models` → SecRouter's `/v1/models`), for
+/// the chat window's model picker. [id] is what gets sent as the agent's model
+/// (e.g. `secllm/fast`, or `auto` for router-chosen).
+class ModelInfo {
+  const ModelInfo({required this.id, this.ownedBy});
+
+  final String id;
+  final String? ownedBy;
+
+  /// A friendly label: `auto` reads as router-chosen; everything else shows its
+  /// id (which already namespaces the provider, e.g. `secllm/fast`).
+  String get label => id == 'auto' ? 'Auto (router picks)' : id;
+
+  factory ModelInfo.fromJson(Map<String, dynamic> json) => ModelInfo(
+    id: json['id'] as String,
+    ownedBy: json['ownedBy'] as String?,
   );
 }
 

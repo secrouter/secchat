@@ -305,6 +305,9 @@ export interface Store {
 
   createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent>;
   getAgent(id: Id): Promise<Agent | null>;
+  /** Change an agent's model (the chat window's live model picker → PATCH /agents/:id). Returns
+   * the updated agent, or null if no agent has that id. */
+  updateAgentModel(id: Id, model: string): Promise<Agent | null>;
   listAgentsByOwner(ownerSub: string): Promise<Agent[]>;
 
   appendMessage(input: AppendMessageInput): Promise<Message>;
@@ -413,9 +416,18 @@ export interface LlmCompleteRequest {
   actingUser: string;
 }
 
+/** A model the gateway offers, for the client's model picker (GET /models → SecRouter /v1/models). */
+export interface LlmModel {
+  id: string;
+  ownedBy?: string;
+}
+
 /** Streams assistant text deltas. The real impl talks to SecRouter; tests use a fake. */
 export interface LlmClient {
   complete(req: LlmCompleteRequest): AsyncIterable<string>;
+  /** Lists the models SecRouter offers (for the chat window's model picker). Optional so test
+   * fakes and minimal clients need not implement it — the /models route returns [] without it. */
+  listModels?(): Promise<LlmModel[]>;
 }
 
 // ── Coding-agent control plane: sessions, the execute-gate, the runner port ──────────────────

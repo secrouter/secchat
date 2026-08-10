@@ -7,6 +7,21 @@
 #   cp .env.example .env && edit
 #   ./bootstrap/secchat.sh up
 
+# ── Stage 1: build the Flutter web client ──────────────────────────────────────────────────
+# Produces app/build/web, which src/index.ts serves in preference to clients/web-minimal (the
+# fallback dev shell). The Flutter SDK/Dart toolchain lives ONLY in this stage; none of it
+# reaches the runtime image below. Pinned to a specific Flutter release for reproducibility.
+FROM ghcr.io/cirruslabs/flutter:3.35.1 AS flutter-web
+WORKDIR /src/app
+# pubspec first so `pub get` caches across source-only changes.
+COPY app/pubspec.yaml app/pubspec.lock ./
+RUN flutter pub get
+COPY app/ ./
+# Served at the origin root (https://secchat.sec.internal/), so the default base href "/" is
+# correct — no --base-href override needed.
+RUN flutter build web --release
+
+# ── Stage 2: the lean Node runtime ─────────────────────────────────────────────────────────
 FROM node:24-bookworm-slim
 
 WORKDIR /app
@@ -24,27 +39,10 @@ COPY clients ./clients
 COPY db ./db
 COPY tsconfig.json ./
 
-# ---------------------------------------------------------------------------------------------
-# Web client: this image serves clients/web-minimal — a dependency-free HTML/CSS/JS client,
-# copied above, that always exists in the repo. It does NOT build the Flutter client (../app);
-# that toolchain (Flutter SDK, Dart, platform build dependencies) doesn't belong in this lean
-# runtime image.
-#
-# To add a Flutter-web build later, add a build stage ahead of this one and copy its output in,
-# e.g.:
-#
-#   FROM ghcr.io/cirruslabs/flutter:stable AS flutter-web
-#   WORKDIR /src
-#   COPY app ./app
-#   RUN cd app && flutter build web --release
-#
-#   FROM node:24-bookworm-slim
-#   ...(this file, unchanged)...
-#   COPY --from=flutter-web /src/app/build/web ./app/build/web
-#
-# No server code change is needed: src/index.ts already prefers app/build/web over
-# clients/web-minimal whenever app/build/web/index.html exists.
-# ---------------------------------------------------------------------------------------------
+# Web client: the Flutter build from stage 1 is the primary client; clients/web-minimal (copied
+# above) remains as the fallback dev shell. src/index.ts prefers app/build/web whenever its
+# index.html exists, so no server code change is needed to switch between them.
+COPY --from=flutter-web /src/app/build/web ./app/build/web
 
 # Run as the image's built-in non-root user rather than root.
 USER node

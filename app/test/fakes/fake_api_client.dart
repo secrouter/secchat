@@ -420,6 +420,24 @@ class FakeApiClient implements ApiClient {
     );
   }
 
+  /// Models [listModels] returns (default empty). Set to drive the picker.
+  List<ModelInfo> models = const [];
+
+  /// Every `setAgentModel` call, in order, as `(agentId, model)`.
+  final List<({String agentId, String model})> setAgentModelCalls = [];
+
+  @override
+  Future<List<ModelInfo>> listModels() async {
+    _maybeThrow('listModels');
+    return List.of(models);
+  }
+
+  @override
+  Future<void> setAgentModel(String agentId, String model) async {
+    _maybeThrow('setAgentModel');
+    setAgentModelCalls.add((agentId: agentId, model: model));
+  }
+
   @override
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {

@@ -230,6 +230,35 @@ const store = {
   async listAgentsByOwner(ownerSub: string) {
     return agentsByOwner.get(ownerSub) ?? [];
   },
+  // Added for GET /channels' agent-channel enrichment (agentKind/agentId/agentModel) and the
+  // PATCH /agents/:id model picker. A member ref is an "agent" iff it's a known agent id.
+  async getAgent(id: string) {
+    for (const list of agentsByOwner.values()) {
+      const a = list.find((x) => x.id === id);
+      if (a) return a;
+    }
+    return null;
+  },
+  async updateAgentModel(id: string, model: string) {
+    for (const list of agentsByOwner.values()) {
+      const a = list.find((x) => x.id === id);
+      if (a) {
+        a.model = model;
+        return a;
+      }
+    }
+    return null;
+  },
+  async listMembers(channelId: string) {
+    const refs = channelMembers.get(channelId) ?? new Set<string>();
+    const isAgent = (ref: string) =>
+      [...agentsByOwner.values()].some((l) => l.some((a) => a.id === ref));
+    return [...refs].map((ref) => ({
+      memberRef: ref,
+      memberType: isAgent(ref) ? "agent" : "user",
+      role: "member",
+    }));
+  },
 } as unknown as Store;
 
 let server: Server;
@@ -567,6 +596,81 @@ test("GET /agents lists agents spawned by the caller", async () => {
   const body = await res.json() as Array<{ id: string }>;
   assert.ok(Array.isArray(body));
   assert.ok(body.some((a) => a.id === agent.id));
+});
+
+test("GET /models returns an empty list when no LLM gateway is wired", async () => {
+  const res = await fetch(`${baseUrl}/models`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { data: [] });
+});
+
+test("GET /channels enriches an agent channel with agentKind/agentId/agentModel", async () => {
+  const created = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "assistant", name: "picker" }),
+  });
+  const { agent, channel } = await created.json() as { agent: { id: string }; channel: { id: string } };
+
+  const list = await (await fetch(`${baseUrl}/channels`, { headers: { authorization: "Bearer good" } })).json() as
+    Array<{ id: string; agentKind?: string; agentId?: string; agentModel?: string }>;
+  const row = list.find((c) => c.id === channel.id);
+  assert.ok(row, "the agent channel should be listed");
+  assert.equal(row!.agentKind, "assistant");
+  assert.equal(row!.agentId, agent.id);
+});
+
+test("PATCH /agents/:id switches the model (owner only)", async () => {
+  const created = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "assistant", name: "switchable" }),
+  });
+  const { agent, channel } = await created.json() as { agent: { id: string }; channel: { id: string } };
+
+  // Owner can switch it.
+  const patched = await fetch(`${baseUrl}/agents/${agent.id}`, {
+    method: "PATCH",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ model: "secllm/fast" }),
+  });
+  assert.equal(patched.status, 200);
+  assert.equal((await patched.json() as { model?: string }).model, "secllm/fast");
+
+  // The channel now reports the new model.
+  const list = await (await fetch(`${baseUrl}/channels`, { headers: { authorization: "Bearer good" } })).json() as
+    Array<{ id: string; agentModel?: string }>;
+  assert.equal(list.find((c) => c.id === channel.id)?.agentModel, "secllm/fast");
+
+  // A different user (not the owner) may not.
+  const forbidden = await fetch(`${baseUrl}/agents/${agent.id}`, {
+    method: "PATCH",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({ model: "auto" }),
+  });
+  assert.equal(forbidden.status, 403);
+});
+
+test("PATCH /agents/:id is 404 for an unknown agent and 400 without a model", async () => {
+  const unknown = await fetch(`${baseUrl}/agents/nope`, {
+    method: "PATCH",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ model: "auto" }),
+  });
+  assert.equal(unknown.status, 404);
+
+  const created = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "assistant", name: "no-model" }),
+  });
+  const { agent } = await created.json() as { agent: { id: string } };
+  const bad = await fetch(`${baseUrl}/agents/${agent.id}`, {
+    method: "PATCH",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(bad.status, 400);
 });
 
 test("an unmatched route is 404", async () => {

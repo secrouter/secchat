@@ -4,5 +4,13 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Outbound: reach the SecChat backend (HTTPS + WebSocket). Without this a
+	     sandboxed app can make no network connection at all. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Inbound: the native-SSO loopback listener (127.0.0.1) that captures the
+	     session token handed back by the browser login — see lib/platform/native_sso_io.dart. -->
+	<key>com.apple.security.network.server</key>
+	<true/>
 </dict>
 </plist>
