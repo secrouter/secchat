@@ -14,12 +14,44 @@ abstract class DaemonProcess {
 /// Launches the daemon (real: `Process.start`). Injectable for testing the state machine.
 typedef DaemonLauncher = Future<DaemonProcess> Function(String executable, List<String> args, Map<String, String> environment);
 
-/// Desktop build: spawn + supervise the bundled runner daemon as a child process. [executable] +
-/// [args] default to the bundled runner binary (`secchat-runnerd`, overridable via
-/// `SECCHAT_RUNNER_CMD`); the SecChat URL + token are passed to it via the environment (the daemon
-/// reads SECCHAT_URL / SECCHAT_RUNNER_TOKEN).
-DaemonSupervisor createDaemonSupervisor({DaemonLauncher? launcher, String? executable, List<String> args = const []}) =>
-    _ProcessSupervisor(launcher: launcher ?? _spawnReal, executable: executable, args: args);
+/// Desktop build: spawn + supervise the bundled runner daemon as a child process. The SecChat URL
+/// + token are passed to it via the environment (the daemon reads SECCHAT_URL /
+/// SECCHAT_RUNNER_TOKEN).
+///
+/// Resolution order for what to spawn (first that applies):
+///  1. an explicit [executable] (tests inject a fake);
+///  2. the runnerd EMBEDDED in the macOS .app — `Contents/Resources/runnerd/` holds a bundled
+///     `node` + the dependency-free daemon sources (see scripts/bundle-macos-runnerd.sh). Spawning
+///     a binary inside the app bundle is what the App Sandbox permits (an arbitrary system binary
+///     is not), so the supervisor points straight at it: `node runnerd/daemon/main.ts`;
+///  3. `SECCHAT_RUNNER_CMD` (dev override — e.g. point it at a system `node` + the bundle);
+///  4. `secchat-runnerd` on PATH.
+DaemonSupervisor createDaemonSupervisor({DaemonLauncher? launcher, String? executable, List<String> args = const []}) {
+  final bundled = executable == null ? _bundledRunner() : null;
+  return _ProcessSupervisor(
+    launcher: launcher ?? _spawnReal,
+    executable: executable ?? bundled?.executable,
+    args: bundled != null ? bundled.args : args,
+  );
+}
+
+/// The runnerd embedded in the macOS .app bundle, or null (dev runs, other platforms, or a build
+/// without the bundle — fall through to the env/PATH default). Derived from the running executable:
+/// `…/SecChat.app/Contents/MacOS/<bin>` → `…/Contents/Resources/runnerd/`.
+({String executable, List<String> args})? _bundledRunner() {
+  if (!Platform.isMacOS) return null;
+  try {
+    final contents = File(Platform.resolvedExecutable).parent.parent.path; // …/Contents
+    final node = File('$contents/Resources/runnerd/node');
+    final entry = File('$contents/Resources/runnerd/daemon/main.ts');
+    if (node.existsSync() && entry.existsSync()) {
+      return (executable: node.path, args: <String>[entry.path]);
+    }
+  } catch (_) {
+    // Any path/FS surprise → fall through to the env/PATH default.
+  }
+  return null;
+}
 
 Future<DaemonProcess> _spawnReal(String executable, List<String> args, Map<String, String> environment) async =>
     _RealDaemonProcess(await Process.start(executable, args, environment: environment));
