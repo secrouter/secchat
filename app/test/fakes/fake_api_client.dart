@@ -289,6 +289,33 @@ class FakeApiClient implements ApiClient {
     membersByChannel[channelId]?.removeWhere((m) => m.memberRef == memberRef);
   }
 
+  /// Pinned messages per channel a test should see; the pin calls mutate these.
+  final Map<String, List<PinnedMessage>> pinsByChannel = {};
+
+  /// Every pin/unpin call, in order.
+  final List<({String op, String messageId})> pinCalls = [];
+
+  @override
+  Future<List<PinnedMessage>> getPins(String channelId) async {
+    _maybeThrow('getPins');
+    return List.of(pinsByChannel[channelId] ?? const []);
+  }
+
+  @override
+  Future<void> pinMessage(String messageId) async {
+    _maybeThrow('pinMessage');
+    pinCalls.add((op: 'pin', messageId: messageId));
+  }
+
+  @override
+  Future<void> unpinMessage(String messageId) async {
+    _maybeThrow('unpinMessage');
+    pinCalls.add((op: 'unpin', messageId: messageId));
+    for (final list in pinsByChannel.values) {
+      list.removeWhere((p) => p.messageId == messageId);
+    }
+  }
+
   /// Every `redactMessage` call, in order.
   final List<({String messageId, String reason})> redactCalls = [];
 

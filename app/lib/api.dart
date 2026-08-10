@@ -121,6 +121,13 @@ abstract class ApiClient {
   /// Remove a member. Owner-or-admin only; throws on removing the last owner (409).
   Future<void> removeMember(String channelId, String memberRef);
 
+  /// A channel's pinned messages (newest pin first), enriched with content. Any member may read it.
+  Future<List<PinnedMessage>> getPins(String channelId);
+
+  /// Pin / unpin a message (any member). Reflected live via a `pin` WS event.
+  Future<void> pinMessage(String messageId);
+  Future<void> unpinMessage(String messageId);
+
   /// Redacts a message — a governed content purge (author or admin). [reason]
   /// is required (the audit record). The change is reflected live via a
   /// `redaction` WS event.
@@ -470,6 +477,22 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> removeMember(String channelId, String memberRef) async {
     await _delete('/channels/$channelId/members/${Uri.encodeComponent(memberRef)}');
+  }
+
+  @override
+  Future<List<PinnedMessage>> getPins(String channelId) async {
+    final data = await _get('/channels/$channelId/pins') as List<dynamic>;
+    return data.map((e) => PinnedMessage.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<void> pinMessage(String messageId) async {
+    await _post('/messages/$messageId/pin');
+  }
+
+  @override
+  Future<void> unpinMessage(String messageId) async {
+    await _delete('/messages/$messageId/pin');
   }
 
   @override

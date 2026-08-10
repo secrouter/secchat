@@ -136,6 +136,62 @@ void main() {
     },
   );
 
+  testWidgets('an unsent draft persists across a channel switch', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: _channels);
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // Type a draft in the auto-selected channel (c1 "general").
+    await tester.enterText(find.byType(TextField), 'draft for general');
+    await pumpSettled(tester);
+
+    // Switch to the other channel — its composer is empty (a separate draft).
+    await tester.tap(find.text('release-bot'));
+    await pumpSettled(tester);
+    expect(find.text('draft for general'), findsNothing);
+
+    // Switch back — the draft is restored into the field.
+    await tester.tap(find.text('general').first);
+    await pumpSettled(tester);
+    expect(find.text('draft for general'), findsOneWidget);
+  });
+
+  testWidgets('pinning a message from its ⋮ menu calls the API', (tester) async {
+    final fake = FakeApiClient(
+      me: _principal,
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'dev.bob',
+            authorType: AuthorType.user,
+            content: 'pin this',
+            createdAt: DateTime(2026, 1, 1),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // pumpAndSettle so the popup-menu open animation finishes (the item is only hittable once laid
+    // out); safe here — the typing pruner only setStates when there's stale typing, of which there
+    // is none in this test.
+    await tester.tap(find.byTooltip('Message actions'));
+    await tester.pumpAndSettle();
+    expect(find.text('Pin'), findsOneWidget);
+    await tester.tap(find.text('Pin'));
+    await tester.pumpAndSettle();
+
+    expect(fake.pinCalls.any((c) => c.op == 'pin' && c.messageId == 'm1'), isTrue);
+  });
+
   testWidgets(
     'a pre-existing agent channel with no locally-known session still calls postMessage',
     (tester) async {

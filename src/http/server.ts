@@ -753,6 +753,42 @@ function buildRouter(
     sendJson(res, 200, await store.listThread(channelId, params.parentId!));
   });
 
+  // ── Pins: a channel-scoped message bookmark — mutable, never chained (see Store). Access-gated by
+  // the pinned message's channel (any member may pin/unpin, like reacting); pin/unpin broadcast a
+  // `pin` event so peers update live. A missing message is a 403 (don't leak which ids exist).
+  router.add("POST", "/messages/:id/pin", async ({ res, params, principal }) => {
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    await store.pinMessage(message.channelId, messageId, principal.sub);
+    broadcast?.(message.channelId, { type: "pin", op: "pin", channelId: message.channelId, messageId, by: principal.sub });
+    sendJson(res, 201, { ok: true });
+  });
+
+  router.add("DELETE", "/messages/:id/pin", async ({ res, params, principal }) => {
+    const messageId = params.id!;
+    const message = await store.getMessage(messageId);
+    if (!message || !(await store.isMember(message.channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    await store.unpinMessage(messageId);
+    broadcast?.(message.channelId, { type: "pin", op: "unpin", channelId: message.channelId, messageId, by: principal.sub });
+    sendJson(res, 200, { ok: true });
+  });
+
+  router.add("GET", "/channels/:id/pins", async ({ res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, await store.listPinnedMessages(channelId));
+  });
+
   // ── Reactions: a mutable per-(message,user,emoji) social signal — never chained (see Store).
   // Access-controlled by the reacted-to message's channel: you must be a member of the channel the
   // message lives in (resolved via getMessage). Add/remove broadcast a `reaction` event so peers

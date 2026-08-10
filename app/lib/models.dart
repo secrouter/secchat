@@ -486,6 +486,35 @@ class GrantExecuteResult {
 // time -- adding a new event type here is a compile error everywhere it
 // isn't yet handled, not a silent no-op at runtime.
 
+/// A pinned message, enriched for the pinned-messages panel with its content/seq/author. `content`
+/// is null when the message has been redacted (the pin survives as a tombstone).
+class PinnedMessage {
+  const PinnedMessage({
+    required this.messageId,
+    required this.channelId,
+    required this.pinnedBy,
+    required this.seq,
+    required this.authorRef,
+    this.content,
+  });
+
+  final String messageId;
+  final String channelId;
+  final String pinnedBy;
+  final int seq;
+  final String authorRef;
+  final String? content;
+
+  factory PinnedMessage.fromJson(Map<String, dynamic> json) => PinnedMessage(
+    messageId: json['messageId'] as String? ?? '',
+    channelId: json['channelId'] as String? ?? '',
+    pinnedBy: json['pinnedBy'] as String? ?? '',
+    seq: (json['seq'] as num?)?.toInt() ?? 0,
+    authorRef: json['authorRef'] as String? ?? '',
+    content: json['content'] as String?,
+  );
+}
+
 /// One member of a channel, as returned enriched by `GET /channels/:id/members`: the raw membership
 /// (ref + type + role) plus a display label resolved server-side (the user's directory name, or an
 /// agent's name) so the roster renders without a second lookup.
@@ -673,6 +702,13 @@ final class WsPresenceEvent extends WsEvent {
   final bool online;
 }
 
+/// A message was pinned/unpinned in a channel — every viewer updates the pin indicator + panel live.
+final class WsPinEvent extends WsEvent {
+  const WsPinEvent({required this.op, required this.messageId, required super.channelId});
+  final String op; // 'pin' | 'unpin'
+  final String messageId;
+}
+
 /// A channel's classification level was set/changed — every viewer updates the
 /// banner (and the composer's marking lock) live.
 final class WsChannelMarkingEvent extends WsEvent {
@@ -763,6 +799,12 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsPresenceEvent(
         userSub: json['userSub'] as String? ?? '',
         online: json['online'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'pin':
+      return WsPinEvent(
+        op: json['op'] as String? ?? 'pin',
+        messageId: json['messageId'] as String? ?? '',
         channelId: channelId,
       );
     default:

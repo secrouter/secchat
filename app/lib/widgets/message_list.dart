@@ -39,6 +39,8 @@ class MessageList extends StatefulWidget {
     this.onViewHistory,
     this.onCopy,
     this.onDownloadAttachment,
+    this.onTogglePin,
+    this.pinnedIds = const {},
     this.onLoadOlder,
     this.hasMore = false,
     this.loadingOlder = false,
@@ -83,6 +85,11 @@ class MessageList extends StatefulWidget {
   /// provenance so a later paste into a lower-marked destination is guarded.
   final void Function(Message message)? onCopy;
   final void Function(Attachment attachment)? onDownloadAttachment;
+
+  /// Pin/unpin a message (null disables it); [pinnedIds] is the open channel's pinned set (drives
+  /// the ⋮ toggle label + an inline pin indicator).
+  final void Function(Message message)? onTogglePin;
+  final Set<String> pinnedIds;
 
   /// Load the next older page (scroll-back). Null disables paging (e.g. threads).
   final Future<void> Function()? onLoadOlder;
@@ -217,6 +224,8 @@ class _MessageListState extends State<MessageList> {
               onViewHistory: widget.onViewHistory,
               onCopy: widget.onCopy,
               onDownloadAttachment: widget.onDownloadAttachment,
+              onTogglePin: widget.onTogglePin,
+              pinnedIds: widget.pinnedIds,
               showMarking: widget.showMarking,
               markingPolicy: widget.markingPolicy,
               revealedIds: widget.revealedIds,
@@ -273,6 +282,8 @@ class _TranscriptTile extends StatelessWidget {
     this.onViewHistory,
     this.onCopy,
     this.onDownloadAttachment,
+    this.onTogglePin,
+    this.pinnedIds = const {},
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -290,6 +301,8 @@ class _TranscriptTile extends StatelessWidget {
   final void Function(Message message)? onViewHistory;
   final void Function(Message message)? onCopy;
   final void Function(Attachment attachment)? onDownloadAttachment;
+  final void Function(Message message)? onTogglePin;
+  final Set<String> pinnedIds;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -313,6 +326,8 @@ class _TranscriptTile extends StatelessWidget {
         onViewHistory: onViewHistory,
         onCopy: onCopy,
         onDownloadAttachment: onDownloadAttachment,
+        onTogglePin: onTogglePin,
+        pinnedIds: pinnedIds,
         showMarking: showMarking,
         markingPolicy: markingPolicy,
         revealedIds: revealedIds,
@@ -341,6 +356,8 @@ class _MessageBubble extends StatelessWidget {
     this.onViewHistory,
     this.onCopy,
     this.onDownloadAttachment,
+    this.onTogglePin,
+    this.pinnedIds = const {},
     this.showMarking = false,
     this.markingPolicy,
     this.revealedIds = const {},
@@ -359,6 +376,8 @@ class _MessageBubble extends StatelessWidget {
   final void Function(Message message)? onViewHistory;
   final void Function(Message message)? onCopy;
   final void Function(Attachment attachment)? onDownloadAttachment;
+  final void Function(Message message)? onTogglePin;
+  final Set<String> pinnedIds;
   final bool showMarking;
   final MarkingPolicy? markingPolicy;
   final Set<String> revealedIds;
@@ -389,7 +408,12 @@ class _MessageBubble extends StatelessWidget {
   // Copy is offered on any non-redacted message (there's nothing to copy from a tombstone).
   bool get _canCopy => onCopy != null && !message.isRedacted;
 
-  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory || _canCopy;
+  // Pinning is offered on any non-redacted message (any member may pin — see the pin routes).
+  bool get _canPin => onTogglePin != null && !message.isRedacted;
+
+  bool get _isPinned => pinnedIds.contains(message.id);
+
+  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory || _canCopy || _canPin;
 
   @override
   Widget build(BuildContext context) {
@@ -505,6 +529,8 @@ class _MessageBubble extends StatelessWidget {
                         _canViewHistory ? () => onViewHistory!(message) : null,
                     onRedact: _canRedact ? () => onRedact!(message) : null,
                     onCopy: _canCopy ? () => onCopy!(message) : null,
+                    onTogglePin: _canPin ? () => onTogglePin!(message) : null,
+                    isPinned: _isPinned,
                   ),
               ],
             ),
@@ -920,12 +946,14 @@ class _ThreadChip extends StatelessWidget {
 /// The per-message overflow menu (⋮). Currently just Redact — a governed
 /// content purge — shown to a message's author or an admin.
 class _MessageMenu extends StatelessWidget {
-  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact, this.onCopy});
+  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact, this.onCopy, this.onTogglePin, this.isPinned = false});
 
   final VoidCallback? onEdit;
   final VoidCallback? onViewHistory;
   final VoidCallback? onRedact;
   final VoidCallback? onCopy;
+  final VoidCallback? onTogglePin;
+  final bool isPinned;
 
   @override
   Widget build(BuildContext context) {
@@ -942,6 +970,8 @@ class _MessageMenu extends StatelessWidget {
           switch (value) {
             case 'copy':
               onCopy?.call();
+            case 'pin':
+              onTogglePin?.call();
             case 'edit':
               onEdit?.call();
             case 'history':
@@ -951,6 +981,17 @@ class _MessageMenu extends StatelessWidget {
           }
         },
         itemBuilder: (_) => [
+          if (onTogglePin != null)
+            PopupMenuItem<String>(
+              value: 'pin',
+              child: Row(
+                children: [
+                  Icon(isPinned ? Icons.push_pin : Icons.push_pin_outlined, size: 15, color: AppColors.text),
+                  const SizedBox(width: 8),
+                  Text(isPinned ? 'Unpin' : 'Pin', style: const TextStyle(color: AppColors.text, fontSize: 13)),
+                ],
+              ),
+            ),
           if (onCopy != null)
             const PopupMenuItem<String>(
               value: 'copy',

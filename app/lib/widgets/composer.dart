@@ -37,6 +37,8 @@ class MessageComposer extends StatefulWidget {
     this.initialMarking = 'UNCLASSIFIED',
     this.mentionUsers = const [],
     this.onTyping,
+    this.initialText = '',
+    this.onDraftChanged,
   });
 
   /// Invoked with the trimmed message text, its marking, and the ids of any
@@ -87,6 +89,14 @@ class MessageComposer extends StatefulWidget {
   /// Null ⇒ no typing indicator wired.
   final VoidCallback? onTyping;
 
+  /// The draft to seed the field with (a per-channel draft the screen persisted). Applied once in
+  /// initState — give the composer a per-channel Key so a channel switch re-seeds it.
+  final String initialText;
+
+  /// Called with the current draft text on every edit, so the screen can persist it per channel
+  /// (survives a channel switch). Null ⇒ drafts aren't persisted.
+  final ValueChanged<String>? onDraftChanged;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
@@ -128,6 +138,9 @@ class _MessageComposerState extends State<MessageComposer> {
   void initState() {
     super.initState();
     _fieldFocus = FocusNode(onKeyEvent: _onKeyEvent);
+    // Seed a persisted per-channel draft BEFORE wiring the listener, so restoring it doesn't count
+    // as typing or re-save.
+    if (widget.initialText.isNotEmpty) _controller.text = widget.initialText;
     _controller.addListener(_onTextChanged);
   }
 
@@ -154,6 +167,7 @@ class _MessageComposerState extends State<MessageComposer> {
   void _onTextChanged() {
     // A non-empty edit means the user is typing — let the screen emit a (debounced) signal.
     if (_controller.text.trim().isNotEmpty) widget.onTyping?.call();
+    widget.onDraftChanged?.call(_controller.text); // persist the per-channel draft
     setState(() {});
   }
 

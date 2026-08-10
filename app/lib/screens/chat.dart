@@ -24,6 +24,7 @@ import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
 import '../widgets/members_panel.dart';
 import '../widgets/mentions_panel.dart';
+import '../widgets/pins_panel.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/step_up_dialog.dart';
@@ -109,6 +110,14 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, Map<String, DateTime>> _typingByChannel = {};
   Timer? _typingPrune;
   DateTime? _lastTypingSent; // debounces our OWN outbound typing signal
+
+  // Unsent per-channel drafts — preserved across channel switches (the composer is keyed per channel
+  // and re-seeds from here). Cleared on a successful send.
+  final Map<String, String> _draftsByChannel = {};
+
+  // The pinned message ids of the OPEN channel (drives the ⋮ Pin/Unpin toggle + a pin indicator).
+  // Loaded on channel open, kept live by `pin` events.
+  Set<String> _pinnedIds = {};
 
   /// Subs actively typing in [channelId] right now (within the freshness window), excluding self.
   List<String> _typersIn(String channelId) {
@@ -227,7 +236,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _connStatus = ConnStatus.idle;
       _messagesError = null;
       _loadingMessages = cached == null;
+      _pinnedIds = {}; // reset; reloaded for the newly-open channel below
     });
+    unawaited(_loadPins(channel.id));
 
     if (cached == null) {
       try {
@@ -336,6 +347,45 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     _lastTypingSent = now;
     widget.api.sendTyping(channelId);
+  }
+
+  Future<void> _loadPins(String channelId) async {
+    try {
+      final pins = await widget.api.getPins(channelId);
+      if (!mounted || _selected?.id != channelId) return;
+      setState(() => _pinnedIds = pins.map((p) => p.messageId).toSet());
+    } catch (_) {
+      // Non-critical: pins just stay unknown until the next open/refresh.
+    }
+  }
+
+  /// Pin or unpin [message] (optimistic; the server broadcast keeps every viewer in sync).
+  Future<void> _togglePin(Message message) async {
+    if (_selected == null) return;
+    final wasPinned = _pinnedIds.contains(message.id);
+    setState(() => wasPinned ? _pinnedIds.remove(message.id) : _pinnedIds.add(message.id));
+    try {
+      if (wasPinned) {
+        await widget.api.unpinMessage(message.id);
+      } else {
+        await widget.api.pinMessage(message.id);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => wasPinned ? _pinnedIds.add(message.id) : _pinnedIds.remove(message.id)); // rollback
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_describe(error))));
+    }
+  }
+
+  Future<void> _openPins(Channel channel) async {
+    // Self-contained: the panel loads + unpins via the API; the `pin` WS event keeps _pinnedIds in
+    // sync here, so no explicit refresh on close is needed.
+    await showPinsPanel(
+      context,
+      api: widget.api,
+      channelId: channel.id,
+      labelForSub: _labelForSub,
+    );
   }
 
   Future<void> _openMembers(Channel channel) async {
@@ -460,6 +510,15 @@ class _ChatScreenState extends State<ChatScreen> {
             _onlineSubs.add(userSub);
           } else {
             _onlineSubs.remove(userSub);
+          }
+        case WsPinEvent(:final op, :final messageId):
+          // Keep the OPEN channel's pin set current (drives the ⋮ toggle + the inline indicator).
+          if (isOpen) {
+            if (op == 'pin') {
+              _pinnedIds.add(messageId);
+            } else {
+              _pinnedIds.remove(messageId);
+            }
           }
         // Agent-stream / typing events drive the OPEN channel's ephemeral UI only.
         case WsAssistantDeltaEvent(:final agentId, :final delta):
@@ -1135,6 +1194,7 @@ class _ChatScreenState extends State<ChatScreen> {
           onMarkChannel: () => _markChannel(selected),
           // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
           onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
+          onPins: () => _openPins(selected),
         ),
         // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
@@ -1145,10 +1205,14 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(child: _buildTranscript(selected)),
           _TypingLine(labels: _typersIn(selected.id).map(_labelForSub).toList()),
           MessageComposer(
+            // Keyed per channel so switching re-creates the composer, seeding its own channel's draft.
+            key: ValueKey('composer-${selected.id}'),
             onSend: _handleSend,
             // Attach files on chat channels; coding-agent channels are runner-driven (no attach).
             onAttach: _codingSessionIdFor(selected.id) == null ? () => _attachFiles(selected) : null,
             onTyping: () => _emitTyping(selected.id),
+            initialText: _draftsByChannel[selected.id] ?? '',
+            onDraftChanged: (text) => _draftsByChannel[selected.id] = text,
             markingLevels: policy.levels,
             markingCategories: policy.categories,
             markingPolicy: policy,
@@ -1204,6 +1268,9 @@ class _ChatScreenState extends State<ChatScreen> {
       onViewHistory: canThread ? _openHistory : null,
       onCopy: _copyMessage,
       onDownloadAttachment: _downloadAttachment,
+      // Pinning: coding-channel local echoes have no server id, so only real channels can pin.
+      onTogglePin: canThread ? _togglePin : null,
+      pinnedIds: _pinnedIds,
       // Older-history paging: a cursor means there's more to load above.
       hasMore: _cursors[selected.id] != null,
       loadingOlder: _loadingOlder,
@@ -1337,6 +1404,7 @@ class _ChannelHeader extends StatelessWidget {
     required this.agentKind,
     this.onMarkChannel,
     this.onMembers,
+    this.onPins,
   });
 
   final Channel channel;
@@ -1350,6 +1418,9 @@ class _ChannelHeader extends StatelessWidget {
   /// Opens the members panel (view roster; owners/admins manage). Null hides it
   /// (e.g. DMs — a fixed 1:1 pair).
   final VoidCallback? onMembers;
+
+  /// Opens the pinned-messages panel. Null hides the control.
+  final VoidCallback? onPins;
 
   @override
   Widget build(BuildContext context) {
@@ -1381,6 +1452,16 @@ class _ChannelHeader extends StatelessWidget {
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
           const Spacer(),
+          if (onPins != null) ...[
+            IconButton(
+              onPressed: onPins,
+              icon: const Icon(Icons.push_pin_outlined, size: 16),
+              tooltip: 'Pinned messages',
+              color: AppColors.textMuted,
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 4),
+          ],
           if (onMembers != null) ...[
             IconButton(
               onPressed: onMembers,

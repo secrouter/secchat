@@ -76,6 +76,8 @@ import type {
   Message,
   MessagePageOpts,
   MessageRevision,
+  Pin,
+  PinnedMessage,
   Reaction,
   SessionStatus,
   SessionStore,
@@ -1011,6 +1013,58 @@ export class PgStore implements Store, SessionStore {
           [sub, now],
         );
     return result.rowCount ?? 0;
+  }
+
+  // ── Pins (channel-scoped message bookmarks) ─────────────────────────────────────────────────
+
+  async pinMessage(channelId: Id, messageId: Id, by: string): Promise<Pin> {
+    const pinnedAt = new Date().toISOString();
+    // Idempotent per message (PK) — a re-pin keeps the ORIGINAL pinnedBy/pinnedAt.
+    const { rows } = await this.#pool.query<{ pinned_by: string; pinned_at: Date }>(
+      `INSERT INTO pins (message_id, channel_id, pinned_by, pinned_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (message_id) DO UPDATE SET message_id = EXCLUDED.message_id
+       RETURNING pinned_by, pinned_at`,
+      [messageId, channelId, by, pinnedAt],
+    );
+    const row = rows[0]!;
+    return { channelId, messageId, pinnedBy: row.pinned_by, pinnedAt: iso(row.pinned_at) };
+  }
+
+  async unpinMessage(messageId: Id): Promise<boolean> {
+    const result = await this.#pool.query(`DELETE FROM pins WHERE message_id = $1`, [messageId]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async listPinnedMessages(channelId: Id): Promise<PinnedMessage[]> {
+    const { rows } = await this.#pool.query<{
+      message_id: string;
+      channel_id: string;
+      pinned_by: string;
+      pinned_at: Date;
+      seq: number;
+      author_ref: string;
+      redacted_at: Date | null;
+      content: string | null;
+    }>(
+      `SELECT p.message_id, p.channel_id, p.pinned_by, p.pinned_at,
+              m.seq, m.author_ref, m.redacted_at, mc.content
+       FROM pins p
+       JOIN messages m ON m.id = p.message_id
+       LEFT JOIN message_content mc ON mc.message_id = p.message_id
+       WHERE p.channel_id = $1
+       ORDER BY p.ins_seq DESC`,
+      [channelId],
+    );
+    return rows.map((r) => ({
+      channelId: r.channel_id,
+      messageId: r.message_id,
+      pinnedBy: r.pinned_by,
+      pinnedAt: iso(r.pinned_at),
+      seq: r.seq,
+      authorRef: r.author_ref,
+      content: r.redacted_at ? null : r.content,
+    }));
   }
 
   // ── Per-user read markers → unread counts ───────────────────────────────────────────────────

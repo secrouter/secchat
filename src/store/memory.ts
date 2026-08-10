@@ -66,6 +66,8 @@ import type {
   Message,
   MessagePageOpts,
   MessageRevision,
+  Pin,
+  PinnedMessage,
   Reaction,
   SessionStatus,
   SessionStore,
@@ -88,6 +90,7 @@ export class MemoryStore implements Store, SessionStore {
   #reactions = new Map<Id, Reaction[]>(); // messageId -> reactions, append order
   #attachments = new Map<Id, Attachment>(); // attachment id -> row (messageId null until claimed); insertion order = upload order
   #mentions: Mention[] = []; // append order; newest-first is a reverse-scan (dev-scale)
+  #pins: Pin[] = []; // append order (newest pin last); one entry per message id
   #lastRead = new Map<Id, Map<string, number>>(); // channelId -> (userSub -> last-read seq)
   #webhooksById = new Map<Id, Webhook>();
   #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
@@ -479,6 +482,40 @@ export class MemoryStore implements Store, SessionStore {
       changed++;
     }
     return changed;
+  }
+
+  // ── Pins (channel-scoped message bookmarks) ───────────────────────────────────────────────
+
+  async pinMessage(channelId: Id, messageId: Id, by: string): Promise<Pin> {
+    const existing = this.#pins.find((p) => p.messageId === messageId);
+    if (existing) return { ...existing }; // idempotent per message
+    const pin: Pin = { channelId, messageId, pinnedBy: by, pinnedAt: new Date().toISOString() };
+    this.#pins.push(pin);
+    return { ...pin };
+  }
+
+  async unpinMessage(messageId: Id): Promise<boolean> {
+    const i = this.#pins.findIndex((p) => p.messageId === messageId);
+    if (i < 0) return false;
+    this.#pins.splice(i, 1);
+    return true;
+  }
+
+  async listPinnedMessages(channelId: Id): Promise<PinnedMessage[]> {
+    const out: PinnedMessage[] = [];
+    for (let i = this.#pins.length - 1; i >= 0; i--) {
+      const p = this.#pins[i]!; // newest pin first
+      if (p.channelId !== channelId) continue;
+      const msg = this.#messagesById.get(p.messageId);
+      if (!msg) continue;
+      out.push({
+        ...p,
+        seq: msg.seq,
+        authorRef: msg.authorRef,
+        content: msg.redactedAt ? null : (this.#content.get(p.messageId) ?? null),
+      });
+    }
+    return out;
   }
 
   // ── Per-user read markers → unread counts ─────────────────────────────────────────────────

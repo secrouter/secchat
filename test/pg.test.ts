@@ -176,6 +176,33 @@ if (!DATABASE_URL) {
     assert.equal(await store.isMember(channel.id, "user-bob"), false);
   });
 
+  test("pins: idempotent pin (keeps original pinner), newest-first list enriched, unpin, redacted ⇒ null", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "first" });
+    const m2 = await store.appendMessage({ channelId: channel.id, authorRef: "user-bob", authorType: "user", content: "second" });
+
+    await store.pinMessage(channel.id, m1.id, "user-alice");
+    await store.pinMessage(channel.id, m2.id, "user-bob");
+    // A re-pin keeps the ORIGINAL pinner (ON CONFLICT DO nothing-meaningful).
+    const rePin = await store.pinMessage(channel.id, m1.id, "user-carol");
+    assert.equal(rePin.pinnedBy, "user-alice");
+
+    const list = await store.listPinnedMessages(channel.id);
+    assert.deepEqual(list.map((p) => p.messageId), [m2.id, m1.id], "newest pin first");
+    assert.equal(list[0]!.content, "second");
+    assert.equal(list[0]!.authorRef, "user-bob");
+    assert.equal(list[0]!.seq, m2.seq);
+
+    assert.equal(await store.unpinMessage(m2.id), true);
+    assert.equal(await store.unpinMessage(m2.id), false); // second unpin is a no-op
+    assert.deepEqual((await store.listPinnedMessages(channel.id)).map((p) => p.messageId), [m1.id]);
+
+    // Redacting a pinned message keeps the pin but nulls its content.
+    await store.redactMessage(m1.id, "admin", "spillage");
+    const afterRedact = await store.listPinnedMessages(channel.id);
+    assert.equal(afterRedact[0]!.content, null);
+  });
+
   test("getChannel returns null for an unknown id", async () => {
     assert.equal(await store.getChannel(randomUUID()), null);
   });

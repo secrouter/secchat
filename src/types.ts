@@ -241,6 +241,23 @@ export interface MentionView extends Mention {
   channelName?: string;
 }
 
+/** A pinned message — a channel-scoped bookmark on a message (who pinned it, when). One pin per
+ * message (idempotent). NOT chained: a lightweight, mutable channel affordance like reactions. */
+export interface Pin {
+  channelId: Id;
+  messageId: Id;
+  pinnedBy: string;
+  pinnedAt: string;
+}
+
+/** A pin enriched with its message's content/seq/author for the pinned-messages panel (content is
+ * null when the message has been redacted — the pin survives as a tombstone). */
+export interface PinnedMessage extends Pin {
+  seq: number;
+  authorRef: string;
+  content: string | null;
+}
+
 /** An inbound webhook: an opaque token that lets an external system post into ONE channel as a
  * bot author. The token is the credential; treat it like a secret. */
 export interface Webhook {
@@ -342,6 +359,14 @@ export interface Store {
   countUnseenMentions(sub: string): Promise<number>;
   /** Mark a user's mentions seen — all of them, or just `ids`. Returns how many rows changed. */
   markMentionsSeen(sub: string, ids?: Id[]): Promise<number>;
+
+  // Pins (channel-scoped message bookmarks; not chained).
+  /** Pin a message in its channel (idempotent per message). Returns the pin row. */
+  pinMessage(channelId: Id, messageId: Id, by: string): Promise<Pin>;
+  /** Unpin a message. Returns whether a pin was removed. */
+  unpinMessage(messageId: Id): Promise<boolean>;
+  /** A channel's pinned messages, newest-pin first, enriched with content/seq/author. */
+  listPinnedMessages(channelId: Id): Promise<PinnedMessage[]>;
 
   // Per-user read markers → unread counts.
   setLastRead(channelId: Id, userSub: string, seq: number): Promise<void>;
