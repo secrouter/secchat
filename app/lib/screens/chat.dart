@@ -1333,6 +1333,7 @@ class _ChatScreenState extends State<ChatScreen> {
       entries: topLevel,
       typing: _typing,
       currentUserSub: widget.principal.sub,
+      labelForSub: _labelForSub,
       onToggleReaction: _toggleReaction,
       replyCounts: replyCounts,
       onOpenThread: canThread ? _openThread : null,
@@ -1375,6 +1376,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: MessageList(
             entries: [MessageEntry(parent), ...replies.map(MessageEntry.new)],
             currentUserSub: widget.principal.sub,
+            labelForSub: _labelForSub,
             onToggleReaction: _toggleReaction,
             isAdmin: widget.principal.isAdmin,
             onRedact: _redactMessage,
