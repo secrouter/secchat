@@ -22,6 +22,9 @@ import '../widgets/marking_picker.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import '../platform/daemon_supervisor.dart';
 import '../widgets/members_panel.dart';
 import '../widgets/mentions_panel.dart';
 import '../widgets/pins_panel.dart';
@@ -29,6 +32,12 @@ import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/step_up_dialog.dart';
 import '../widgets/user_picker.dart';
+
+/// Test seam: how [ChatScreen] obtains its runner-daemon supervisor. Widget tests override this with
+/// a no-op so they never spawn a real child process (which would leak pending timers under the test
+/// binding). Production keeps the real desktop / no-op web factory.
+@visibleForTesting
+DaemonSupervisor Function() debugDaemonSupervisorFactory = createDaemonSupervisor;
 
 /// The main chat surface: sidebar + selected channel's transcript +
 /// composer, backed by [api]. Everything here goes through the [ApiClient]
@@ -139,10 +148,19 @@ class _ChatScreenState extends State<ChatScreen> {
   // the thread view), or null for the normal channel view. Cleared on switch.
   String? _threadParentId;
 
+  // The bundled runner daemon (desktop only): spawns pi on THIS machine wired to the signed-in user,
+  // so coding agents route to it. No-op on web (a web user relies on a standalone/remote daemon).
+  final DaemonSupervisor _daemon = debugDaemonSupervisorFactory();
+
   @override
   void initState() {
     super.initState();
     _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
+    // Start the bundled runner daemon on desktop (needs a bearer token — cookie-session mode has
+    // none yet; a follow-on mints a scoped runner token there).
+    if (_daemon.supported) {
+      _daemon.start(secchatUrl: widget.api.origin.toString(), token: widget.api.token ?? '');
+    }
     _loadChannels();
     _loadUsers();
     _loadMentions();
@@ -200,6 +218,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _typingPrune?.cancel();
+    _daemon.dispose();
     _wsSub?.cancel();
     super.dispose();
   }
@@ -1122,6 +1141,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onSearch: _openSearch,
             onMentions: _openMentions,
             mentionCount: _unseenMentions,
+            runnerState: _daemon.supported ? _daemon.state : null,
           ),
           Expanded(
             child: Row(

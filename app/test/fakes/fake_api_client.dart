@@ -10,6 +10,12 @@ import 'package:secchat_app/models.dart';
 /// [wsEventsByChannel] and call `.add(...)` on the returned controller if a
 /// test needs to simulate a live event.
 class FakeApiClient implements ApiClient {
+  @override
+  Uri get origin => Uri.parse('http://127.0.0.1:47010');
+
+  @override
+  String? get token => 'dev.alice.eng';
+
   FakeApiClient({
     Principal? me,
     List<Channel>? channels,

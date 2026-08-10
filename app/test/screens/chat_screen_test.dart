@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/commands.dart';
 import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/models.dart';
+import 'package:secchat_app/platform/daemon_supervisor.dart';
 import 'package:secchat_app/screens/chat.dart';
 import 'package:secchat_app/widgets/composer.dart';
 import 'package:secchat_app/widgets/marking_banner.dart';
@@ -28,6 +29,12 @@ const _channels = [
 ];
 
 void main() {
+  // ChatScreen spawns the bundled runner daemon on desktop — the test host IS desktop, so override
+  // the factory with a no-op so widget tests never launch a real child process (which leaks pending
+  // timers under the test binding).
+  setUp(() => debugDaemonSupervisorFactory = () => NoopDaemonSupervisor());
+  tearDownAll(() => debugDaemonSupervisorFactory = createDaemonSupervisor);
+
   testWidgets(
     'ChatScreen renders channels and messages, including a redacted one as redacted text',
     (tester) async {

@@ -32,6 +32,13 @@ class ApiException implements Exception {
 }
 
 abstract class ApiClient {
+  /// The SecChat origin this client talks to — used to wire the bundled runner daemon (desktop).
+  Uri get origin;
+
+  /// The bearer token this client authenticates with, or null in cookie-session mode (in which case
+  /// the bundled daemon has no token to attach with — a follow-on mints a scoped runner token).
+  String? get token;
+
   Future<Principal> getMe();
 
   Future<List<Channel>> getChannels();
@@ -212,7 +219,9 @@ class HttpApiClient implements ApiClient {
 
   /// The bearer token, or `null` for session (cookie) mode. See the class
   /// doc for what each mode sends on the wire.
+  @override
   final String? token;
+  @override
   final Uri origin;
 
   final http.Client _http = http.Client();

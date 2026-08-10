@@ -1,10 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../formatting.dart';
 import '../models.dart';
+import '../platform/daemon_supervisor.dart';
 import '../theme.dart';
 import 'badges.dart';
 import 'brand_mark.dart';
+import 'runner_status.dart';
 
 /// Live state of the current channel's WebSocket connection, shown as the
 /// small dot + label in the top bar (`.conn-indicator` in `app.css`).
@@ -20,12 +23,16 @@ class AppTopBar extends StatelessWidget {
     this.onSearch,
     this.onMentions,
     this.mentionCount = 0,
+    this.runnerState,
   });
 
   final Principal principal;
   final ConnStatus status;
   final VoidCallback onSignOut;
   final VoidCallback? onSearch;
+
+  /// The bundled runner daemon's live state (desktop). Null ⇒ no runner chip (web/mobile).
+  final ValueListenable<RunnerDaemonState>? runnerState;
 
   /// Opens the @mentions inbox. Null ⇒ no mentions affordance.
   final VoidCallback? onMentions;
@@ -58,6 +65,10 @@ class AppTopBar extends StatelessWidget {
           if (onMentions != null) ...[
             _MentionsButton(count: mentionCount, onPressed: onMentions!),
             const SizedBox(width: 6),
+          ],
+          if (runnerState != null) ...[
+            RunnerStatusChip(state: runnerState!),
+            const SizedBox(width: 12),
           ],
           _ConnIndicator(status: status),
           const SizedBox(width: 16),
