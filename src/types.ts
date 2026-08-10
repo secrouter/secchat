@@ -217,6 +217,30 @@ export interface Reaction {
   at: string;
 }
 
+/** A record that `mentionedSub` was @-mentioned by `authorSub` in a message (see
+ * src/mentions/parse.ts for resolution). Powers the durable "my mentions" inbox — the WS hub has
+ * no offline queueing, so a live-only mention would be lost across a reconnect — and an unseen
+ * badge count. NOT in the audit chain: a routing/social signal, not a governance event. channelId
+ * is denormalized so the inbox lists + re-checks membership without joining through the message. */
+export interface Mention {
+  id: Id;
+  messageId: Id;
+  channelId: Id;
+  mentionedSub: string;
+  authorSub: string;
+  createdAt: string;
+  seenAt?: string; // set once the user has viewed their mentions inbox
+}
+
+/** A mention enriched for the inbox list with the triggering message's current content, seq, and
+ * channel name, so a jump-to-context row renders without a second fetch. `content` is null when the
+ * message has since been redacted (the row still shows who mentioned you, where, and when). */
+export interface MentionView extends Mention {
+  seq: number;
+  content: string | null;
+  channelName?: string;
+}
+
 /** An inbound webhook: an opaque token that lets an external system post into ONE channel as a
  * bot author. The token is the credential; treat it like a secret. */
 export interface Webhook {
@@ -304,6 +328,16 @@ export interface Store {
   /** All reactions on any message in `channelId` — lets the message-history route attach reactions
    * to each message in one read instead of N per-message calls. */
   listReactionsForChannel(channelId: Id): Promise<Reaction[]>;
+
+  // Mentions (@-mentions inbox; resolution in src/mentions/parse.ts, delivery via the WS hub).
+  /** Record that a user was mentioned by a message. Called once per resolved mention at post time. */
+  addMention(input: { messageId: Id; channelId: Id; mentionedSub: string; authorSub: string }): Promise<Mention>;
+  /** A user's mentions enriched for the inbox, newest first. `unseenOnly` limits to not-yet-seen;
+   * `limit` caps the count (default a sane page). */
+  listMentionsForUser(sub: string, opts?: { limit?: number; unseenOnly?: boolean }): Promise<MentionView[]>;
+  countUnseenMentions(sub: string): Promise<number>;
+  /** Mark a user's mentions seen — all of them, or just `ids`. Returns how many rows changed. */
+  markMentionsSeen(sub: string, ids?: Id[]): Promise<number>;
 
   // Per-user read markers → unread counts.
   setLastRead(channelId: Id, userSub: string, seq: number): Promise<void>;

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../clipboard_guard.dart';
 import '../commands.dart';
 import '../marking.dart';
+import '../mentions.dart';
 import '../models.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
@@ -34,6 +35,7 @@ class MessageComposer extends StatefulWidget {
     this.clipboardGuard,
     this.channelMarking,
     this.initialMarking = 'UNCLASSIFIED',
+    this.mentionUsers = const [],
   });
 
   /// Invoked with the trimmed message text, its marking, and the ids of any
@@ -74,6 +76,11 @@ class MessageComposer extends StatefulWidget {
   /// The per-message level pre-selected when the channel is unmarked (the policy
   /// default — fail-safe).
   final String initialMarking;
+
+  /// Candidates for `@`-mention autocomplete — typically the channel's members (or the roster)
+  /// MINUS the current user. Empty ⇒ no autocomplete (typing `@` is just text). The inserted token
+  /// is `@<mentionHandle>` (derived from the display name), which the server resolves on post.
+  final List<User> mentionUsers;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -329,6 +336,54 @@ class _MessageComposerState extends State<MessageComposer> {
     );
   }
 
+  // ── @-mention autocomplete ────────────────────────────────────────────
+
+  /// The `@`-token the caret is currently inside, if any: the `@` must sit at a word boundary and
+  /// everything from it to the (collapsed) caret must be handle characters (no whitespace). Returns
+  /// the `@`'s offset and the partial query after it, or null when the caret isn't in a mention.
+  ({int start, String query})? _activeMention() {
+    if (widget.mentionUsers.isEmpty) return null;
+    final sel = _controller.selection;
+    if (!sel.isValid || !sel.isCollapsed) return null;
+    final caret = sel.baseOffset;
+    final text = _controller.text;
+    if (caret < 0 || caret > text.length) return null;
+    final handleChar = RegExp(r'[a-zA-Z0-9._-]');
+    for (var i = caret - 1; i >= 0; i--) {
+      final c = text[i];
+      if (c == '@') {
+        // A mention '@' starts the line or follows whitespace / an opening bracket (never an email).
+        if (i == 0 || RegExp(r'[\s([{<]').hasMatch(text[i - 1])) {
+          return (start: i, query: text.substring(i + 1, caret));
+        }
+        return null;
+      }
+      if (!handleChar.hasMatch(c)) return null; // hit whitespace/other ⇒ not in a mention
+    }
+    return null;
+  }
+
+  /// The mention candidates for the active `@`-query (capped for the strip).
+  List<User> get _mentionMatches {
+    final active = _activeMention();
+    if (active == null) return const [];
+    return matchMentionCandidates(widget.mentionUsers, active.query).take(6).toList();
+  }
+
+  /// Replaces the active `@partial` with `@<handle> ` (handle derived from the display name) and
+  /// moves the caret past it, ready for the next word.
+  void _applyMention(User user) {
+    final active = _activeMention();
+    if (active == null) return;
+    final caret = _controller.selection.baseOffset;
+    final replacement = '@${mentionHandle(user)} ';
+    _controller.value = TextEditingValue(
+      text: _controller.text.replaceRange(active.start, caret, replacement),
+      selection: TextSelection.collapsed(offset: active.start + replacement.length),
+    );
+    _fieldFocus.requestFocus();
+  }
+
   /// Replaces the field with `/<name> ` when a suggestion is chosen.
   void _applySuggestion(SlashCommand command) {
     final text = '/${command.name} ';
@@ -344,6 +399,7 @@ class _MessageComposerState extends State<MessageComposer> {
   @override
   Widget build(BuildContext context) {
     final suggestions = suggestCommands(_controller.text);
+    final mentionMatches = _mentionMatches;
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 10, 18, 14),
       decoration: const BoxDecoration(
@@ -354,6 +410,10 @@ class _MessageComposerState extends State<MessageComposer> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (mentionMatches.isNotEmpty) _MentionStrip(
+            users: mentionMatches,
+            onPick: _applyMention,
+          ),
           if (suggestions.isNotEmpty) _SuggestionStrip(
             commands: suggestions,
             onPick: _applySuggestion,
@@ -836,6 +896,58 @@ class _SuggestionStrip extends StatelessWidget {
                           color: AppColors.textMuted,
                         ),
                       ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The `@`-mention autocomplete strip shown above the field while the caret is inside an `@`-token.
+/// Lists matching members by display name + handle; picking inserts `@<handle>`.
+class _MentionStrip extends StatelessWidget {
+  const _MentionStrip({required this.users, required this.onPick});
+
+  final List<User> users;
+  final void Function(User) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceRaised,
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final user in users)
+            InkWell(
+              onTap: () => onPick(user),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.alternate_email, size: 14, color: AppColors.accent),
+                    const SizedBox(width: 8),
+                    Text(
+                      user.label,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '@${mentionHandle(user)}',
+                      style: AppFonts.mono(fontSize: 11.5, color: AppColors.textFaint),
                     ),
                   ],
                 ),

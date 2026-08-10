@@ -486,6 +486,49 @@ class GrantExecuteResult {
 // time -- adding a new event type here is a compile error everywhere it
 // isn't yet handled, not a silent no-op at runtime.
 
+/// A record that the current user was @-mentioned, enriched for the inbox with the triggering
+/// message's content, seq, and channel name. `content` is null when that message has since been
+/// redacted (the row still shows who mentioned you, where, and when).
+class Mention {
+  const Mention({
+    required this.id,
+    required this.messageId,
+    required this.channelId,
+    required this.mentionedSub,
+    required this.authorSub,
+    required this.createdAt,
+    this.seq = 0,
+    this.content,
+    this.channelName,
+    this.seenAt,
+  });
+
+  final String id;
+  final String messageId;
+  final String channelId;
+  final String mentionedSub;
+  final String authorSub;
+  final DateTime createdAt;
+  final int seq;
+  final String? content;
+  final String? channelName;
+  final DateTime? seenAt;
+
+  factory Mention.fromJson(Map<String, dynamic> json) => Mention(
+    id: json['id'] as String? ?? '',
+    messageId: json['messageId'] as String? ?? '',
+    channelId: json['channelId'] as String? ?? '',
+    mentionedSub: json['mentionedSub'] as String? ?? '',
+    authorSub: json['authorSub'] as String? ?? '',
+    createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+        DateTime.fromMillisecondsSinceEpoch(0),
+    seq: (json['seq'] as num?)?.toInt() ?? 0,
+    content: json['content'] as String?,
+    channelName: json['channelName'] as String?,
+    seenAt: json['seenAt'] != null ? DateTime.tryParse(json['seenAt'] as String) : null,
+  );
+}
+
 sealed class WsEvent {
   const WsEvent({required this.channelId});
 
@@ -574,6 +617,13 @@ final class WsMessageEditEvent extends WsEvent {
   final String by;
 }
 
+/// The current user was @-mentioned somewhere — drives the live mention badge (and can jump to the
+/// message). Delivered per-user (independent of which channel is open), but still carries channelId.
+final class WsMentionEvent extends WsEvent {
+  const WsMentionEvent({required this.mention, required super.channelId});
+  final Mention mention;
+}
+
 /// A channel's classification level was set/changed — every viewer updates the
 /// banner (and the composer's marking lock) live.
 final class WsChannelMarkingEvent extends WsEvent {
@@ -654,6 +704,10 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
         by: json['by'] as String? ?? '',
         channelId: channelId,
       );
+    case 'mention':
+      final raw = json['mention'];
+      if (raw is! Map<String, dynamic>) return null;
+      return WsMentionEvent(mention: Mention.fromJson(raw), channelId: channelId);
     default:
       return null;
   }

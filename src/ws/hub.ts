@@ -50,6 +50,11 @@ export interface Hub {
   /** JSON-encode `payload` and push it as a text frame to every connection subscribed to
    * `channelId`. No-op if nobody is subscribed. */
   broadcast(channelId: string, payload: unknown): void;
+  /** Push `payload` to EVERY live connection of a single principal, regardless of channel
+   * subscription — the primitive for user-targeted signals like @mention notifications. No-op if
+   * `sub` has no open connection right now (the hub has no offline queueing; durable delivery is the
+   * caller's job, e.g. the mentions table). */
+  deliverToUser(sub: string, payload: unknown): void;
   /** Close every open connection and detach from the server's `"upgrade"` event. */
   close(): void;
 }
@@ -258,6 +263,21 @@ export function attachWsHub(
     }
   }
 
+  /** Push a payload to all of one principal's sockets (see the Hub interface). Unlike broadcast this
+   * is NOT gated on channel subscription — the recipient need not have the channel open. */
+  function deliverToUser(sub: string, payload: unknown): void {
+    const conns = connectionsBySub.get(sub);
+    if (!conns || conns.size === 0) return;
+    const frame = encodeTextFrame(JSON.stringify(payload));
+    for (const conn of conns) {
+      try {
+        conn.socket.write(frame);
+      } catch {
+        // A dead socket whose close/error listener hasn't fired yet — don't break delivery to the rest.
+      }
+    }
+  }
+
   function close(): void {
     server.off("upgrade", onUpgrade);
     for (const conn of connections) {
@@ -273,5 +293,5 @@ export function attachWsHub(
     channelSubscriptions.clear();
   }
 
-  return { subscribe, broadcast, close };
+  return { subscribe, broadcast, deliverToUser, close };
 }

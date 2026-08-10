@@ -103,6 +103,14 @@ abstract class ApiClient {
   /// in channels the caller belongs to, newest first.
   Future<List<SearchHit>> search(String query);
 
+  /// The caller's @mentions inbox across all channels (newest first), plus the
+  /// unseen badge count. [unseenOnly] limits the list to not-yet-seen mentions.
+  Future<({List<Mention> mentions, int unseen})> getMentions({bool unseenOnly, int? limit});
+
+  /// Mark the caller's mentions seen — all of them, or just [ids]; returns the
+  /// new unseen count so the badge can refresh in one round-trip.
+  Future<int> markMentionsSeen({List<String>? ids});
+
   /// Redacts a message — a governed content purge (author or admin). [reason]
   /// is required (the audit record). The change is reflected live via a
   /// `redaction` WS event.
@@ -408,6 +416,26 @@ class HttpApiClient implements ApiClient {
     final data =
         await _get('/search?q=${Uri.encodeQueryComponent(query)}') as List<dynamic>;
     return data.map((e) => SearchHit.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<({List<Mention> mentions, int unseen})> getMentions({bool unseenOnly = false, int? limit}) async {
+    final q = <String>[];
+    if (unseenOnly) q.add('unseen=1');
+    if (limit != null) q.add('limit=$limit');
+    final path = q.isEmpty ? '/mentions' : '/mentions?${q.join('&')}';
+    final data = await _get(path) as Map<String, dynamic>;
+    final mentions = (data['mentions'] as List<dynamic>? ?? const [])
+        .map((e) => Mention.fromJson(e as Map<String, dynamic>))
+        .toList();
+    return (mentions: mentions, unseen: (data['unseen'] as num?)?.toInt() ?? 0);
+  }
+
+  @override
+  Future<int> markMentionsSeen({List<String>? ids}) async {
+    final body = ids != null && ids.isNotEmpty ? {'ids': ids} : const <String, dynamic>{};
+    final data = await _post('/mentions/seen', body) as Map<String, dynamic>;
+    return (data['unseen'] as num?)?.toInt() ?? 0;
   }
 
   @override

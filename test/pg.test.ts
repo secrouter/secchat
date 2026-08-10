@@ -120,6 +120,38 @@ if (!DATABASE_URL) {
     assert.equal((await store.verifyChains()).messagesOk, true);
   });
 
+  test("mentions: recorded once per (message,user), newest-first + enriched, seen-marking, redacted ⇒ null content", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", name: "standup", createdBy: "user-alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
+    const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "@bob first" });
+    const m2 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "@bob second" });
+
+    await store.addMention({ messageId: m1.id, channelId: channel.id, mentionedSub: "user-bob", authorSub: "user-alice" });
+    await store.addMention({ messageId: m2.id, channelId: channel.id, mentionedSub: "user-bob", authorSub: "user-alice" });
+    // Idempotent per (message, recipient) — the unique index makes a re-resolve a no-op.
+    await store.addMention({ messageId: m1.id, channelId: channel.id, mentionedSub: "user-bob", authorSub: "user-alice" });
+
+    assert.equal(await store.countUnseenMentions("user-bob"), 2);
+    const list = await store.listMentionsForUser("user-bob");
+    assert.deepEqual(list.map((x) => x.content), ["@bob second", "@bob first"], "newest first, enriched with content");
+    assert.equal(list[0]!.seq, m2.seq);
+    assert.equal(list[0]!.channelName, "standup");
+    assert.equal(list[0]!.authorSub, "user-alice");
+
+    // Mark just the newest seen (by id): unseen drops to 1, and the unseen-only list holds only m1.
+    const changed = await store.markMentionsSeen("user-bob", [list[0]!.id]);
+    assert.equal(changed, 1);
+    assert.equal(await store.countUnseenMentions("user-bob"), 1);
+    assert.deepEqual((await store.listMentionsForUser("user-bob", { unseenOnly: true })).map((x) => x.content), ["@bob first"]);
+
+    // Redacting the message tombstones its mention's content (who/where/when survive).
+    await store.redactMessage(m1.id, "admin", "spillage");
+    const afterRedact = await store.listMentionsForUser("user-bob");
+    const forM1 = afterRedact.find((x) => x.messageId === m1.id)!;
+    assert.equal(forM1.content, null);
+    assert.equal(forM1.mentionedSub, "user-bob");
+  });
+
   test("getChannel returns null for an unknown id", async () => {
     assert.equal(await store.getChannel(randomUUID()), null);
   });

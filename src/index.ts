@@ -109,6 +109,10 @@ if (config.databaseUrl) {
 
 let hub: Hub | undefined;
 const broadcast = (channelId: string, payload: unknown) => hub?.broadcast(channelId, payload);
+// Per-user realtime delivery (the @mention path) — reaches every socket of one principal regardless
+// of which channel they have open. Like `broadcast`, resolved lazily so the server can be created
+// before the hub (which needs the server) — see the note above.
+const notify = (sub: string, payload: unknown) => hub?.deliverToUser(sub, payload);
 // Coding-agent control plane (Sprint 5: the real pi runner). The execute-gate (plan-mode default,
 // owner-authorized mutation) is fully real either way — selectRunner() only decides what's on the
 // other end of the Runner port: the real pi CLI when it's usable, else the interactive demo stub
@@ -161,7 +165,7 @@ const webRoot = existsSync(`${flutterWeb}/index.html`) ? flutterWeb : minimalWeb
 if (config.devMode) console.error(`▸ web client: ${webRoot === flutterWeb ? "Flutter build" : "minimal JS (fallback)"} — ${webRoot}`);
 
 const server = createHttpServer({
-  verifyToken, store, llm, control, broadcast, auth,
+  verifyToken, store, llm, control, broadcast, notify, auth,
   search: (userSub, q) => searchMessages(store, userSub, q),
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },

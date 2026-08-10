@@ -224,6 +224,28 @@ class FakeApiClient implements ApiClient {
     return List.of(searchResults);
   }
 
+  /// Seed the mentions inbox a test should see; `unseenMentions` drives the badge.
+  List<Mention> mentions = [];
+  int unseenMentions = 0;
+
+  /// Every `markMentionsSeen` call's `ids` arg (null = "all"), in order.
+  final List<List<String>?> markMentionsSeenCalls = [];
+
+  @override
+  Future<({List<Mention> mentions, int unseen})> getMentions({bool unseenOnly = false, int? limit}) async {
+    _maybeThrow('getMentions');
+    final list = unseenOnly ? mentions.where((m) => m.seenAt == null).toList() : List.of(mentions);
+    return (mentions: list, unseen: unseenMentions);
+  }
+
+  @override
+  Future<int> markMentionsSeen({List<String>? ids}) async {
+    _maybeThrow('markMentionsSeen');
+    markMentionsSeenCalls.add(ids);
+    unseenMentions = 0;
+    return 0;
+  }
+
   /// Every `redactMessage` call, in order.
   final List<({String messageId, String reason})> redactCalls = [];
 

@@ -18,12 +18,20 @@ class AppTopBar extends StatelessWidget {
     required this.status,
     required this.onSignOut,
     this.onSearch,
+    this.onMentions,
+    this.mentionCount = 0,
   });
 
   final Principal principal;
   final ConnStatus status;
   final VoidCallback onSignOut;
   final VoidCallback? onSearch;
+
+  /// Opens the @mentions inbox. Null ⇒ no mentions affordance.
+  final VoidCallback? onMentions;
+
+  /// Unseen @mention count — shown as a badge on the mentions button (0 ⇒ no badge).
+  final int mentionCount;
 
   @override
   Widget build(BuildContext context) {
@@ -47,6 +55,10 @@ class AppTopBar extends StatelessWidget {
             ),
             const SizedBox(width: 6),
           ],
+          if (onMentions != null) ...[
+            _MentionsButton(count: mentionCount, onPressed: onMentions!),
+            const SizedBox(width: 6),
+          ],
           _ConnIndicator(status: status),
           const SizedBox(width: 16),
           _UserChip(principal: principal),
@@ -59,6 +71,48 @@ class AppTopBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The @mentions bell with an unseen-count badge overlaid on its top-right.
+class _MentionsButton extends StatelessWidget {
+  const _MentionsButton({required this.count, required this.onPressed});
+
+  final int count;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        IconButton(
+          onPressed: onPressed,
+          icon: const Icon(Icons.alternate_email, size: 18),
+          tooltip: 'Mentions',
+          color: count > 0 ? AppColors.accent : AppColors.textMuted,
+        ),
+        if (count > 0)
+          Positioned(
+            right: 2,
+            top: 2,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              constraints: const BoxConstraints(minWidth: 16),
+              decoration: BoxDecoration(
+                color: AppColors.bad,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: AppColors.surface, width: 1.5),
+              ),
+              child: Text(
+                count > 99 ? '99+' : '$count',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: Colors.white),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

@@ -71,6 +71,8 @@ import type {
   Id,
   Member,
   MemberType,
+  Mention,
+  MentionView,
   Message,
   MessagePageOpts,
   MessageRevision,
@@ -192,6 +194,20 @@ interface AttachmentRow {
   sha256: string;
   marking: string;
   created_at: Date;
+}
+
+interface MentionRow {
+  id: string;
+  message_id: string;
+  channel_id: string;
+  mentioned_sub: string;
+  author_sub: string;
+  created_at: Date;
+  seen_at: Date | null;
+  seq: number;
+  redacted_at: Date | null;
+  content: string | null; // from message_content via LEFT JOIN; null once redacted (or never set)
+  channel_name: string | null;
 }
 
 interface WebhookRow {
@@ -896,6 +912,88 @@ export class PgStore implements Store, SessionStore {
       [channelId],
     );
     return rows.map(rowToAttachment);
+  }
+
+  // ── Mentions (@-mentions inbox) ─────────────────────────────────────────────────────────────
+
+  async addMention(input: { messageId: Id; channelId: Id; mentionedSub: string; authorSub: string }): Promise<Mention> {
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    // Idempotent per (message_id, mentioned_sub) — the unique index makes a re-resolve a no-op; on
+    // conflict we return the pre-existing row rather than a fresh one.
+    const { rows } = await this.#pool.query<{ id: string; created_at: Date; seen_at: Date | null }>(
+      `INSERT INTO mentions (id, message_id, channel_id, mentioned_sub, author_sub, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (message_id, mentioned_sub) DO UPDATE SET message_id = EXCLUDED.message_id
+       RETURNING id, created_at, seen_at`,
+      [id, input.messageId, input.channelId, input.mentionedSub, input.authorSub, createdAt],
+    );
+    const row = rows[0]!;
+    return compact({
+      id: row.id,
+      messageId: input.messageId,
+      channelId: input.channelId,
+      mentionedSub: input.mentionedSub,
+      authorSub: input.authorSub,
+      createdAt: iso(row.created_at),
+      seenAt: row.seen_at ? iso(row.seen_at) : undefined,
+    });
+  }
+
+  async listMentionsForUser(sub: string, opts?: { limit?: number; unseenOnly?: boolean }): Promise<MentionView[]> {
+    const limit = opts?.limit ?? 50;
+    const { rows } = await this.#pool.query<MentionRow>(
+      `SELECT mn.id, mn.message_id, mn.channel_id, mn.mentioned_sub, mn.author_sub, mn.created_at, mn.seen_at,
+              m.seq, m.redacted_at, mc.content, c.name AS channel_name
+       FROM mentions mn
+       JOIN messages m ON m.id = mn.message_id
+       LEFT JOIN message_content mc ON mc.message_id = mn.message_id
+       LEFT JOIN channels c ON c.id = mn.channel_id
+       WHERE mn.mentioned_sub = $1 ${opts?.unseenOnly ? "AND mn.seen_at IS NULL" : ""}
+       ORDER BY mn.ins_seq DESC
+       LIMIT $2`,
+      [sub, limit],
+    );
+    return rows.map((r) => {
+      // `content` is a required field (string | null) — a redacted/absent message is an explicit
+      // null tombstone, NOT a dropped key — so it must stay out of compact() (which strips nulls).
+      const view: MentionView = {
+        id: r.id,
+        messageId: r.message_id,
+        channelId: r.channel_id,
+        mentionedSub: r.mentioned_sub,
+        authorSub: r.author_sub,
+        createdAt: iso(r.created_at),
+        seq: r.seq,
+        content: r.redacted_at ? null : r.content,
+      };
+      if (r.seen_at) view.seenAt = iso(r.seen_at);
+      if (r.channel_name) view.channelName = r.channel_name;
+      return view;
+    });
+  }
+
+  async countUnseenMentions(sub: string): Promise<number> {
+    const { rows } = await this.#pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM mentions WHERE mentioned_sub = $1 AND seen_at IS NULL`,
+      [sub],
+    );
+    return rows[0]?.count ?? 0;
+  }
+
+  async markMentionsSeen(sub: string, ids?: Id[]): Promise<number> {
+    const now = new Date().toISOString();
+    // All of the user's unseen mentions, or just the given ids (still scoped to the user).
+    const result = ids
+      ? await this.#pool.query(
+          `UPDATE mentions SET seen_at = $2 WHERE mentioned_sub = $1 AND seen_at IS NULL AND id = ANY($3::uuid[])`,
+          [sub, now, ids],
+        )
+      : await this.#pool.query(
+          `UPDATE mentions SET seen_at = $2 WHERE mentioned_sub = $1 AND seen_at IS NULL`,
+          [sub, now],
+        );
+    return result.rowCount ?? 0;
   }
 
   // ── Per-user read markers → unread counts ───────────────────────────────────────────────────

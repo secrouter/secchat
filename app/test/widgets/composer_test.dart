@@ -282,6 +282,45 @@ void main() {
     expect(find.text('notes.txt'), findsNothing);
   });
 
+  testWidgets('@-autocomplete: typing @ lists members and picking inserts the handle', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    String? sent;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageComposer(
+            onSend: (text, marking, _) async => sent = text,
+            mentionUsers: const [
+              User(sub: 'alice', email: 'alice@x.mil', displayName: 'Alice Ng'),
+              User(sub: 'bob', email: 'bob@x.mil', displayName: 'Bob Reyes'),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), 'hey @al');
+    await tester.pump();
+
+    // The mention strip shows the matching member by display name + handle; the non-match is absent.
+    expect(find.text('Alice Ng'), findsOneWidget);
+    expect(find.text('@aliceng'), findsOneWidget);
+    expect(find.text('Bob Reyes'), findsNothing);
+
+    // Picking replaces the "@al" partial with "@aliceng " (handle derived from the display name).
+    await tester.tap(find.text('Alice Ng'));
+    await tester.pump();
+    expect(_fieldText(tester), 'hey @aliceng ');
+
+    // Sending forwards the composed text (trimmed) carrying the handle the server resolves.
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await tester.pump();
+    expect(sent, 'hey @aliceng');
+  });
+
   testWidgets('Ctrl+V of higher-marked in-app content into a marked channel is blocked', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;

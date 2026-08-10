@@ -22,6 +22,7 @@ import '../widgets/marking_picker.dart';
 import '../widgets/message_list.dart';
 import '../widgets/new_item_dialog.dart';
 import '../widgets/redact_dialog.dart';
+import '../widgets/mentions_panel.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/step_up_dialog.dart';
@@ -88,6 +89,17 @@ class _ChatScreenState extends State<ChatScreen> {
   // the client subscribes only to the open channel today.)
   final Map<String, int> _unreadByChannel = {};
 
+  // The caller's @mentions inbox: recent mentions (newest first) + the unseen badge count. Loaded
+  // once on start and kept live via the per-user `mention` WS event.
+  List<Mention> _mentions = [];
+  int _unseenMentions = 0;
+
+  /// The roster minus the current user — the `@`-mention autocomplete candidates for the composer.
+  /// (Server-side, a mention only fires for an actual channel member, so an over-broad suggestion
+  /// list is harmless.)
+  List<User> get _mentionUsers =>
+      _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList();
+
   // The id of the message whose thread is open (the transcript is replaced by
   // the thread view), or null for the normal channel view. Cleared on switch.
   String? _threadParentId;
@@ -98,6 +110,20 @@ class _ChatScreenState extends State<ChatScreen> {
     _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
     _loadChannels();
     _loadUsers();
+    _loadMentions();
+  }
+
+  Future<void> _loadMentions() async {
+    try {
+      final inbox = await widget.api.getMentions();
+      if (!mounted) return;
+      setState(() {
+        _mentions = inbox.mentions;
+        _unseenMentions = inbox.unseen;
+      });
+    } catch (_) {
+      // Non-critical: on failure the mentions badge just stays at 0.
+    }
   }
 
   Future<void> _loadUsers() async {
@@ -249,6 +275,31 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _openMentions() async {
+    // Opening the inbox clears the unseen badge (locally now, server best-effort).
+    if (_unseenMentions > 0) {
+      setState(() => _unseenMentions = 0);
+      unawaited(widget.api.markMentionsSeen().catchError((_) => 0));
+    }
+    final chosen = await showMentionsInbox(
+      context,
+      mentions: _mentions,
+      channelLabel: (channelId) {
+        for (final channel in _channels) {
+          if (channel.id == channelId) return _channelTitle(channel);
+        }
+        return channelId;
+      },
+    );
+    if (chosen == null || !mounted) return;
+    for (final channel in _channels) {
+      if (channel.id == chosen.channelId) {
+        await _selectChannel(channel);
+        return;
+      }
+    }
+  }
+
   Future<void> _retryMessages(Channel channel) async {
     setState(() {
       _messagesError = null;
@@ -320,6 +371,11 @@ class _ChatScreenState extends State<ChatScreen> {
           _applyEdit(channelId, messageId, content, editedAt);
         case WsChannelMarkingEvent(:final marking):
           _applyChannelMarking(channelId, marking);
+        case WsMentionEvent(:final mention):
+          // The server only delivers a `mention` to the mentioned user, so any that arrives is one
+          // of MINE — light the badge and prepend it to the inbox (de-duped by id).
+          _mentions = [mention, ..._mentions.where((m) => m.id != mention.id)];
+          _unseenMentions++;
         // Agent-stream / typing events drive the OPEN channel's ephemeral UI only.
         case WsAssistantDeltaEvent(:final agentId, :final delta):
           if (isOpen) {
@@ -920,6 +976,8 @@ class _ChatScreenState extends State<ChatScreen> {
             status: _connStatus,
             onSignOut: widget.onSignOut,
             onSearch: _openSearch,
+            onMentions: _openMentions,
+            mentionCount: _unseenMentions,
           ),
           Expanded(
             child: Row(
@@ -1007,6 +1065,7 @@ class _ChatScreenState extends State<ChatScreen> {
             clipboardGuard: _clipboardGuard,
             channelMarking: selected.isMarked ? selected.cuiMarking : null,
             initialMarking: policy.defaultLevel,
+            mentionUsers: _mentionUsers,
           ),
         ],
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
@@ -1107,6 +1166,7 @@ class _ChatScreenState extends State<ChatScreen> {
           clipboardGuard: _clipboardGuard,
           channelMarking: channel.isMarked ? channel.cuiMarking : null,
           initialMarking: widget.principal.marking.defaultLevel,
+          mentionUsers: _mentionUsers,
         ),
       ],
     );

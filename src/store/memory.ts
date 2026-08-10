@@ -61,6 +61,8 @@ import type {
   ExecuteGrant,
   Id,
   Member,
+  Mention,
+  MentionView,
   Message,
   MessagePageOpts,
   MessageRevision,
@@ -85,6 +87,7 @@ export class MemoryStore implements Store, SessionStore {
   #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
   #reactions = new Map<Id, Reaction[]>(); // messageId -> reactions, append order
   #attachments = new Map<Id, Attachment>(); // attachment id -> row (messageId null until claimed); insertion order = upload order
+  #mentions: Mention[] = []; // append order; newest-first is a reverse-scan (dev-scale)
   #lastRead = new Map<Id, Map<string, number>>(); // channelId -> (userSub -> last-read seq)
   #webhooksById = new Map<Id, Webhook>();
   #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
@@ -401,6 +404,61 @@ export class MemoryStore implements Store, SessionStore {
     return [...this.#attachments.values()]
       .filter((a) => a.messageId != null && a.channelId === channelId)
       .map((a) => ({ ...a }));
+  }
+
+  // ── Mentions (@-mentions inbox) ───────────────────────────────────────────────────────────
+
+  async addMention(input: { messageId: Id; channelId: Id; mentionedSub: string; authorSub: string }): Promise<Mention> {
+    // Idempotent per (messageId, mentionedSub), matching PgStore's unique index — a re-resolve of
+    // the same message can't double-notify. Return the existing row untouched if present.
+    const existing = this.#mentions.find((m) => m.messageId === input.messageId && m.mentionedSub === input.mentionedSub);
+    if (existing) return { ...existing };
+    const mention: Mention = {
+      id: randomUUID(),
+      messageId: input.messageId,
+      channelId: input.channelId,
+      mentionedSub: input.mentionedSub,
+      authorSub: input.authorSub,
+      createdAt: new Date().toISOString(),
+    };
+    this.#mentions.push(mention);
+    return { ...mention };
+  }
+
+  async listMentionsForUser(sub: string, opts?: { limit?: number; unseenOnly?: boolean }): Promise<MentionView[]> {
+    const limit = opts?.limit ?? 50;
+    const out: MentionView[] = [];
+    for (let i = this.#mentions.length - 1; i >= 0 && out.length < limit; i--) {
+      const m = this.#mentions[i]!; // newest first (reverse append order)
+      if (m.mentionedSub !== sub) continue;
+      if (opts?.unseenOnly && m.seenAt) continue;
+      const msg = this.#messagesById.get(m.messageId);
+      out.push({
+        ...m,
+        seq: msg?.seq ?? 0,
+        // Redacted (or vanished) message ⇒ no content, but the row still says who/where/when.
+        content: msg && !msg.redactedAt ? (this.#content.get(m.messageId) ?? null) : null,
+        channelName: this.#channels.get(m.channelId)?.name,
+      });
+    }
+    return out;
+  }
+
+  async countUnseenMentions(sub: string): Promise<number> {
+    return this.#mentions.filter((m) => m.mentionedSub === sub && !m.seenAt).length;
+  }
+
+  async markMentionsSeen(sub: string, ids?: Id[]): Promise<number> {
+    const now = new Date().toISOString();
+    const idSet = ids ? new Set(ids) : null;
+    let changed = 0;
+    for (const m of this.#mentions) {
+      if (m.mentionedSub !== sub || m.seenAt) continue;
+      if (idSet && !idSet.has(m.id)) continue;
+      m.seenAt = now;
+      changed++;
+    }
+    return changed;
   }
 
   // ── Per-user read markers → unread counts ─────────────────────────────────────────────────

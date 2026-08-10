@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Message, Principal, Reaction, Store, User, VerifyToken } from "../types.ts";
+import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
@@ -166,6 +167,11 @@ function serveWebFile(res: ServerResponse, cache: Map<string, WebCacheEntry>, ab
  * Optional so the HTTP layer stays testable without a hub. */
 type Broadcast = (channelId: string, payload: unknown) => void;
 
+/** Deliver a payload to ALL of one principal's realtime connections, regardless of which channel
+ * they're viewing (wired to hub.deliverToUser). Powers user-targeted signals like @mention
+ * notifications. Optional so the HTTP layer stays testable without a hub. */
+type Notify = (sub: string, payload: unknown) => void;
+
 /** Optional full-text search port (whatever index the deployment wires up — not built here). A
  * deployment/test that doesn't wire one gets a clean 404 on GET /search, same pattern as
  * `control`/`admin` below rather than every route needing its own guard. */
@@ -224,6 +230,7 @@ function buildRouter(
   admin?: AdminDeps,
   search?: SearchFn,
   attachments?: AttachmentDeps,
+  notify?: Notify,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -582,6 +589,30 @@ function buildRouter(
       // flag mode (block already returned): a provable, content-free trail on the audit chain.
       await store.appendAudit({ actor: principal.sub, action: "message.dlp_flag", target: message.id, detail: dlpHits.join(",") });
     }
+    // @mentions: resolve @handle tokens against this channel's HUMAN members (you can only notify
+    // someone who can read the channel), record a durable inbox row per mentioned user (survives a
+    // reconnect — the WS hub has no offline queue), and push a live `mention` to their sockets. The
+    // "@" pre-check skips the members load for the overwhelming no-mention case; persistence happens
+    // BEFORE the 201 so the inbox is consistent the moment the post returns, and delivery is
+    // best-effort (a notification hiccup never fails an already-written message).
+    if (content.includes("@")) {
+      try {
+        const members = await store.listMembers(channelId);
+        const memberUsers: User[] = [];
+        for (const m of members) {
+          if (m.memberType !== "user") continue;
+          // Seen-users model: a member who hasn't signed in yet has no directory row — fall back to a
+          // sub-only User so at least sub-based handle matching still works.
+          memberUsers.push((await store.getUser(m.memberRef)) ?? { sub: m.memberRef, groups: [], lastSeenAt: message.createdAt });
+        }
+        for (const sub of resolveMentions(memberUsers, content, principal.sub)) {
+          const mention = await store.addMention({ messageId: message.id, channelId, mentionedSub: sub, authorSub: principal.sub });
+          notify?.(sub, { type: "mention", channelId, mention: { ...mention, seq: message.seq, content, channelName: channel?.name } });
+        }
+      } catch {
+        // best-effort: the message is already posted + will broadcast below regardless
+      }
+    }
     // Echo the plaintext the client just posted (the Message row carries only the content HASH),
     // and fan the same shape out to the channel's realtime subscribers. `dlpFlags` (when present)
     // drives a live warning indicator; the durable record is the audit event above.
@@ -874,6 +905,31 @@ function buildRouter(
     sendJson(res, 200, { ok: true });
   });
 
+  // ── @mentions inbox: the caller's own mentions across every channel (durable — see the mentions
+  // table). `?unseen=1` limits to not-yet-seen; `?limit=N` caps the page. No channel id: mentions
+  // are inherently cross-channel and always scoped to `principal.sub`, so there's no other user's
+  // data to leak.
+  router.add("GET", "/mentions", async ({ req, res, principal }) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    const unseenOnly = url.searchParams.get("unseen") === "1";
+    const limitRaw = Number(url.searchParams.get("limit"));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : undefined;
+    const [mentions, unseen] = await Promise.all([
+      store.listMentionsForUser(principal.sub, { unseenOnly, limit }),
+      store.countUnseenMentions(principal.sub),
+    ]);
+    sendJson(res, 200, { mentions, unseen });
+  });
+
+  // Mark the caller's mentions seen — all of them, or just `{ ids: [...] }`. Returns the new unseen
+  // count so the client can refresh its badge in one round-trip.
+  router.add("POST", "/mentions/seen", async ({ req, res, principal }) => {
+    const body = (await readJsonBody(req)) as { ids?: string[] };
+    const ids = Array.isArray(body.ids) && body.ids.length > 0 ? body.ids : undefined;
+    await store.markMentionsSeen(principal.sub, ids);
+    sendJson(res, 200, { unseen: await store.countUnseenMentions(principal.sub) });
+  });
+
   // ── Inbound webhooks: this route MINTS the token (returned once, to the member creating it).
   // POSTing TO that token is a separate, unauthenticated route handled before the auth block in
   // createServer below — see there for why (the token itself is the credential, not a bearer
@@ -1070,11 +1126,14 @@ export function createHttpServer(deps: {
   stepUp?: StepUp;
   /** Attachment byte storage + upload size cap. Unset ⇒ the upload/download routes 501. */
   attachments?: AttachmentDeps;
+  /** Per-user realtime delivery (wired to hub.deliverToUser). Unset ⇒ @mentions are still recorded
+   * durably (the inbox route), just not pushed live. */
+  notify?: Notify;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 
