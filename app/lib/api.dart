@@ -97,6 +97,12 @@ abstract class ApiClient {
   /// fire-and-forget beyond surfacing a thrown [ApiException].
   Future<void> sendInput(String sessionId, String text);
 
+  /// (Re)attach a coding-agent channel to a live runner session and return its
+  /// id. Idempotent: returns the already-running session if one is live, else
+  /// spawns a fresh one. A reloaded client (whose in-memory session handle was
+  /// lost) calls this before driving the agent with [sendInput].
+  Future<AgentSession> ensureSession(String channelId);
+
   /// Add / remove an emoji reaction on a message. Fire-and-forget beyond a
   /// thrown [ApiException]: the change is reflected in message history and
   /// streamed to every viewer as a `reaction` WS event.
@@ -465,6 +471,14 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> sendInput(String sessionId, String text) async {
     await _post('/sessions/$sessionId/input', {'text': text});
+  }
+
+  @override
+  Future<AgentSession> ensureSession(String channelId) async {
+    final data = await _post('/channels/$channelId/session', const {});
+    return AgentSession.fromJson(
+      (data as Map<String, dynamic>)['session'] as Map<String, dynamic>,
+    );
   }
 
   @override

@@ -326,6 +326,9 @@ const control: AgentControl = {
     controlCalls.getSession.push(id);
     return id === fakeSession.id ? fakeSession : null;
   },
+  async liveSession(channelId) {
+    return channelId === fakeSession.channelId ? fakeSession : null;
+  },
 };
 
 let controlServer: Server;

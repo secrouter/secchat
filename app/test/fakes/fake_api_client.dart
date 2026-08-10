@@ -195,6 +195,16 @@ class FakeApiClient implements ApiClient {
     sendInputCalls.add((sessionId: sessionId, text: text));
   }
 
+  /// Every `ensureSession` call, in order (the channel id passed).
+  final List<String> ensureSessionCalls = [];
+
+  @override
+  Future<AgentSession> ensureSession(String channelId) async {
+    _maybeThrow('ensureSession');
+    ensureSessionCalls.add(channelId);
+    return AgentSession(id: 'session-for-$channelId');
+  }
+
   /// Every reaction call, in order (`add: false` for a remove).
   final List<({String messageId, String emoji, bool add})> reactionCalls = [];
 
@@ -408,7 +418,16 @@ class FakeApiClient implements ApiClient {
     _maybeThrow('createAgent');
     createAgentCalls.add((kind: kind, name: name));
     final index = channels.length + 1;
-    final channel = Channel(id: 'agent-ch-$index', kind: ChannelKind.agent, name: name);
+    // The creator owns the agent, so the channel comes back owned (mirrors the real
+    // POST /agents, which enriches its channel the same way GET /channels does).
+    final channel = Channel(
+      id: 'agent-ch-$index',
+      kind: ChannelKind.agent,
+      name: name,
+      agentKind: kind,
+      agentId: 'agent-$index',
+      owned: true,
+    );
     final agent = Agent(id: 'agent-$index', kind: kind, name: name);
     channels = [...channels, channel];
     return CreateAgentResult(

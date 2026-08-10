@@ -15,7 +15,7 @@
 // import it), so it's fully testable offline with fakes — see test/control.test.ts.
 
 import { canGrantExecute, classifyTool, evaluateTool } from "./gate.ts";
-import type { Agent, AgentControl, AgentSession, Id, Runner, RunnerEvent, SessionStore } from "../types.ts";
+import type { Agent, AgentControl, AgentSession, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
 
@@ -24,6 +24,9 @@ export function makeControlPlane(deps: {
   runner: Runner;
   getAgent: (id: string) => Promise<Agent | null>;
   broadcast?: (channelId: string, payload: unknown) => void;
+  /** Persist a coding agent's output turn as a channel message (authorType "agent"). Unset ⇒ the
+   * legacy ephemeral agent_output broadcast (not stored). Wired to store.appendMessage. */
+  appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message>;
   leaseTtlMs?: number;
   now?: () => number;
 }): AgentControl {
@@ -39,7 +42,15 @@ export function makeControlPlane(deps: {
 
     switch (event.type) {
       case "output":
-        deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
+        // Persist the agent's turn as a real channel message (so it survives a session restart /
+        // reload and renders as markdown like any message), then broadcast THAT message. Falls back
+        // to the ephemeral agent_output stream when no persister is wired (tests / bare deployments).
+        if (deps.appendAgentMessage) {
+          const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
+          deps.broadcast?.(session.channelId, { type: "message", message });
+        } else {
+          deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
+        }
         return;
 
       case "tool_request": {
@@ -142,5 +153,17 @@ export function makeControlPlane(deps: {
     return deps.sessions.getSession(id);
   }
 
-  return { spawn, grantExecute, sendInput, getSession };
+  /** Newest starting|active session for a channel, or null. A reloaded client uses this to route
+   * input back to the running agent instead of losing the handle (the session id only ever lived in
+   * the POST /agents response before). "starting"/"active" are the two not-yet-dead statuses; an
+   * "orphaned"/"ended" one is skipped so the caller (re)spawns a fresh one. */
+  async function liveSession(channelId: Id): Promise<AgentSession | null> {
+    const sessions = await deps.sessions.listSessionsByChannel(channelId);
+    const live = sessions.filter((s) => s.status === "starting" || s.status === "active");
+    if (live.length === 0) return null;
+    // createSession appends, so the last live entry is the newest.
+    return live[live.length - 1]!;
+  }
+
+  return { spawn, grantExecute, sendInput, getSession, liveSession };
 }

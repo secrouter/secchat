@@ -580,7 +580,11 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    final bubble = ConstrainedBox(
+    final Widget bubble = GestureDetector(
+      // Right-click (or two-finger tap) copies the message's raw text — the same audited copy path
+      // as the overflow menu's Copy.
+      onSecondaryTap: _canCopy ? () => onCopy!(message) : null,
+      child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 680),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -592,6 +596,7 @@ class _MessageBubble extends StatelessWidget {
               ? [Flexible(child: content), const SizedBox(width: 10), avatar]
               : [avatar, const SizedBox(width: 12), Flexible(child: content)],
         ),
+      ),
       ),
     );
 

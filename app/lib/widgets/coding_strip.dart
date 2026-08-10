@@ -19,11 +19,17 @@ class CodingStrip extends StatefulWidget {
     super.key,
     required this.sessionId,
     required this.sessionEnded,
+    required this.canGrant,
     required this.onGrantExecute,
   });
 
   final String sessionId;
   final bool sessionEnded;
+
+  /// Whether the current user may switch the agent from plan mode to edit mode.
+  /// Only the agent's owner can (the backend gate enforces it too); everyone else
+  /// sees the plan-mode state but not the grant control.
+  final bool canGrant;
   final Future<GrantExecuteResult> Function() onGrantExecute;
 
   @override
@@ -91,10 +97,14 @@ class _CodingStripState extends State<CodingStrip> {
                 shortId(widget.sessionId),
                 style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
               ),
+              const SizedBox(width: 10),
+              // The agent starts in plan mode: it can read/plan freely, but every mutating tool is
+              // gated until the owner grants execute (edit mode). This label makes that state legible.
+              const PillBadge('Plan mode'),
               const Spacer(),
               if (widget.sessionEnded)
                 const PillBadge('Ended')
-              else
+              else if (widget.canGrant)
                 ElevatedButton.icon(
                   onPressed: _granting ? null : _handleGrant,
                   style: AppButtonStyles.warn,
@@ -109,6 +119,11 @@ class _CodingStripState extends State<CodingStrip> {
                         )
                       : const Icon(Icons.bolt, size: 16),
                   label: const Text('Grant execute (once)'),
+                )
+              else
+                const Text(
+                  'Only the owner can enable edit mode',
+                  style: TextStyle(color: AppColors.textFaint, fontSize: 12),
                 ),
             ],
           ),

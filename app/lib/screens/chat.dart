@@ -97,7 +97,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // the declutter path for heavy testing).
   bool _showArchived = false;
   final Set<String> _endedSessionIds = {};
-  int _localEchoSeq = 0;
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
@@ -308,6 +307,13 @@ class _ChatScreenState extends State<ChatScreen> {
         if (c.agentKind != null) {
           _agentKindByChannel[c.id] = c.agentKind!;
         }
+        // Recover a coding channel's live session id so a reloaded client routes
+        // input back to the running agent (see `_codingSessionIdFor`) instead of
+        // posting a plain message that never reaches pi. Absent ⇒ no live session;
+        // `_ensureCodingSession` (on select) starts one on demand.
+        if (c.sessionId != null) {
+          _sessionIdByChannel[c.id] = c.sessionId!;
+        }
       }
       setState(() {
         _channels = channels;
@@ -362,6 +368,27 @@ class _ChatScreenState extends State<ChatScreen> {
     // Viewing a channel marks it read up to its latest message; then refresh the
     // other channels' unread counts. (Events arrive on the always-open global socket.)
     unawaited(_markChannelRead(channel.id).then((_) => _loadUnread()));
+
+    // A coding channel needs a live runner session to receive input. If we don't
+    // already have one (fresh reload, or the prior session died with the daemon),
+    // (re)attach on open so both the composer's routing and the coding strip work.
+    unawaited(_ensureCodingSession(channel));
+  }
+
+  /// Ensures [channel] (when a coding-agent channel) has a live session id in
+  /// [_sessionIdByChannel], (re)starting one via the API if needed. Best-effort:
+  /// a failure just leaves the channel without a session (the composer falls back
+  /// to posting a plain message, and the coding strip stays hidden).
+  Future<void> _ensureCodingSession(Channel channel) async {
+    if (_agentKindByChannel[channel.id] != AgentKind.coding) return;
+    if (_sessionIdByChannel[channel.id] != null) return;
+    try {
+      final session = await widget.api.ensureSession(channel.id);
+      if (!mounted) return;
+      setState(() => _sessionIdByChannel[channel.id] = session.id);
+    } catch (_) {
+      // Non-fatal — leave the channel session-less; sending falls back to a plain post.
+    }
   }
 
   /// Fetches unread counts for every channel into [_unreadByChannel]. Failures
@@ -937,6 +964,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await _runCommand(channel, command, marking);
       return;
     }
+    // In a coding-agent channel with a live session, EVERY message drives pi (not just /pi). The
+    // backend persists + broadcasts both the prompt and pi's reply, so no local echo is needed.
+    final sessionId = _codingSessionIdFor(channel.id);
+    if (sessionId != null) {
+      try {
+        await widget.api.sendInput(sessionId, text);
+      } catch (error) {
+        _showError(error);
+      }
+      return;
+    }
     await _sendPlain(channel, text, marking, attachmentIds);
   }
 
@@ -964,15 +1002,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendPlain(Channel channel, String text, String marking, List<String> attachmentIds) async {
     final sessionId = _codingSessionIdFor(channel.id);
     if (sessionId != null) {
-      // A coding agent is driven by its runner, not chat history: input
-      // goes to the session, and the agent's reply streams back as
-      // `agent_output` / `tool_decision` WS events (handled in
-      // `_handleEvent`), never as a `message`. There's no response body to
-      // append here, so echo the user's own line locally -- otherwise it
-      // would simply vanish from the transcript.
+      // A coding agent is driven by its runner, not chat history: input goes to
+      // the session. The backend persists + broadcasts BOTH the prompt (as a real
+      // `message`) and pi's reply, so the line comes back over the channel socket
+      // -- no local echo (which would double it).
       await widget.api.sendInput(sessionId, text);
-      if (!mounted) return;
-      setState(() => _append(channel.id, MessageEntry(_localEcho(text, marking))));
       return;
     }
     // Append straight from the POST response rather than waiting for a WS
@@ -1033,9 +1067,8 @@ class _ChatScreenState extends State<ChatScreen> {
           );
           return;
         }
+        // The backend persists + broadcasts the prompt as a message, so no local echo.
         await widget.api.sendInput(sessionId, input);
-        if (!mounted) return;
-        setState(() => _append(channel.id, MessageEntry(_localEcho('/pi $input'))));
     }
   }
 
@@ -1153,22 +1186,6 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-
-  /// A locally-synthesized "sent" message for text handed to `sendInput`,
-  /// which -- unlike `postMessage` -- has no server response to render
-  /// instead. The `local-` id prefix keeps it out of the way of real
-  /// message ids (server ids are never expected to collide with it), so it
-  /// can't be mistaken for a duplicate by `_appendMessageUnlessDuplicate`
-  /// elsewhere.
-  Message _localEcho(String text, [String marking = 'UNCLASSIFIED']) => Message(
-    id: 'local-${_localEchoSeq++}',
-    seq: 0,
-    authorRef: widget.principal.sub,
-    authorType: AuthorType.user,
-    content: text,
-    createdAt: DateTime.now(),
-    marking: marking,
-  );
 
   Future<void> _handleNewChannel() async {
     final name = await showNewItemDialog(
@@ -1327,6 +1344,7 @@ class _ChatScreenState extends State<ChatScreen> {
         key: ValueKey(selected.id),
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
+        canGrant: selected.owned,
         onGrantExecute: () => widget.api.grantExecute(sessionId),
       );
     }

@@ -473,7 +473,7 @@ function buildRouter(
   // Store method — the same isMember gate every per-channel route below already applies.
   router.add("GET", "/channels", async ({ res, principal }) => {
     const chans = await store.listChannels();
-    const mine: Array<Channel & { members?: string[]; agentKind?: AgentKind; agentId?: string; agentModel?: string }> = [];
+    const mine: Array<Channel & { members?: string[]; agentKind?: AgentKind; agentId?: string; agentModel?: string; sessionId?: string; owned?: boolean }> = [];
     for (const c of chans) {
       if (!(await store.isMember(c.id, principal.sub))) continue;
       if (c.kind === "dm") {
@@ -490,7 +490,17 @@ function buildRouter(
         // header (see the model picker) instead of defaulting every agent channel to assistant.
         const agentMember = (await store.listMembers(c.id)).find((m) => m.memberType === "agent");
         const agent = agentMember ? await store.getAgent(agentMember.memberRef) : null;
-        mine.push(agent ? { ...c, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model } : c);
+        if (agent) {
+          // For a coding channel, recover the live session id (so a reloaded client routes input
+          // straight back to the running agent instead of posting a plain message that never reaches
+          // pi) and whether the caller owns the agent (only the owner may switch it to edit mode —
+          // the gate enforces this too, this just hides the control for everyone else).
+          const sessionId = agent.kind === "coding" ? (await control?.liveSession(c.id))?.id : undefined;
+          const owned = agent.ownerSub === principal.sub;
+          mine.push({ ...c, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, sessionId, owned });
+        } else {
+          mine.push(c);
+        }
       } else {
         mine.push(c);
       }
@@ -1180,14 +1190,49 @@ function buildRouter(
       // same way at start(); this just records an accurate hostType), else in-process.
       const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
       const session = await control.spawn({ agent, channelId: channel.id, hostType });
-      sendJson(res, 201, { agent, channel, session });
+      // Enrich the channel exactly as GET /channels does (agentKind/id/model, live sessionId, and
+      // owned) so the client renders the coding surface — including the owner-only edit-mode control —
+      // immediately, without waiting for a reload to pick up the richer shape.
+      const enriched = { ...channel, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, sessionId: session.id, owned: true };
+      sendJson(res, 201, { agent, channel: enriched, session });
       return;
     }
-    sendJson(res, 201, { agent, channel });
+    sendJson(res, 201, { agent, channel: { ...channel, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, owned: true } });
   });
 
   router.add("GET", "/agents", async ({ res, principal }) => {
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
+  });
+
+  // (Re)attach a coding channel to a live runner session. A reloaded client — or one that opens a
+  // coding channel whose original session ended when the daemon/server restarted — calls this to get
+  // a session id to drive. Idempotent: an already-running session is returned as-is (200); a fresh
+  // one is spawned only when none is live (201). Any member may reattach (reading/prompting the agent
+  // isn't owner-gated — only granting execute is). 404 when no control plane is wired.
+  router.add("POST", "/channels/:id/session", async ({ res, params, principal }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const agentMember = (await store.listMembers(channelId)).find((m) => m.memberType === "agent");
+    const agent = agentMember ? await store.getAgent(agentMember.memberRef) : null;
+    if (!agent || agent.kind !== "coding") {
+      sendJson(res, 404, { error: "not_a_coding_channel" });
+      return;
+    }
+    const existing = await control.liveSession(channelId);
+    if (existing) {
+      sendJson(res, 200, { session: existing });
+      return;
+    }
+    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    const session = await control.spawn({ agent, channelId, hostType });
+    sendJson(res, 201, { session });
   });
 
   // The models the gateway offers, for the chat window's model picker. Proxies SecRouter's
@@ -1269,7 +1314,15 @@ function buildRouter(
       return;
     }
     const body = (await readJsonBody(req)) as { text?: string };
-    await control.sendInput(params.id!, body.text ?? "");
+    const text = body.text ?? "";
+    // Persist the driver's prompt as a real message + broadcast it, so the coding-agent
+    // conversation (their prompts AND pi's replies — see control.ts's output persistence) survives
+    // a session restart / reload and shows for everyone in the channel, not just the sender.
+    if (text.trim() !== "") {
+      const message = await store.appendMessage({ channelId: session.channelId, authorRef: principal.sub, authorType: "user", content: text });
+      broadcast?.(session.channelId, { type: "message", message });
+    }
+    await control.sendInput(params.id!, text);
     sendJson(res, 202, { status: "accepted" });
   });
 

@@ -121,6 +121,8 @@ class Channel {
     this.agentKind,
     this.agentId,
     this.agentModel,
+    this.sessionId,
+    this.owned = false,
     this.archived = false,
   });
 
@@ -145,6 +147,18 @@ class Channel {
   /// Null ⇒ unset (the deployment default applies).
   final String? agentModel;
 
+  /// For a coding-agent channel, the id of its currently-live runner session, as
+  /// recovered by `GET /channels`. A reloaded client uses this to route input
+  /// straight back to the running agent (`POST /sessions/:id/input`) instead of
+  /// posting a plain message that never reaches pi. Null ⇒ no live session (the
+  /// client calls `POST /channels/:id/session` to (re)start one on demand).
+  final String? sessionId;
+
+  /// Whether the caller owns this agent (created it). Only the owner may switch a
+  /// coding agent from plan mode to edit mode (grant execute). The backend gate
+  /// enforces this too; this just hides the control for everyone else.
+  final bool owned;
+
   /// Archived channels are hidden from the sidebar by default (a soft-hide for
   /// decluttering). Toggled via `POST /channels/:id/archive`.
   final bool archived;
@@ -165,6 +179,8 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: agentModel,
+    sessionId: sessionId,
+    owned: owned,
     archived: archived,
   );
 
@@ -179,6 +195,8 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: model,
+    sessionId: sessionId,
+    owned: owned,
     archived: archived,
   );
 
@@ -204,6 +222,8 @@ class Channel {
         : AgentKind.fromWire(json['agentKind'] as String?),
     agentId: json['agentId'] as String?,
     agentModel: json['agentModel'] as String?,
+    sessionId: json['sessionId'] as String?,
+    owned: json['owned'] as bool? ?? false,
     archived: json['archived'] as bool? ?? false,
   );
 
@@ -218,6 +238,8 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: agentModel,
+    sessionId: sessionId,
+    owned: owned,
     archived: value,
   );
 }
