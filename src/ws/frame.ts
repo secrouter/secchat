@@ -1,24 +1,28 @@
-// A minimal RFC 6455 WebSocket framing codec — pure functions over Buffers, no I/O, so
-// trivially unit-testable (mirrors audit/chain.ts's split of "pure primitive" vs. the
-// stateful thing that drives it; here that's hub.ts driving sockets).
+// A minimal RFC 6455 WebSocket framing codec — pure functions over Buffers plus one small
+// stateful per-connection decoder (FrameDecoder), no I/O, so trivially unit-testable (mirrors
+// audit/chain.ts's split of "pure primitive" vs. the stateful thing that drives it; here
+// that's hub.ts / runner-hub.ts driving sockets).
 //
-// v1 SCOPE / LIMITATIONS:
-//  - No fragmentation support. A WebSocket message may legally be split across a FIN=0
-//    initial frame and FIN=0/1 continuation frames (opcode 0x0). decodeFrames() does not
-//    reassemble these — it decodes each frame independently and reports whatever opcode is
-//    on the wire (FIN is not inspected at all). This is fine for this hub's use case (small,
-//    single-frame JSON control/broadcast messages) but is NOT a general-purpose client.
+//  - FrameDecoder is what a connection should use: it CARRIES partial bytes across socket
+//    "data" events (TCP has no notion of frame boundaries — a frame larger than one segment
+//    ~1460 bytes routinely arrives split) and reassembles FIN=0 + continuation (opcode 0x0)
+//    fragmentation into whole messages. Without this, a runner daemon's multi-KB
+//    output/tool_request frame silently vanished mid-handshake.
+//  - decodeFrames() remains the stateless primitive: complete frames within ONE buffer, no
+//    carry, no continuation reassembly (each frame reported as-is). Kept for tests and any
+//    caller that genuinely has a whole buffer in hand.
 //  - Binary frames (0x2) are out of scope; encodeTextFrame is the only application-payload
-//    encoder. decodeFrames will still hand back a binary frame's raw bytes (opcode 0x2) —
-//    it just isn't a case any encoder here produces or hub.ts specifically interprets.
+//    encoder. Both decoders will still hand back a binary frame's raw bytes (opcode 0x2) —
+//    it just isn't a case any encoder here produces or the hubs specifically interpret.
 
 import { createHash } from "node:crypto";
 
 const WS_ACCEPT_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"; // RFC 6455 §1.3, fixed GUID
 
-/** Opcodes this v1 server encodes/decodes. Continuation (0x0) and binary (0x2) are out of
- * scope for v1 — see the file header. */
+/** Opcodes this server encodes/decodes. CONTINUATION (0x0) exists only on the wire —
+ * FrameDecoder reassembles it away, emitting whole messages under the initiating opcode. */
 export const OPCODE = {
+  CONTINUATION: 0x0,
   TEXT: 0x1,
   CLOSE: 0x8,
   PING: 0x9,
@@ -28,6 +32,51 @@ export const OPCODE = {
 export interface DecodedFrame {
   opcode: number;
   payload: Buffer;
+}
+
+/** One parsed wire frame + where parsing may resume, or null if `buf` ends mid-frame at
+ * `offset` (short header, incomplete extended length/mask/payload — never throws on that). */
+interface ParsedWireFrame {
+  fin: boolean;
+  opcode: number;
+  payload: Buffer;
+  next: number;
+}
+
+function parseWireFrame(buf: Buffer, offset: number): ParsedWireFrame | null {
+  if (offset + 2 > buf.length) return null;
+  const byte0 = buf[offset]!;
+  const byte1 = buf[offset + 1]!;
+  const fin = (byte0 & 0x80) !== 0;
+  const opcode = byte0 & 0x0f;
+  const masked = (byte1 & 0x80) !== 0;
+  let payloadLen: number = byte1 & 0x7f;
+  let cursor = offset + 2;
+
+  if (payloadLen === 126) {
+    if (cursor + 2 > buf.length) return null; // extended length not fully arrived yet
+    payloadLen = buf.readUInt16BE(cursor);
+    cursor += 2;
+  } else if (payloadLen === 127) {
+    if (cursor + 8 > buf.length) return null;
+    const big = buf.readBigUInt64BE(cursor);
+    if (big > BigInt(Number.MAX_SAFE_INTEGER)) return null; // refuse to even attempt absurd sizes
+    payloadLen = Number(big);
+    cursor += 8;
+  }
+
+  let maskKey: Buffer | undefined;
+  if (masked) {
+    if (cursor + 4 > buf.length) return null; // masking key not fully arrived yet
+    maskKey = buf.subarray(cursor, cursor + 4);
+    cursor += 4;
+  }
+
+  if (cursor + payloadLen > buf.length) return null; // payload not fully arrived yet
+
+  const raw = buf.subarray(cursor, cursor + payloadLen);
+  const payload = maskKey ? unmask(raw, maskKey) : Buffer.from(raw);
+  return { fin, opcode, payload, next: cursor + payloadLen };
 }
 
 /** The `Sec-WebSocket-Accept` value for a given `Sec-WebSocket-Key`: base64(sha1(key + the
@@ -94,55 +143,117 @@ function unmask(data: Uint8Array, key: Buffer): Buffer {
  * MASKED (§5.3); each payload is unmasked with its 4-byte masking key before being returned.
  * Handles TEXT(0x1), CLOSE(0x8), PING(0x9), and PONG(0xA) — see hub.ts for how each is used.
  *
- * v1 SCOPE (see file header): FIN is not inspected — every frame is decoded as if it were a
- * complete message in itself; no continuation-frame reassembly.
+ * STATELESS (see file header): FIN is not inspected — every frame is decoded as if it were a
+ * complete message in itself, no continuation-frame reassembly, and a frame split across two
+ * socket `"data"` events is not reassembled. Connections must use FrameDecoder below; this
+ * stays as the pure single-buffer primitive.
  *
  * Defensive by design: if `buf` ends mid-frame (a short base header, an extended-length field
  * that isn't fully present yet, a payload promised-but-not-fully-arrived, …) parsing simply
- * stops there and whatever complete frames were already found are returned — this function
- * never throws on truncated input. Because it keeps no state across calls, a frame split
- * across two socket `"data"` events is NOT reassembled here; see hub.ts's file header for how
- * that limitation is handled (or rather, deliberately not handled, in v1).
+ * stops there and whatever complete frames were already found are returned — never throws on
+ * truncated input.
  */
 export function decodeFrames(buf: Buffer): DecodedFrame[] {
   const frames: DecodedFrame[] = [];
   let offset = 0;
+  for (;;) {
+    const parsed = parseWireFrame(buf, offset);
+    if (!parsed) return frames;
+    frames.push({ opcode: parsed.opcode, payload: parsed.payload });
+    offset = parsed.next;
+  }
+}
 
-  while (offset + 2 <= buf.length) {
-    const byte0 = buf[offset]!;
-    const byte1 = buf[offset + 1]!;
-    const opcode = byte0 & 0x0f;
-    const masked = (byte1 & 0x80) !== 0;
-    let payloadLen: number = byte1 & 0x7f;
-    let cursor = offset + 2;
+/**
+ * The PER-CONNECTION decoder: feed every socket `"data"` chunk (and the upgrade `head`) to
+ * `push()` and act on the complete MESSAGES it returns. Fixes the two gaps the stateless
+ * primitive deliberately has:
+ *
+ *  1. **Cross-read carry.** Bytes that end mid-frame are buffered and re-parsed when the next
+ *     chunk arrives — a frame larger than one TCP segment (runner output, tool_request, a
+ *     multi-KB SDP) no longer vanishes.
+ *  2. **Fragmentation (§5.4).** A FIN=0 data frame opens a message; CONTINUATION frames append;
+ *     the FIN=1 continuation completes it, emitted under the INITIATING opcode. Control frames
+ *     (CLOSE/PING/PONG) may legally interleave mid-fragmentation and are emitted immediately.
+ *
+ * Fail-safe on protocol slop rather than strict-closing: a stray CONTINUATION with no message
+ * in progress is dropped; a new data frame arriving mid-fragmentation discards the unfinished
+ * message and starts over (never mixes two messages' bytes).
+ *
+ * Resource-bounded: `maxMessageBytes` (default 16 MiB) caps the un-parsed carry AND an
+ * in-progress fragmented message. Exceeding it THROWS — the connection is hostile or broken,
+ * and the caller should destroy the socket (both hubs do).
+ */
+export class FrameDecoder {
+  #carry: Buffer = Buffer.alloc(0);
+  #fragments: Buffer[] = [];
+  #fragmentBytes = 0;
+  #fragmentOpcode: number | null = null;
+  readonly #maxMessageBytes: number;
 
-    if (payloadLen === 126) {
-      if (cursor + 2 > buf.length) break; // extended length not fully arrived yet
-      payloadLen = buf.readUInt16BE(cursor);
-      cursor += 2;
-    } else if (payloadLen === 127) {
-      if (cursor + 8 > buf.length) break;
-      const big = buf.readBigUInt64BE(cursor);
-      if (big > BigInt(Number.MAX_SAFE_INTEGER)) break; // refuse to even attempt absurd sizes
-      payloadLen = Number(big);
-      cursor += 8;
-    }
-
-    let maskKey: Buffer | undefined;
-    if (masked) {
-      if (cursor + 4 > buf.length) break; // masking key not fully arrived yet
-      maskKey = buf.subarray(cursor, cursor + 4);
-      cursor += 4;
-    }
-
-    if (cursor + payloadLen > buf.length) break; // payload not fully arrived yet
-
-    const raw = buf.subarray(cursor, cursor + payloadLen);
-    const payload = maskKey ? unmask(raw, maskKey) : Buffer.from(raw);
-
-    frames.push({ opcode, payload });
-    offset = cursor + payloadLen;
+  constructor(opts: { maxMessageBytes?: number } = {}) {
+    this.#maxMessageBytes = opts.maxMessageBytes ?? 16 * 1024 * 1024;
   }
 
-  return frames;
+  push(chunk: Buffer): DecodedFrame[] {
+    // Common case first: nothing carried, so parse the chunk in place (no concat allocation).
+    const buf = this.#carry.length === 0 ? chunk : Buffer.concat([this.#carry, chunk]);
+    if (buf.length > this.#maxMessageBytes) {
+      throw new Error(`ws: frame exceeds ${this.#maxMessageBytes} bytes`);
+    }
+
+    const messages: DecodedFrame[] = [];
+    let offset = 0;
+    for (;;) {
+      const parsed = parseWireFrame(buf, offset);
+      if (!parsed) break;
+      offset = parsed.next;
+      this.#accept(parsed, messages);
+    }
+
+    // Carry the incomplete tail (COPIED, so we never pin the big concat buffer alive).
+    this.#carry = offset < buf.length ? Buffer.from(buf.subarray(offset)) : Buffer.alloc(0);
+    return messages;
+  }
+
+  #accept(frame: ParsedWireFrame, out: DecodedFrame[]): void {
+    // Control frames are never fragmented (§5.5 requires FIN=1) and may interleave — pass through.
+    if (frame.opcode >= 0x8) {
+      out.push({ opcode: frame.opcode, payload: frame.payload });
+      return;
+    }
+
+    if (frame.opcode === OPCODE.CONTINUATION) {
+      if (this.#fragmentOpcode === null) return; // stray continuation — drop (fail-safe)
+      this.#fragments.push(frame.payload);
+      this.#fragmentBytes += frame.payload.length;
+      if (this.#fragmentBytes > this.#maxMessageBytes) {
+        this.#resetFragments();
+        throw new Error(`ws: fragmented message exceeds ${this.#maxMessageBytes} bytes`);
+      }
+      if (frame.fin) {
+        out.push({ opcode: this.#fragmentOpcode, payload: Buffer.concat(this.#fragments) });
+        this.#resetFragments();
+      }
+      return;
+    }
+
+    // A data frame (TEXT/BINARY). Mid-fragmentation this is protocol slop — discard the
+    // unfinished message rather than interleaving two messages' bytes.
+    if (this.#fragmentOpcode !== null) this.#resetFragments();
+
+    if (frame.fin) {
+      out.push({ opcode: frame.opcode, payload: frame.payload });
+    } else {
+      this.#fragmentOpcode = frame.opcode;
+      this.#fragments = [frame.payload];
+      this.#fragmentBytes = frame.payload.length;
+    }
+  }
+
+  #resetFragments(): void {
+    this.#fragments = [];
+    this.#fragmentBytes = 0;
+    this.#fragmentOpcode = null;
+  }
 }
