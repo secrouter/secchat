@@ -1013,6 +1013,8 @@ class _ChatScreenState extends State<ChatScreen> {
     switch (command.command.name) {
       case 'help':
         _showCommandHelp();
+      case 'invite':
+        await _inviteToChannel(channel, command.args.trim());
       case 'shrug':
         final base = command.args.trim();
         await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug', marking, const []);
@@ -1034,6 +1036,46 @@ class _ChatScreenState extends State<ChatScreen> {
         await widget.api.sendInput(sessionId, input);
         if (!mounted) return;
         setState(() => _append(channel.id, MessageEntry(_localEcho('/pi $input'))));
+    }
+  }
+
+  /// `/invite <name-or-email>` — resolve the query against the seen-users directory and add that
+  /// user to the current team channel. Only human channels (a DM's pair is fixed; an agent channel
+  /// is owner+agent). A user who has never signed in isn't in the directory yet, so can't be found.
+  Future<void> _inviteToChannel(Channel channel, String query) async {
+    if (query.isEmpty) {
+      _showError('Usage: /invite <name-or-email>');
+      return;
+    }
+    if (channel.kind != ChannelKind.human) {
+      _showError('/invite works in a team channel — not a DM or agent channel.');
+      return;
+    }
+    final q = query.toLowerCase();
+    final matches = _usersBySub.values
+        .where((u) =>
+            u.sub == query ||
+            (u.email != null && u.email!.toLowerCase() == q) ||
+            (u.displayName != null && u.displayName!.toLowerCase() == q))
+        .toList();
+    if (matches.isEmpty) {
+      _showError('No user matching "$query" — they may need to sign in once first.');
+      return;
+    }
+    if (matches.length > 1) {
+      _showError('"$query" matches ${matches.length} users — try their email to disambiguate.');
+      return;
+    }
+    final user = matches.first;
+    try {
+      await widget.api.addMember(channel.id, user.sub);
+      if (!mounted) return;
+      final where = channel.name.isEmpty ? 'this channel' : '#${channel.name}';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Invited ${user.label} to $where')),
+      );
+    } catch (error) {
+      _showError(error);
     }
   }
 
