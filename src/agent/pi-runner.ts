@@ -42,7 +42,7 @@
 // only thing secchat's typecheck ever sees is the `string` this file builds.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -357,15 +357,30 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     const { sessionId, agentId } = input;
 
     const configDir = mkdtempSync(join(tmpdir(), "secchat-pi-config-"));
-    const ownWorkspace = input.workspace === undefined && defaultWorkspace === undefined;
-    const workspaceDir = input.workspace ?? defaultWorkspace ?? mkdtempSync(join(tmpdir(), "secchat-pi-workspace-"));
+
+    // Persistent, agent-scoped state so a coding session RESUMES across restarts instead of starting
+    // cold each time. pi keys a saved session to (session id + project/cwd), so BOTH must be stable
+    // per agent: `--session-id <agentId>` (pi creates it if missing, resumes it if present) and a
+    // fixed per-agent workspace. SECCHAT_PI_STATE_DIR points at a durable location (the desktop
+    // supervisor sets it under Application Support); the tmp fallback survives within a run but not a
+    // reboot. An explicit workspace (from the caller) still wins, e.g. to operate on a real repo.
+    const stateRoot = process.env.SECCHAT_PI_STATE_DIR?.trim() || join(tmpdir(), "secchat-pi-state");
+    const sessionDir = join(stateRoot, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    const workspaceDir = input.workspace ?? defaultWorkspace ?? join(stateRoot, "workspaces", agentId);
+    mkdirSync(workspaceDir, { recursive: true });
+    // The workspace is durable and shared across resumes now — never auto-remove it on session end
+    // (that would throw away the files AND the project the session is keyed to).
+    const ownWorkspace = false;
 
     const extensionPath = join(configDir, "secchat-gate.ts");
     writeFileSync(extensionPath, buildExtensionSource({ provider, model, baseUrl }), "utf8");
 
     const args = [
       "--mode", "rpc",
-      "--no-session",
+      // Resume-or-create a durable per-agent session (was --no-session, which was ephemeral).
+      "--session-id", agentId,
+      "--session-dir", sessionDir,
       // SECURITY: this is the ONLY extension pi may ever load for this session. Without this
       // flag, a project-local (.pi/extensions) or user-global (~/.pi/agent/extensions) extension
       // could register its own competing tool_call handler and interfere with — or race — the

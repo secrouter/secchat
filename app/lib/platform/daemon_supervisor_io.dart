@@ -57,6 +57,16 @@ String _augmentedPath() {
   return [...extra, if (inherited.isNotEmpty) inherited].join(':');
 }
 
+/// A durable directory for pi's per-agent session + workspace storage, so a coding agent resumes
+/// its conversation and files across app restarts. Under Application Support on macOS (survives),
+/// `~/.secchat/pi` elsewhere.
+String _piStateDir() {
+  final home = Platform.environment['HOME'] ?? '';
+  return Platform.isMacOS
+      ? '$home/Library/Application Support/SecChat/pi'
+      : '$home/.secchat/pi';
+}
+
 /// The suite CA (SecCert root) bundled at `Contents/Resources/seccert-root.pem`, or null when not
 /// bundled (dev runs / other platforms — pi then relies on its own trust store). See
 /// scripts/bundle-macos-runnerd.sh, which copies it in alongside the runnerd payload.
@@ -202,6 +212,10 @@ class _ProcessSupervisor implements DaemonSupervisor {
         // Log pi's spawn args + raw stdout/stderr through the daemon (captured to the runner log
         // below) — so a coding session that misbehaves can actually be diagnosed.
         'SECCHAT_PI_DEBUG': '1',
+        // Durable per-agent session + workspace storage so a coding session RESUMES across app
+        // restarts (pi `--session-id`/`--session-dir`) instead of starting cold. Under Application
+        // Support so it survives, unlike a tmp dir.
+        'SECCHAT_PI_STATE_DIR': _piStateDir(),
         // …and it verifies the gateway's TLS against the suite CA (SecCert). pi is its own Node
         // process that doesn't consult the macOS keychain, so hand it the CA bundled in the app.
         if (_bundledCaPath() case final ca?) 'NODE_EXTRA_CA_CERTS': ca,
