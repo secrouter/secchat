@@ -22,6 +22,10 @@ import { MemoryStore } from "./store/memory.ts";
 import { PgStore } from "./store/pg.ts";
 import { migrate } from "./db/migrate.ts";
 import { attachWsHub } from "./ws/hub.ts";
+import { attachRunnerHub } from "./ws/runner-hub.ts";
+import { RunnerRegistry } from "./agent/runner-registry.ts";
+import { makeRemoteRunner } from "./agent/remote-runner.ts";
+import { makeRouterRunner } from "./agent/router-runner.ts";
 import { FsBlobStore } from "./attachments/blobs.ts";
 import type { Hub } from "./ws/hub.ts";
 import type { Runner, SessionStore, Store } from "./types.ts";
@@ -123,7 +127,17 @@ const presence = () => hub?.onlineSubs() ?? [];
 // Named (not inlined into makeControlPlane below) so the shutdown handler can stop every session's
 // runner on the way out — unlike the demo runners, pi backs a session with a REAL OS process, and
 // this is the one place that outlives the control plane's own lifecycle.
-const runner = selectRunner();
+const serverRunner = selectRunner();
+// Remote runner daemons attach over `/runner` (see attachRunnerHub below) and register by owner.
+// The router sends a session to the owner's daemon when one is attached, else to the in-process
+// server runner. A daemon's heartbeat renews its sessions' leases so the orphan reaper doesn't cull
+// a healthy remote session.
+const runnerRegistry = new RunnerRegistry();
+const remoteRunner = makeRemoteRunner({
+  registry: runnerRegistry,
+  renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
+});
+const runner = makeRouterRunner({ server: serverRunner, remote: remoteRunner.runner, hasRemote: (sub) => runnerRegistry.has(sub) });
 const control = makeControlPlane({ sessions: store, runner, getAgent: (id) => store.getAgent(id), broadcast });
 
 if (config.devMode && !config.databaseUrl) {
@@ -169,6 +183,10 @@ if (config.devMode) console.error(`▸ web client: ${webRoot === flutterWeb ? "F
 
 const server = createHttpServer({
   verifyToken, store, llm, control, broadcast, notify, presence, auth,
+  // When the spawning owner has a runner daemon attached, the session is hosted there (hostType
+  // "local"); the router routes to it. Purely informational for hostType — routing is decided at
+  // start() by the same registry check.
+  hasRemoteRunner: (sub) => runnerRegistry.has(sub),
   search: (userSub, q) => searchMessages(store, userSub, q),
   web: { root: webRoot },
   admin: { adminGroup: config.adminGroup, devMode: config.devMode, overview: () => buildOverview(store), renderConsole },
@@ -190,6 +208,8 @@ hub = attachWsHub(server, {
     return mine;
   },
 });
+// Runner daemons attach here (a separate `/runner` protocol; the client hub above skips that path).
+const runnerHub = attachRunnerHub(server, { verifyToken, registry: runnerRegistry, remote: remoteRunner });
 
 server.listen(config.port, config.host, () => {
   console.error(`▸ SecChat listening on http://${config.host}:${config.port} (in-memory store)`);
@@ -198,6 +218,7 @@ server.listen(config.port, config.host, () => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     hub?.close();
+    runnerHub.close();
     // Best-effort: stop every still-active session's runner so a real subprocess (pi) never
     // outlives this process as an orphan. Never blocks shutdown on it — a hung/slow runner.stop()
     // must not delay the exit any more than the SIGKILL fallback it already carries internally.

@@ -181,6 +181,11 @@ export function attachWsHub(
   }
 
   async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    // The runner-daemon attach path (`/runner`) is a DIFFERENT protocol handled by its own hub
+    // (ws/runner-hub.ts) — leave that upgrade alone (don't touch the socket) so its listener claims
+    // it. This client hub owns every other path.
+    if ((req.url ?? "/").split("?")[0] === "/runner") return;
+
     const key = req.headers["sec-websocket-key"];
     if (!key) {
       socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");

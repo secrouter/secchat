@@ -232,6 +232,7 @@ function buildRouter(
   attachments?: AttachmentDeps,
   notify?: Notify,
   presence?: () => string[],
+  hasRemoteRunner?: (ownerSub: string) => boolean,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -1120,7 +1121,10 @@ function buildRouter(
     // runs synchronously per-message (triggerAssistants) and never gets one. If this deployment
     // hasn't wired a control plane, a "coding" agent is still created — just without a session.
     if (kind === "coding" && control) {
-      const session = await control.spawn({ agent, channelId: channel.id, hostType: "server" });
+      // Host the session on the owner's runner daemon when one is attached (routing is decided the
+      // same way at start(); this just records an accurate hostType), else in-process.
+      const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+      const session = await control.spawn({ agent, channelId: channel.id, hostType });
       sendJson(res, 201, { agent, channel, session });
       return;
     }
@@ -1271,11 +1275,14 @@ export function createHttpServer(deps: {
   /** The currently-online subs (wired to hub.onlineSubs) — seeds GET /presence. Unset ⇒ nobody shows
    * as online until the live presence events arrive. */
   presence?: () => string[];
+  /** True when an owner has a runner daemon attached — lets a coding-agent spawn record hostType
+   * "local" (routed to the daemon) vs "server". Unset ⇒ always "server". */
+  hasRemoteRunner?: (ownerSub: string) => boolean;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 
