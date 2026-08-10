@@ -14,6 +14,7 @@ import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
 import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import { canGrantExecute } from "../agent/gate.ts";
+import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -1210,8 +1211,29 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; launchEnv?: string };
     const kind = body.kind ?? "assistant";
+    // A coding agent must run in a real launch environment (the user's desktop app, or the online
+    // pool once deployed). Validate the chosen environment BEFORE creating anything, so an
+    // unavailable choice doesn't strand an agent/channel — and never falls back to the demo stub.
+    if (kind === "coding") {
+      if (!control) {
+        sendJson(res, 503, { error: "coding_unavailable", detail: "This deployment has no coding-agent control plane." });
+        return;
+      }
+      const env = resolveLaunchEnv(body.launchEnv, {
+        desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
+        poolConfigured: false, // no online pool deployed yet — flip when it lands
+      });
+      if (!env) {
+        sendJson(res, 400, { error: "unknown_launch_env", detail: `No such launch environment: ${body.launchEnv}` });
+        return;
+      }
+      if (!env.available) {
+        sendJson(res, 409, { error: "launch_env_unavailable", env: env.id, reason: env.reason, detail: env.detail });
+        return;
+      }
+    }
     const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
@@ -1246,6 +1268,18 @@ function buildRouter(
 
   router.add("GET", "/agents", async ({ res, principal }) => {
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
+  });
+
+  // The launch environments the caller can host a coding agent in right now — the New-Coding-Agent
+  // picker reads this to show what's available (their desktop app connected? the online pool live?)
+  // and to disable what isn't.
+  router.add("GET", "/runner/environments", async ({ res, principal }) => {
+    sendJson(res, 200, {
+      environments: launchEnvironmentsFor({
+        desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
+        poolConfigured: false, // no online pool deployed yet — flip when it lands
+      }),
+    });
   });
 
   // (Re)attach a coding channel to a live runner session. A reloaded client — or one that opens a

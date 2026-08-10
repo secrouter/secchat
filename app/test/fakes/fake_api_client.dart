@@ -410,12 +410,30 @@ class FakeApiClient implements ApiClient {
     return channel;
   }
 
+  /// Launch environments returned by [getLaunchEnvironments] (default: desktop
+  /// available, pool coming soon). Override to drive the picker in tests.
+  List<LaunchEnv> launchEnvironments = const [
+    LaunchEnv(id: 'desktop', label: 'My desktop app', available: true, reason: 'connected', detail: 'Runs on your connected desktop app.'),
+    LaunchEnv(id: 'pool', label: 'Online pool', available: false, reason: 'not_deployed', detail: 'Coming soon.'),
+  ];
+
+  @override
+  Future<List<LaunchEnv>> getLaunchEnvironments() async {
+    _maybeThrow('getLaunchEnvironments');
+    return List.of(launchEnvironments);
+  }
+
+  /// The `launchEnv` passed to the most recent [createAgent], if any.
+  String? lastCreateAgentLaunchEnv;
+
   @override
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
+    String? launchEnv,
   }) async {
     _maybeThrow('createAgent');
+    lastCreateAgentLaunchEnv = launchEnv;
     createAgentCalls.add((kind: kind, name: name));
     final index = channels.length + 1;
     // The creator owns the agent, so the channel comes back owned (mirrors the real

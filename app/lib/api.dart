@@ -164,7 +164,13 @@ abstract class ApiClient {
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
+    String? launchEnv,
   });
+
+  /// The launch environments a coding agent can run in right now
+  /// (`GET /runner/environments`) — the user's desktop app and the online pool,
+  /// each flagged available/unavailable. Drives the New-Coding-Agent picker.
+  Future<List<LaunchEnv>> getLaunchEnvironments();
 
   /// The models the gateway offers (`GET /models`), for the header's model
   /// picker. Empty when no gateway is wired.
@@ -294,7 +300,7 @@ class HttpApiClient implements ApiClient {
     try {
       final parsed = jsonDecode(res.body);
       if (parsed is Map<String, dynamic>) {
-        final reason = parsed['reason'] ?? parsed['message'] ?? parsed['error'];
+        final reason = parsed['detail'] ?? parsed['reason'] ?? parsed['message'] ?? parsed['error'];
         if (reason is String && reason.isNotEmpty) return reason;
       }
     } catch (_) {
@@ -593,10 +599,22 @@ class HttpApiClient implements ApiClient {
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
+    String? launchEnv,
   }) async => CreateAgentResult.fromJson(
-    await _post('/agents', {'kind': kind.wireValue, 'name': name})
-        as Map<String, dynamic>,
+    await _post('/agents', {
+      'kind': kind.wireValue,
+      'name': name,
+      if (launchEnv != null) 'launchEnv': launchEnv,
+    }) as Map<String, dynamic>,
   );
+
+  @override
+  Future<List<LaunchEnv>> getLaunchEnvironments() async {
+    final data = await _get('/runner/environments') as Map<String, dynamic>;
+    return (data['environments'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => LaunchEnv.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
 
   @override
   Future<List<ModelInfo>> listModels() async {

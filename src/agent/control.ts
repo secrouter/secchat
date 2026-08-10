@@ -48,9 +48,14 @@ export function makeControlPlane(deps: {
         if (deps.appendAgentMessage) {
           const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
           // The stored row carries only the content HASH (never the plaintext — see the POST message
-          // route). Re-attach the plaintext before broadcasting, or the client sees content == null
-          // and renders the message as a redaction tombstone.
-          deps.broadcast?.(session.channelId, { type: "message", message: { ...message, content: event.text } });
+          // route), and no display name. Re-attach the plaintext (else the client renders a redaction
+          // tombstone) and the agent's name + kind (else the byline shows the opaque agent id) —
+          // matching how GET /channels/:id/messages enriches history.
+          const agent = await deps.getAgent(session.agentId);
+          deps.broadcast?.(session.channelId, {
+            type: "message",
+            message: { ...message, content: event.text, displayName: agent?.name, agentKind: agent?.kind },
+          });
         } else {
           deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
         }

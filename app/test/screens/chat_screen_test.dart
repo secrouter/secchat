@@ -482,6 +482,64 @@ void main() {
     expect(fake.postMessageCalls.single.content, kShrug);
   });
 
+  testWidgets('New coding agent shows the launch-environment picker and creates on the chosen env', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final fake = FakeApiClient(me: _principal, channels: const []);
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.text('New coding agent'));
+    await pumpSettled(tester);
+
+    // The picker lists both environments; the pool is flagged coming soon (default fake).
+    expect(find.text('My desktop app'), findsOneWidget);
+    expect(find.text('Online pool'), findsOneWidget);
+    expect(find.text('Coming soon'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'infra-fixer');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+    await pumpSettled(tester, times: 10);
+
+    expect(fake.createAgentCalls, hasLength(1));
+    expect(fake.createAgentCalls.single.kind, AgentKind.coding);
+    // Defaults to the first AVAILABLE environment (desktop; pool is coming soon).
+    expect(fake.lastCreateAgentLaunchEnv, 'desktop');
+  });
+
+  testWidgets('New coding agent with no available environment cannot be created', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final fake = FakeApiClient(me: _principal, channels: const [])
+      ..launchEnvironments = const [
+        LaunchEnv(id: 'desktop', label: 'My desktop app', available: false, reason: 'not_connected', detail: 'Open the desktop app.'),
+        LaunchEnv(id: 'pool', label: 'Online pool', available: false, reason: 'not_deployed', detail: 'Coming soon.'),
+      ];
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.text('New coding agent'));
+    await pumpSettled(tester);
+
+    await tester.enterText(find.byType(TextField), 'infra-fixer');
+    await tester.pump();
+    // Create is disabled (no environment available), so tapping it does nothing.
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+    await pumpSettled(tester);
+    expect(fake.createAgentCalls, isEmpty);
+  });
+
   testWidgets(
     'New direct message picks a directory user (excluding self) and opens a DM labeled with their name',
     (tester) async {

@@ -12,6 +12,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
 import '../widgets/badges.dart';
+import '../widgets/coding_agent_dialog.dart';
 import '../widgets/coding_strip.dart';
 import '../widgets/composer.dart';
 import '../widgets/edit_dialog.dart';
@@ -1251,19 +1252,40 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _handleNewAgent(AgentKind kind) async {
-    final isCoding = kind == AgentKind.coding;
+    if (kind == AgentKind.coding) {
+      await _handleNewCodingAgent();
+      return;
+    }
     final name = await showNewItemDialog(
       context,
-      title: isCoding ? 'New coding agent' : 'New assistant',
-      description: isCoding
-          ? 'Starts a coding session; tool execution is gated behind an '
-                'explicit grant.'
-          : 'Starts a conversational assistant in its own channel.',
+      title: 'New assistant',
+      description: 'Starts a conversational assistant in its own channel.',
       hint: 'e.g. release-helper',
     );
     if (name == null || !mounted) return;
+    await _createAgent(kind, name, null);
+  }
+
+  /// A coding agent must run in a launch environment (the user's desktop app, or
+  /// the online pool once deployed). Fetch what's available, let the user pick,
+  /// then create there — the backend blocks an unavailable choice.
+  Future<void> _handleNewCodingAgent() async {
+    List<LaunchEnv> envs;
     try {
-      final result = await widget.api.createAgent(kind: kind, name: name);
+      envs = await widget.api.getLaunchEnvironments();
+    } catch (error) {
+      _showError(error);
+      return;
+    }
+    if (!mounted) return;
+    final choice = await showCodingAgentDialog(context, environments: envs);
+    if (choice == null || !mounted) return;
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv);
+  }
+
+  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv) async {
+    try {
+      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;

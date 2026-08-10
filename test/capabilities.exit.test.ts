@@ -54,7 +54,7 @@ const control = {
 
 async function withServer(fn: (base: string, store: Store) => Promise<void>): Promise<void> {
   const store = new MemoryStore();
-  const server = createHttpServer({ verifyToken, store, capabilities, stepUp, control });
+  const server = createHttpServer({ verifyToken, store, capabilities, stepUp, control, hasRemoteRunner: () => true });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   try {

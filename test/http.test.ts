@@ -339,7 +339,9 @@ let controlServer: Server;
 let controlBaseUrl: string;
 
 before(async () => {
-  controlServer = createHttpServer({ verifyToken, store, control });
+  // hasRemoteRunner: () => true ⇒ the "desktop" launch environment is available, so POST /agents
+  // coding is allowed (a coding agent now requires a real launch environment, never the demo stub).
+  controlServer = createHttpServer({ verifyToken, store, control, hasRemoteRunner: () => true });
   await new Promise<void>((resolve) => controlServer.listen(0, resolve));
   const address = controlServer.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
@@ -798,6 +800,40 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.equal(res.status, 202);
   assert.deepEqual(await res.json(), { status: "accepted" });
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
+});
+
+test("GET /runner/environments reports desktop connected (this server) and the pool as not-yet-deployed", async () => {
+  const res = await fetch(`${controlBaseUrl}/runner/environments`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { environments: Array<{ id: string; available: boolean; reason: string }> };
+  const byId = Object.fromEntries(body.environments.map((e) => [e.id, e]));
+  assert.equal(byId.desktop!.available, true); // controlServer wires hasRemoteRunner: () => true
+  assert.equal(byId.pool!.available, false);
+  assert.equal(byId.pool!.reason, "not_deployed");
+});
+
+test("POST /agents coding is 409 when the chosen launch environment isn't available", async () => {
+  // baseUrl's server has no control plane AND no hasRemoteRunner, so no environment is available.
+  const noEnv = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "x" }),
+  });
+  // No control plane ⇒ 503; with a control plane but no runner it would be 409. Either way, never 201.
+  assert.ok(noEnv.status === 503 || noEnv.status === 409, `expected 503/409, got ${noEnv.status}`);
+  assert.notEqual(noEnv.status, 201);
+});
+
+test("POST /agents coding to the online pool is 409 (not deployed) even with a desktop connected", async () => {
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "pooled", launchEnv: "pool" }),
+  });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { error: string; env: string };
+  assert.equal(body.error, "launch_env_unavailable");
+  assert.equal(body.env, "pool");
 });
 
 test("posting a message in a coding channel forwards it to pi as a JSON envelope naming who posted it", async () => {
