@@ -76,6 +76,7 @@ class _ChatScreenState extends State<ChatScreen> {
   TypingState? _typing;
   ConnStatus _connStatus = ConnStatus.idle;
   StreamSubscription<WsEvent>? _wsSub;
+  Timer? _wsReconnect;
 
   // `GET /channels` only ever reports `kind: "agent"`, never distinguishing
   // an assistant channel from a coding-agent one, and never carries a
@@ -289,6 +290,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _typingPrune?.cancel();
+    _wsReconnect?.cancel();
     _daemon.dispose();
     _wsSub?.cancel();
     super.dispose();
@@ -550,19 +552,27 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Opens the single long-lived socket delivering events for ALL the user's channels; each event
   /// carries its `channelId`, routed in [_handleEvent]. Reconnects if it had dropped.
   void _subscribeAll() {
+    _wsReconnect?.cancel();
     _wsSub?.cancel();
     setState(() => _connStatus = ConnStatus.connecting);
     _wsSub = widget.api.subscribeAll().listen(
       _handleEvent,
-      onError: (Object _) {
-        if (mounted) setState(() => _connStatus = ConnStatus.down);
-        _wsSub = null;
-      },
-      onDone: () {
-        if (mounted) setState(() => _connStatus = ConnStatus.down);
-        _wsSub = null;
-      },
+      onError: (Object _) => _scheduleWsReconnect(),
+      onDone: _scheduleWsReconnect,
     );
+  }
+
+  /// The global socket dropped (network blip, server restart). Without this the app would go silent
+  /// until the user next selected a channel; instead retry on a short delay so live events (new
+  /// messages, agent output) resume on their own.
+  void _scheduleWsReconnect() {
+    _wsSub = null;
+    if (!mounted) return;
+    setState(() => _connStatus = ConnStatus.down);
+    _wsReconnect?.cancel();
+    _wsReconnect = Timer(const Duration(seconds: 3), () {
+      if (mounted && _wsSub == null) _subscribeAll();
+    });
   }
 
   void _handleEvent(WsEvent event) {

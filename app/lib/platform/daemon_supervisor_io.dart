@@ -112,7 +112,9 @@ IOSink? _cachedDaemonLog;
 bool _daemonLogTried = false;
 
 /// Append-mode log sink at ~/Library/Logs/SecChat/runnerd.log (macOS) / $HOME/.secchat (else),
-/// opened once. Null if it can't be created (the daemon still runs; just unlogged).
+/// opened once. Null if it can't be created (the daemon still runs; just unlogged). The daemon is
+/// long-lived so the sink never closes on its own — a periodic flush pushes buffered lines to disk
+/// so the log is actually readable while a session is live.
 IOSink? _daemonLog() {
   if (_daemonLogTried) return _cachedDaemonLog;
   _daemonLogTried = true;
@@ -121,7 +123,15 @@ IOSink? _daemonLog() {
     if (home == null) return null;
     final dir = Directory(Platform.isMacOS ? '$home/Library/Logs/SecChat' : '$home/.secchat');
     dir.createSync(recursive: true);
-    _cachedDaemonLog = File('${dir.path}/runnerd.log').openWrite(mode: FileMode.append);
+    final sink = File('${dir.path}/runnerd.log').openWrite(mode: FileMode.append);
+    // The daemon is long-lived so the sink never closes on its own; a periodic flush pushes
+    // buffered lines to disk so the log is readable while a session runs.
+    Timer.periodic(const Duration(seconds: 2), (_) {
+      try {
+        sink.flush();
+      } catch (_) {/* ignore */}
+    });
+    _cachedDaemonLog = sink;
   } catch (_) {
     _cachedDaemonLog = null;
   }

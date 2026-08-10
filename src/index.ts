@@ -196,6 +196,9 @@ const server = createHttpServer({
   stepUp: config.stepUp,
   runnerToken: config.runnerToken,
   assistantModel: config.assistantModel,
+  // Subscribe a creator's live socket to a brand-new channel/agent/DM immediately (see the
+  // subscribeAll snapshot note in ws/hub.ts) — lazy like `broadcast`, since hub is created after.
+  subscribe: (sub, channelId) => hub?.subscribe(sub, channelId),
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
 });
 hub = attachWsHub(server, {

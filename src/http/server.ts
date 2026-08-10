@@ -237,6 +237,7 @@ function buildRouter(
   hasRemoteRunner?: (ownerSub: string) => boolean,
   runnerToken?: RunnerToken,
   assistantModel?: string,
+  subscribe?: (sub: string, channelId: string) => void,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -377,6 +378,8 @@ function buildRouter(
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.addMember({ channelId: channel.id, memberRef: other, memberType: "user", role: "member" });
+    subscribe?.(principal.sub, channel.id);
+    subscribe?.(other, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: other });
     sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });
@@ -403,6 +406,7 @@ function buildRouter(
       createdBy: principal.sub,
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
+    subscribe?.(principal.sub, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "channel.create", target: channel.id, detail: cuiMarking });
     sendJson(res, 201, channel);
   });
@@ -1059,6 +1063,7 @@ function buildRouter(
     }
     const existed = await store.isMember(channelId, memberRef);
     await store.addMember({ channelId, memberRef, memberType: "user", role });
+    if (!existed) subscribe?.(memberRef, channelId); // add to the newly-added member's live socket
     await store.appendAudit({ actor: principal.sub, action: existed ? "channel.set_role" : "channel.add_member", target: channelId, detail: `${memberRef}:${role}` });
     broadcast?.(channelId, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role });
     notify?.(memberRef, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role }); // refresh the affected user's channel list
@@ -1162,6 +1167,10 @@ function buildRouter(
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.addMember({ channelId: channel.id, memberRef: agent.id, memberType: "agent", role: "member" });
+    // Add this new channel to the owner's ALREADY-OPEN subscribeAll socket, so the agent's live
+    // events (agent_output / messages) reach them without a reconnect. subscribeAll only snapshots
+    // the channels that existed when it ran, so a channel created afterward is otherwise silent.
+    subscribe?.(principal.sub, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "agent.spawn", target: agent.id });
     // A coding agent needs a live runner session (Sprint 4's control plane); the assistant path
     // runs synchronously per-message (triggerAssistants) and never gets one. If this deployment
@@ -1367,11 +1376,15 @@ export function createHttpServer(deps: {
   runnerToken?: RunnerToken;
   /** Default model for an assistant with no explicit one (config.assistantModel). Unset ⇒ "auto". */
   assistantModel?: string;
+  /** Subscribe a user's already-open subscribeAll socket(s) to a channel the moment it's created,
+   * so a new channel/agent/DM is live without a reconnect (wired to hub.subscribe). Unset ⇒ new
+   * channels only go live on the client's next reconnect. */
+  subscribe?: (sub: string, channelId: string) => void;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 
