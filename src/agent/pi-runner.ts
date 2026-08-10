@@ -69,7 +69,14 @@ const READONLY_TOOL_NAMES = ["read", "ls", "grep", "find"];
  * itself has, so blindly inheriting this server's full environment would hand a coding agent's
  * shell tool secrets it has no business seeing (DATABASE_URL, SECROUTER_TOKEN, session-signing
  * keys, …). Fails closed like the rest of this codebase (gate.ts's unknown-tool default; C1). */
-const INHERITED_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "TZ"];
+const INHERITED_ENV_KEYS = [
+  "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "TZ",
+  // TLS trust for pi's own model-call egress to the gateway (SecRouter behind an internal CA):
+  // pi is a Node app, so it honours NODE_EXTRA_CA_CERTS; the *_CERT_FILE/*_CA_BUNDLE variants
+  // cover its non-Node HTTP paths. Without these pi can't verify the gateway cert → "Connection
+  // error." on every model call.
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+];
 
 const STDERR_TAIL_MAX_CHUNKS = 50;
 
@@ -225,11 +232,11 @@ function buildChildEnv(configDir: string, extra: NodeJS.ProcessEnv | undefined):
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  // Never let a headless server-side runner make its own startup network calls (version checks,
-  // catalog refresh, telemetry) — both for test determinism and because this suite runs in
-  // air-gapped/CUI enclaves (see README.md) where unexpected egress is exactly what CMMC hardening
-  // is meant to prevent.
-  env.PI_OFFLINE = "1";
+  // Suppress pi's own startup network calls (version checks, catalog refresh, telemetry) for test
+  // determinism and CMMC hardening. But PI_OFFLINE also stops pi reaching the CONFIGURED model
+  // provider, so a runner that actually needs to call the gateway (baseUrl set) opts out via
+  // SECCHAT_PI_ALLOW_EGRESS=1 — otherwise every model call fails with "Connection error."
+  if (process.env.SECCHAT_PI_ALLOW_EGRESS !== "1") env.PI_OFFLINE = "1";
   env.PI_TELEMETRY = "0";
   env.PI_CODING_AGENT_DIR = configDir;
   if (extra) Object.assign(env, extra);
@@ -373,6 +380,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
       ...(apiKey !== undefined ? ["--api-key", apiKey] : []),
     ];
 
+    if (process.env.SECCHAT_PI_DEBUG === "1") console.error(`[pi spawn] ${piBin} ${args.join(" ")}`);
     const child = spawn(piBin, args, {
       cwd: workspaceDir,
       env: buildChildEnv(configDir, extraEnv),
@@ -394,6 +402,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     };
 
     attachJsonlReader(child.stdout, (line) => {
+      if (process.env.SECCHAT_PI_DEBUG === "1") console.error(`[pi stdout] ${line.slice(0, 400)}`);
       let evt: Record<string, unknown>;
       try {
         evt = JSON.parse(line) as Record<string, unknown>;
@@ -404,6 +413,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
+      if (process.env.SECCHAT_PI_DEBUG === "1") console.error(`[pi stderr] ${chunk.toString("utf8").slice(0, 400)}`);
       session.stderrTail.push(chunk.toString("utf8"));
       if (session.stderrTail.length > STDERR_TAIL_MAX_CHUNKS) session.stderrTail.shift();
     });

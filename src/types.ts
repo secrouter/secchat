@@ -57,6 +57,9 @@ export interface Channel {
    * marking/policy.ts). When set, the channel IS the portion — every message inherits it and no
    * message may exceed it (spillage block). Unset ("unspecified") ⇒ marking is per-message. */
   cuiMarking?: string;
+  /** Archived channels are hidden from the default sidebar list (a member can still reopen them
+   * via "show archived"). A soft-hide for decluttering — nothing is deleted. */
+  archived?: boolean;
   createdBy: string; // Principal.sub
   createdAt: string; // ISO-8601 UTC
 }
@@ -285,6 +288,8 @@ export interface Store {
    * The route owns authz (member to set/raise; admin to downgrade) and validates the level against
    * the policy; the store just persists + audits atomically. Returns the updated channel. */
   setChannelMarking(channelId: Id, marking: string, by: string): Promise<Channel>;
+  /** Archive or unarchive a channel (soft-hide for the sidebar — see Channel.archived). */
+  setChannelArchived(channelId: Id, archived: boolean): Promise<Channel>;
   addMember(m: Member): Promise<void>;
   listMembers(channelId: Id): Promise<Member[]>;
   isMember(channelId: Id, ref: string): Promise<boolean>;
@@ -508,4 +513,8 @@ export interface AgentControl {
   grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   getSession(id: Id): Promise<AgentSession | null>;
+  /** The current live (starting|active) session for a coding channel, or null if none is running.
+   * Read-only — used to reattach a reloaded client to an already-running session (see GET /channels)
+   * without spawning a duplicate. */
+  liveSession(channelId: Id): Promise<AgentSession | null>;
 }

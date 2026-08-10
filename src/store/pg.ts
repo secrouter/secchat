@@ -117,6 +117,7 @@ interface ChannelRow {
   kind: string;
   name: string | null;
   cui_marking: string | null;
+  archived: boolean | null;
   created_by: string;
   created_at: Date;
 }
@@ -263,6 +264,7 @@ function rowToChannel(row: ChannelRow): Channel {
     kind: row.kind as ChannelKind,
     name: row.name ?? undefined,
     cuiMarking: row.cui_marking ?? undefined,
+    archived: row.archived ?? undefined,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
   });
@@ -433,7 +435,7 @@ export class PgStore implements Store, SessionStore {
 
   async getChannel(id: Id): Promise<Channel | null> {
     const { rows } = await this.#pool.query<ChannelRow>(
-      `SELECT id, workspace_id, kind, name, cui_marking, created_by, created_at FROM channels WHERE id = $1`,
+      `SELECT id, workspace_id, kind, name, cui_marking, archived, created_by, created_at FROM channels WHERE id = $1`,
       [id],
     );
     return rows[0] ? rowToChannel(rows[0]) : null;
@@ -447,7 +449,7 @@ export class PgStore implements Store, SessionStore {
       await client.query("BEGIN");
       const { rows } = await client.query<ChannelRow>(
         `UPDATE channels SET cui_marking = $2 WHERE id = $1
-         RETURNING id, workspace_id, kind, name, cui_marking, created_by, created_at`,
+         RETURNING id, workspace_id, kind, name, cui_marking, archived, created_by, created_at`,
         [channelId, marking],
       );
       const row = rows[0];
@@ -461,6 +463,17 @@ export class PgStore implements Store, SessionStore {
     } finally {
       client.release();
     }
+  }
+
+  async setChannelArchived(channelId: Id, archived: boolean): Promise<Channel> {
+    const { rows } = await this.#pool.query<ChannelRow>(
+      `UPDATE channels SET archived = $2 WHERE id = $1
+       RETURNING id, workspace_id, kind, name, cui_marking, archived, created_by, created_at`,
+      [channelId, archived],
+    );
+    const row = rows[0];
+    if (!row) throw new Error(`PgStore.setChannelArchived: unknown channel ${channelId}`);
+    return rowToChannel(row);
   }
 
   /** Idempotent upsert on (channelId, memberRef): unlike MemoryStore's unconditional array push,
@@ -517,7 +530,7 @@ export class PgStore implements Store, SessionStore {
    * audit-review console (AU 3.3.5/6), same idiom as listMembers/listAgentsByOwner. */
   async listChannels(): Promise<Channel[]> {
     const { rows } = await this.#pool.query<ChannelRow>(
-      `SELECT id, workspace_id, kind, name, cui_marking, created_by, created_at FROM channels ORDER BY ins_seq`,
+      `SELECT id, workspace_id, kind, name, cui_marking, archived, created_by, created_at FROM channels ORDER BY ins_seq`,
     );
     return rows.map(rowToChannel);
   }
@@ -561,7 +574,7 @@ export class PgStore implements Store, SessionStore {
    * The count guard rules out a would-be group DM; the two EXISTS clauses pin both participants. */
   async findDmChannel(subA: string, subB: string): Promise<Channel | null> {
     const { rows } = await this.#pool.query<ChannelRow>(
-      `SELECT c.id, c.workspace_id, c.kind, c.name, c.cui_marking, c.created_by, c.created_at
+      `SELECT c.id, c.workspace_id, c.kind, c.name, c.cui_marking, c.archived, c.created_by, c.created_at
        FROM channels c
        WHERE c.kind = 'dm'
          AND (SELECT count(*) FROM channel_members m

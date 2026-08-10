@@ -105,6 +105,12 @@ const store = {
   async getChannel(id: string) {
     return channelsById.get(id) ?? null;
   },
+  async setChannelArchived(id: string, archived: boolean) {
+    const channel = channelsById.get(id) as (FakeChannel & { archived?: boolean }) | undefined;
+    if (!channel) throw new Error(`unknown channel ${id}`);
+    channel.archived = archived;
+    return channel;
+  },
   async addMember(m: { channelId: string; memberRef: string }) {
     const members = channelMembers.get(m.channelId) ?? new Set<string>();
     members.add(m.memberRef);
@@ -319,6 +325,9 @@ const control: AgentControl = {
   async getSession(id) {
     controlCalls.getSession.push(id);
     return id === fakeSession.id ? fakeSession : null;
+  },
+  async liveSession(channelId) {
+    return channelId === fakeSession.channelId ? fakeSession : null;
   },
 };
 
@@ -673,6 +682,44 @@ test("PATCH /agents/:id is 404 for an unknown agent and 400 without a model", as
   assert.equal(bad.status, 400);
 });
 
+test("POST /channels/:id/archive toggles the archived flag (member only)", async () => {
+  const created = await (await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "to-archive" }),
+  })).json() as { id: string };
+
+  // Archive (default true).
+  const arch = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(arch.status, 200);
+  assert.equal((await arch.json() as { archived?: boolean }).archived, true);
+
+  // …and it shows on GET /channels.
+  const listed = await (await fetch(`${baseUrl}/channels`, { headers: { authorization: "Bearer good" } })).json() as
+    Array<{ id: string; archived?: boolean }>;
+  assert.equal(listed.find((c) => c.id === created.id)?.archived, true);
+
+  // Restore.
+  const restore = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ archived: false }),
+  });
+  assert.equal((await restore.json() as { archived?: boolean }).archived, false);
+
+  // A non-member may not.
+  const forbidden = await fetch(`${baseUrl}/channels/${created.id}/archive`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(forbidden.status, 403);
+});
+
 test("an unmatched route is 404", async () => {
   const res = await fetch(`${baseUrl}/nope`, { headers: { authorization: "Bearer good" } });
   assert.equal(res.status, 404);
@@ -747,6 +794,38 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.equal(res.status, 202);
   assert.deepEqual(await res.json(), { status: "accepted" });
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
+});
+
+test("POST /sessions/:id/input broadcasts the prompt as a message WITH plaintext content (not a redaction tombstone)", async () => {
+  // Regression: the stored row carries only the content HASH, so broadcasting it raw arrives with
+  // content == null and the client renders it as "message redacted". The route must re-attach the
+  // plaintext, exactly like the POST message route does.
+  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+  const server = createHttpServer({
+    verifyToken,
+    store,
+    control,
+    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const res = await fetch(`http://127.0.0.1:${port}/sessions/sess-1/input`, {
+      method: "POST",
+      headers: { authorization: "Bearer good", "content-type": "application/json" },
+      body: JSON.stringify({ text: "run the build" }),
+    });
+    assert.equal(res.status, 202);
+    const messageBroadcasts = broadcasts.filter(
+      (b) => (b.payload as { type?: string }).type === "message",
+    );
+    assert.equal(messageBroadcasts.length, 1, "exactly one message broadcast for the prompt");
+    const message = (messageBroadcasts[0]!.payload as { message: { content?: string } }).message;
+    assert.equal(message.content, "run the build", "broadcast must carry the plaintext, not a null-content tombstone");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {

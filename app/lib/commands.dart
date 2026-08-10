@@ -37,6 +37,11 @@ class SlashCommand {
 /// The registry, in the order they appear in the suggestion strip and `/help`.
 const List<SlashCommand> kSlashCommands = <SlashCommand>[
   SlashCommand(
+    name: 'invite',
+    argHint: '<name-or-email>',
+    summary: 'Add a user (by display name or email) to this channel.',
+  ),
+  SlashCommand(
     name: 'pi',
     argHint: '<message>',
     summary: "Pass input straight through to this channel's coding agent (pi).",

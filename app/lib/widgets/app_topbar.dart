@@ -182,7 +182,7 @@ class _UserChip extends StatelessWidget {
               shape: BoxShape.circle,
             ),
             child: Text(
-              initialsFor(principal.sub),
+              initialsFor(principal.label),
               style: const TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
@@ -199,7 +199,7 @@ class _UserChip extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    principal.sub,
+                    principal.label,
                     style: const TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,

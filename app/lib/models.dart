@@ -64,11 +64,20 @@ class Principal {
   const Principal({
     required this.sub,
     required this.groups,
+    this.displayName,
+    this.email,
     this.marking = MarkingPolicy.fallback,
   });
 
   final String sub;
   final List<String> groups;
+
+  /// The signed-in user's display name (`GET /me`'s `name` claim). Null when the
+  /// IdP didn't supply one — the [label] then falls back to the sub.
+  final String? displayName;
+
+  /// The signed-in user's email (`GET /me`), when the IdP supplied it.
+  final String? email;
 
   /// The deployment's classification-marking ladder (from `GET /me`) — drives
   /// the banners, the composer's marking picker, and local rank comparisons.
@@ -76,11 +85,21 @@ class Principal {
 
   bool get isAdmin => groups.contains('secchat-admins');
 
+  /// A human label for the top bar etc.: the display name, else the email, else
+  /// the raw sub (an opaque hash under sub_mode: hashed_user_id).
+  String get label => (displayName != null && displayName!.isNotEmpty)
+      ? displayName!
+      : (email != null && email!.isNotEmpty)
+      ? email!
+      : sub;
+
   factory Principal.fromJson(Map<String, dynamic> json) => Principal(
     sub: json['sub'] as String? ?? '',
     groups: (json['groups'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => e.toString())
         .toList(),
+    displayName: json['displayName'] as String?,
+    email: json['email'] as String?,
     marking: json['marking'] is Map<String, dynamic>
         ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
         : MarkingPolicy.fallback,
@@ -102,6 +121,9 @@ class Channel {
     this.agentKind,
     this.agentId,
     this.agentModel,
+    this.sessionId,
+    this.owned = false,
+    this.archived = false,
   });
 
   final String id;
@@ -125,6 +147,22 @@ class Channel {
   /// Null ⇒ unset (the deployment default applies).
   final String? agentModel;
 
+  /// For a coding-agent channel, the id of its currently-live runner session, as
+  /// recovered by `GET /channels`. A reloaded client uses this to route input
+  /// straight back to the running agent (`POST /sessions/:id/input`) instead of
+  /// posting a plain message that never reaches pi. Null ⇒ no live session (the
+  /// client calls `POST /channels/:id/session` to (re)start one on demand).
+  final String? sessionId;
+
+  /// Whether the caller owns this agent (created it). Only the owner may switch a
+  /// coding agent from plan mode to edit mode (grant execute). The backend gate
+  /// enforces this too; this just hides the control for everyone else.
+  final bool owned;
+
+  /// Archived channels are hidden from the sidebar by default (a soft-hide for
+  /// decluttering). Toggled via `POST /channels/:id/archive`.
+  final bool archived;
+
   /// The channel's classification level, when marked. When set, the channel IS
   /// the portion — every message inherits it — and the composer locks its
   /// marking picker to this level. Null ⇒ unmarked (per-message marking).
@@ -141,6 +179,9 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: agentModel,
+    sessionId: sessionId,
+    owned: owned,
+    archived: archived,
   );
 
   /// A copy with a new [agentModel] — used after the header picker switches the
@@ -154,6 +195,9 @@ class Channel {
     agentKind: agentKind,
     agentId: agentId,
     agentModel: model,
+    sessionId: sessionId,
+    owned: owned,
+    archived: archived,
   );
 
   /// For a DM, the participant sub that isn't [me] (the person you're talking
@@ -178,6 +222,25 @@ class Channel {
         : AgentKind.fromWire(json['agentKind'] as String?),
     agentId: json['agentId'] as String?,
     agentModel: json['agentModel'] as String?,
+    sessionId: json['sessionId'] as String?,
+    owned: json['owned'] as bool? ?? false,
+    archived: json['archived'] as bool? ?? false,
+  );
+
+  /// A copy with a new [archived] state — used after the sidebar toggles it so
+  /// the list updates without a full reload.
+  Channel withArchived(bool value) => Channel(
+    id: id,
+    kind: kind,
+    name: name,
+    members: members,
+    cuiMarking: cuiMarking,
+    agentKind: agentKind,
+    agentId: agentId,
+    agentModel: agentModel,
+    sessionId: sessionId,
+    owned: owned,
+    archived: value,
   );
 }
 

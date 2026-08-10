@@ -138,7 +138,16 @@ const remoteRunner = makeRemoteRunner({
   renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
 });
 const runner = makeRouterRunner({ server: serverRunner, remote: remoteRunner.runner, hasRemote: (sub) => runnerRegistry.has(sub) });
-const control = makeControlPlane({ sessions: store, runner, getAgent: (id) => store.getAgent(id), broadcast });
+const control = makeControlPlane({
+  sessions: store,
+  runner,
+  getAgent: (id) => store.getAgent(id),
+  broadcast,
+  // Persist coding-agent output as real channel messages (survives session restart; renders as
+  // markdown). subscribe the owner first so the broadcast reaches their live socket.
+  appendAgentMessage: (channelId, agentId, text) =>
+    store.appendMessage({ channelId, authorRef: agentId, authorType: "agent", content: text }),
+});
 
 if (config.devMode && !config.databaseUrl) {
   // DEV ONLY (SECCHAT_DEV_MODE=1, in-memory only): seed so /admin + the client have sample data.
@@ -196,6 +205,9 @@ const server = createHttpServer({
   stepUp: config.stepUp,
   runnerToken: config.runnerToken,
   assistantModel: config.assistantModel,
+  // Subscribe a creator's live socket to a brand-new channel/agent/DM immediately (see the
+  // subscribeAll snapshot note in ws/hub.ts) — lazy like `broadcast`, since hub is created after.
+  subscribe: (sub, channelId) => hub?.subscribe(sub, channelId),
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
 });
 hub = attachWsHub(server, {
