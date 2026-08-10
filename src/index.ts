@@ -10,6 +10,7 @@ import { buildOverview } from "./admin/overview.ts";
 import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
 import { startReaper } from "./agent/reaper.ts";
+import { governedAgentAppend } from "./governance/append.ts";
 import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
 import { makePiRunner } from "./agent/pi-runner.ts";
 import { makeAuthGateway } from "./auth/bff.ts";
@@ -145,9 +146,14 @@ const control = makeControlPlane({
   getAgent: (id) => store.getAgent(id),
   broadcast,
   // Persist coding-agent output as real channel messages (survives session restart; renders as
-  // markdown). subscribe the owner first so the broadcast reaches their live socket.
+  // markdown) — through the GOVERNED append: the channel's marking stamps the output, portion
+  // markings fold/spillage-check, and DLP scans it like any human post (block ⇒ a clean withheld
+  // notice, audited). Returns the enriched message; control.ts broadcasts exactly that.
   appendAgentMessage: (channelId, agentId, text) =>
-    store.appendMessage({ channelId, authorRef: agentId, authorType: "agent", content: text }),
+    governedAgentAppend(
+      { store, marking: config.marking, dlp: config.dlp },
+      { channelId, authorRef: agentId, content: text },
+    ),
 });
 
 // The orphan reaper — the ONLY thing that ends a coding session whose daemon is truly gone. A

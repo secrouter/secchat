@@ -209,6 +209,8 @@ async function triggerAssistants(
   promptedBy: string,
   userText: string,
   defaultModel?: string,
+  markingPolicy?: MarkingPolicy,
+  dlp?: DlpPolicy,
 ): Promise<void> {
   const members = await store.listMembers(channelId);
   for (const m of members) {
@@ -216,7 +218,7 @@ async function triggerAssistants(
     const agent = await store.getAgent(m.memberRef);
     if (agent?.kind !== "assistant") continue;
     try {
-      await handleAssistantTurn({ store, llm, broadcast, defaultModel }, { channelId, agent, promptedBy, userText });
+      await handleAssistantTurn({ store, llm, broadcast, defaultModel, markingPolicy, dlp }, { channelId, agent, promptedBy, userText });
     } catch (err) {
       broadcast?.(channelId, { type: "assistant_error", agentId: agent.id, error: String(err) });
     }
@@ -731,7 +733,7 @@ function buildRouter(
     broadcast?.(channelId, { type: "message", message: enriched });
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
-    if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel);
+    if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel, marking, dlp);
     // Same shape for a coding agent: forward the message to its pi session with a "who posted it"
     // header; pi's reply comes back as a persisted message. Fire-and-forget — errors are the control
     // plane's to surface.
@@ -971,6 +973,23 @@ function buildRouter(
       return;
     }
     await store.redactMessage(messageId, principal.sub, reason);
+    // Complete the purge: destroy the redacted message's attachment BYTES too (the rows and the
+    // chain-bound manifest digest stay — the chain still verifies; downloads already 404). Blobs
+    // are content-addressed and deduped, so a sha still referenced by an unclaimed upload or by
+    // another unredacted message is kept (refcount via hasLiveAttachmentReference). Best-effort
+    // per file: the redaction itself is already committed, so a purge failure is surfaced loudly
+    // (audited as attachment.purge_failed) rather than un-redacting or failing the request.
+    if (attachments) {
+      for (const att of await store.listAttachmentsForMessage(messageId)) {
+        if (await store.hasLiveAttachmentReference(att.sha256, messageId)) continue;
+        try {
+          await attachments.blobs.delete(att.sha256);
+          await store.appendAudit({ actor: principal.sub, action: "attachment.purge", target: att.id, detail: att.sha256 });
+        } catch (err) {
+          await store.appendAudit({ actor: principal.sub, action: "attachment.purge_failed", target: att.id, detail: String(err) });
+        }
+      }
+    }
     broadcast?.(message.channelId, { type: "redaction", channelId: message.channelId, messageId, by: principal.sub });
     sendJson(res, 200, { ok: true });
   });

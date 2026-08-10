@@ -56,13 +56,16 @@ test("makeLlmClient — streams assistant deltas parsed from SecRouter's SSE res
     const client = makeLlmClient({ secrouterUrl: `http://127.0.0.1:${port}`, secrouterToken: "test-token-123" });
 
     const deltas: string[] = [];
-    for await (const delta of client.complete({ model: "claude-x", messages: MESSAGES, actingUser: "user-42" })) {
+    for await (const delta of client.complete({ model: "claude-x", messages: MESSAGES, actingUser: "user-42", classification: "CUI" })) {
       deltas.push(delta);
     }
 
     assert.equal(deltas.join(""), "Hello, world!");
 
     assert.equal(capturedHeaders["x-sec-acting-user"], "user-42");
+    // The content's classification level rides the trusted header SecRouter's clearance +
+    // data-residency egress gate keys on (F1 — closes the marking→gateway loop).
+    assert.equal(capturedHeaders["x-data-classification"], "CUI");
     assert.equal(capturedHeaders["authorization"], "Bearer test-token-123");
 
     const body = JSON.parse(capturedBody);
@@ -101,6 +104,9 @@ test("makeLlmClient — a non-2xx response throws on iteration, and omits Author
 
     assert.equal(capturedHeaders["x-sec-acting-user"], "user-42"); // still sent even without a token
     assert.equal(capturedHeaders["authorization"], undefined);
+    // No classification supplied ⇒ header omitted — SecRouter falls back to its configured
+    // default, exactly the pre-F1 behavior.
+    assert.equal(capturedHeaders["x-data-classification"], undefined);
   } finally {
     server.close();
   }

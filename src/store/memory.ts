@@ -438,6 +438,17 @@ export class MemoryStore implements Store, SessionStore {
     return [...this.#attachments.values()].filter((a) => a.messageId === messageId).map((a) => ({ ...a }));
   }
 
+  async hasLiveAttachmentReference(sha256: string, excludingMessageId: Id): Promise<boolean> {
+    for (const a of this.#attachments.values()) {
+      if (a.sha256 !== sha256) continue;
+      if (a.messageId == null) return true; // unclaimed upload — may yet be claimed
+      if (a.messageId === excludingMessageId) continue;
+      const owner = this.#messagesById.get(a.messageId);
+      if (owner && !owner.redactedAt) return true;
+    }
+    return false;
+  }
+
   async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {
     return [...this.#attachments.values()]
       .filter((a) => a.messageId != null && a.channelId === channelId)

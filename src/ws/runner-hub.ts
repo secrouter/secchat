@@ -15,7 +15,7 @@ import type { VerifyToken } from "../types.ts";
 import type { RunnerRegistry, RunnerConnection } from "../agent/runner-registry.ts";
 import type { RemoteRunner } from "../agent/remote-runner.ts";
 import { parseRunnerMessage, type RunnerCommand } from "../agent/runner-protocol.ts";
-import { computeAcceptKey, decodeFrames, encodeCloseFrame, encodePong, encodeTextFrame, OPCODE } from "./frame.ts";
+import { computeAcceptKey, encodeCloseFrame, encodePong, encodeTextFrame, FrameDecoder, OPCODE } from "./frame.ts";
 
 export interface RunnerHub {
   close(): void;
@@ -109,8 +109,19 @@ export function attachRunnerHub(
       deps.remote.handleDaemonGone(conn); // ends the daemon's live sessions cleanly
     };
 
+    // Per-connection decoder (frame.ts FrameDecoder): a daemon's output/tool_request frames are
+    // routinely multi-KB — larger than one TCP segment — so partial bytes MUST carry across
+    // "data" events or agent output vanishes and the execute-gate handshake stalls mid-turn.
+    const decoder = new FrameDecoder();
     const onData = (chunk: Buffer) => {
-      for (const frame of decodeFrames(chunk)) {
+      let frames;
+      try {
+        frames = decoder.push(chunk);
+      } catch {
+        socket.destroy(); // over the size bound — hostile or broken daemon
+        return;
+      }
+      for (const frame of frames) {
         switch (frame.opcode) {
           case OPCODE.PING:
             socket.write(encodePong(frame.payload));
