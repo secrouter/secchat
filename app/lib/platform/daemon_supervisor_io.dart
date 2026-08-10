@@ -56,6 +56,21 @@ String _augmentedPath() {
   return [...extra, if (inherited.isNotEmpty) inherited].join(':');
 }
 
+/// The suite CA (SecCert root) bundled at `Contents/Resources/seccert-root.pem`, or null when not
+/// bundled (dev runs / other platforms — pi then relies on its own trust store). See
+/// scripts/bundle-macos-runnerd.sh, which copies it in alongside the runnerd payload.
+String? _bundledCaPath() {
+  if (!Platform.isMacOS) return null;
+  try {
+    final contents = File(Platform.resolvedExecutable).parent.parent.path; // …/Contents
+    final ca = File('$contents/Resources/seccert-root.pem');
+    if (ca.existsSync()) return ca.path;
+  } catch (_) {
+    // fall through
+  }
+  return null;
+}
+
 /// The runnerd embedded in the macOS .app bundle, or null (dev runs, other platforms, or a build
 /// without the bundle — fall through to the env/PATH default). Derived from the running executable:
 /// `…/SecChat.app/Contents/MacOS/<bin>` → `…/Contents/Resources/runnerd/`.
@@ -134,6 +149,13 @@ class _ProcessSupervisor implements DaemonSupervisor {
         //   --dart-define=SECCHAT_PI_MODEL=secllm/fast
         if (_secrouterOrigin.isNotEmpty) 'PI_BASE_URL': '$_secrouterOrigin/v1',
         if (_piModel.isNotEmpty) 'PI_MODEL': _piModel,
+        // pi must actually reach the gateway for a coding session to do anything, so opt out of
+        // pi's offline lockdown (see pi-runner's PI_OFFLINE) — the gateway is the one allowed
+        // egress.
+        'SECCHAT_PI_ALLOW_EGRESS': '1',
+        // …and it verifies the gateway's TLS against the suite CA (SecCert). pi is its own Node
+        // process that doesn't consult the macOS keychain, so hand it the CA bundled in the app.
+        if (_bundledCaPath() case final ca?) 'NODE_EXTRA_CA_CERTS': ca,
       });
       if (_stopping) {
         proc.kill();

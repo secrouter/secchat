@@ -39,6 +39,17 @@ fi
 cp "$CACHE/node" "$RES/node"
 chmod +x "$RES/node"
 
+# The suite CA (SecCert root), so pi can verify the gateway's TLS (see the supervisor's
+# _bundledCaPath / NODE_EXTRA_CA_CERTS). Point SECCHAT_CA_PEM at your deployment's root; defaults
+# to secdeploy's out/seccert-root.pem.
+CA_SRC="${SECCHAT_CA_PEM:-../../out/seccert-root.pem}"
+if [ -f "$CA_SRC" ]; then
+  cp "$CA_SRC" "$APP/Contents/Resources/seccert-root.pem"
+  echo "▸ bundled suite CA → Resources/seccert-root.pem"
+else
+  echo "⚠ no CA at $CA_SRC — pi model calls to an internal-CA gateway will fail TLS. Set SECCHAT_CA_PEM." >&2
+fi
+
 echo "▸ ad-hoc signing embedded node + app"
 codesign --force --sign - "$RES/node"
 codesign --force --deep --sign - "$APP"
