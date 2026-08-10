@@ -24,11 +24,16 @@ class TypingState {
 /// Scrollable transcript: persisted [TranscriptEntry] history plus, at the
 /// tail, a live [TypingState] bubble. Auto-scrolls to the bottom whenever
 /// new content arrives.
+/// Default [MessageList.labelForSub]: show the ref as-is (used by tests/callers
+/// that don't supply the directory lookup).
+String _identityLabel(String sub) => sub;
+
 class MessageList extends StatefulWidget {
   const MessageList({
     super.key,
     required this.entries,
     required this.currentUserSub,
+    this.labelForSub = _identityLabel,
     this.typing,
     this.onToggleReaction,
     this.replyCounts = const {},
@@ -52,6 +57,12 @@ class MessageList extends StatefulWidget {
 
   final List<TranscriptEntry> entries;
   final String currentUserSub;
+
+  /// Resolves an author's `sub` to a human label (display name), falling back to
+  /// the raw ref. Defaults to the identity (raw ref) so tests/callers that don't
+  /// wire it still compile — but the chat passes the seen-users directory lookup
+  /// so message bylines show names, not the opaque hashed sub.
+  final String Function(String sub) labelForSub;
   final TypingState? typing;
 
   /// Toggle an emoji reaction on a message (null disables the affordance, e.g.
@@ -215,6 +226,7 @@ class _MessageListState extends State<MessageList> {
             return _TranscriptTile(
               entry: widget.entries[entryIndex],
               currentUserSub: widget.currentUserSub,
+              labelForSub: widget.labelForSub,
               onToggleReaction: widget.onToggleReaction,
               replyCounts: widget.replyCounts,
               onOpenThread: widget.onOpenThread,
@@ -273,6 +285,7 @@ class _TranscriptTile extends StatelessWidget {
   const _TranscriptTile({
     required this.entry,
     required this.currentUserSub,
+    required this.labelForSub,
     this.onToggleReaction,
     this.replyCounts = const {},
     this.onOpenThread,
@@ -292,6 +305,7 @@ class _TranscriptTile extends StatelessWidget {
 
   final TranscriptEntry entry;
   final String currentUserSub;
+  final String Function(String sub) labelForSub;
   final void Function(Message message, String emoji)? onToggleReaction;
   final Map<String, int> replyCounts;
   final void Function(Message message)? onOpenThread;
@@ -314,6 +328,7 @@ class _TranscriptTile extends StatelessWidget {
       MessageEntry(:final message) => _MessageBubble(
         message: message,
         currentUserSub: currentUserSub,
+        labelForSub: labelForSub,
         isOwn:
             message.authorType == AuthorType.user &&
             message.authorRef == currentUserSub,
@@ -347,6 +362,7 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.isOwn,
     required this.currentUserSub,
+    required this.labelForSub,
     this.onToggleReaction,
     this.replyCount = 0,
     this.onOpenThread,
@@ -367,6 +383,7 @@ class _MessageBubble extends StatelessWidget {
   final Message message;
   final bool isOwn;
   final String currentUserSub;
+  final String Function(String sub) labelForSub;
   final void Function(Message message, String emoji)? onToggleReaction;
   final int replyCount;
   final void Function(Message message)? onOpenThread;
@@ -436,7 +453,9 @@ class _MessageBubble extends StatelessWidget {
           children: [
             Flexible(
               child: Text(
-                message.authorRef,
+                // Resolve a user's sub to their display name; an agent's ref
+                // isn't in the user directory, so it shows as-is.
+                isAgent ? message.authorRef : labelForSub(message.authorRef),
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 13.5,
@@ -561,7 +580,11 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    final bubble = ConstrainedBox(
+    final Widget bubble = GestureDetector(
+      // Right-click (or two-finger tap) copies the message's raw text — the same audited copy path
+      // as the overflow menu's Copy.
+      onSecondaryTap: _canCopy ? () => onCopy!(message) : null,
+      child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 680),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -573,6 +596,7 @@ class _MessageBubble extends StatelessWidget {
               ? [Flexible(child: content), const SizedBox(width: 10), avatar]
               : [avatar, const SizedBox(width: 12), Flexible(child: content)],
         ),
+      ),
       ),
     );
 

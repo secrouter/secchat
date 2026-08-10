@@ -97,6 +97,12 @@ abstract class ApiClient {
   /// fire-and-forget beyond surfacing a thrown [ApiException].
   Future<void> sendInput(String sessionId, String text);
 
+  /// (Re)attach a coding-agent channel to a live runner session and return its
+  /// id. Idempotent: returns the already-running session if one is live, else
+  /// spawns a fresh one. A reloaded client (whose in-memory session handle was
+  /// lost) calls this before driving the agent with [sendInput].
+  Future<AgentSession> ensureSession(String channelId);
+
   /// Add / remove an emoji reaction on a message. Fire-and-forget beyond a
   /// thrown [ApiException]: the change is reflected in message history and
   /// streamed to every viewer as a `reaction` WS event.
@@ -167,6 +173,10 @@ abstract class ApiClient {
   /// Switch an assistant's model live (`PATCH /agents/:id`). `model` is any id
   /// from [listModels], including `auto` (router-chosen). Owner-only server-side.
   Future<void> setAgentModel(String agentId, String model);
+
+  /// Archive (or, with `archived: false`, restore) a channel — a soft-hide for
+  /// the sidebar (`POST /channels/:id/archive`).
+  Future<void> archiveChannel(String channelId, {bool archived = true});
 
   Future<GrantExecuteResult> grantExecute(
     String sessionId, {
@@ -464,6 +474,14 @@ class HttpApiClient implements ApiClient {
   }
 
   @override
+  Future<AgentSession> ensureSession(String channelId) async {
+    final data = await _post('/channels/$channelId/session', const {});
+    return AgentSession.fromJson(
+      (data as Map<String, dynamic>)['session'] as Map<String, dynamic>,
+    );
+  }
+
+  @override
   Future<void> addReaction(String messageId, String emoji) async {
     await _post('/messages/$messageId/reactions', {'emoji': emoji});
   }
@@ -591,6 +609,11 @@ class HttpApiClient implements ApiClient {
   @override
   Future<void> setAgentModel(String agentId, String model) async {
     await _patch('/agents/$agentId', {'model': model});
+  }
+
+  @override
+  Future<void> archiveChannel(String channelId, {bool archived = true}) async {
+    await _post('/channels/$channelId/archive', {'archived': archived});
   }
 
   @override

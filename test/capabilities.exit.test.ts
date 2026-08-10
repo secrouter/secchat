@@ -47,6 +47,7 @@ const control = {
   spawn: async () => ({ id: "sess-1", agentId: "a", channelId: "c", hostType: "server", status: "starting", createdAt: "", leaseExpiresAt: "" }),
   grantExecute: async () => ({ allow: true, reason: "granted" }),
   getSession: async () => null,
+  liveSession: async () => null,
   sendInput: async () => {},
   evaluateTool: async () => ({ allow: true }),
 } as unknown as AgentControl;

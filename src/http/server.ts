@@ -237,6 +237,7 @@ function buildRouter(
   hasRemoteRunner?: (ownerSub: string) => boolean,
   runnerToken?: RunnerToken,
   assistantModel?: string,
+  subscribe?: (sub: string, channelId: string) => void,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -377,6 +378,8 @@ function buildRouter(
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.addMember({ channelId: channel.id, memberRef: other, memberType: "user", role: "member" });
+    subscribe?.(principal.sub, channel.id);
+    subscribe?.(other, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: other });
     sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });
@@ -403,6 +406,7 @@ function buildRouter(
       createdBy: principal.sub,
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
+    subscribe?.(principal.sub, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "channel.create", target: channel.id, detail: cuiMarking });
     sendJson(res, 201, channel);
   });
@@ -412,6 +416,27 @@ function buildRouter(
   // marking or RAISE it; only an admin may DOWNGRADE (lower the level) — loosening a control is a
   // privileged act. Validated against the ladder; audited (`channel.mark`) by the store; a live
   // `channel_marking` event updates every viewer's banner.
+  // Archive / unarchive a channel (a member soft-hide for decluttering — see Channel.archived).
+  // Any member may toggle it; nothing is deleted.
+  router.add("POST", "/channels/:id/archive", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    const channel = await store.getChannel(channelId);
+    if (!channel) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { archived?: boolean };
+    const archived = body.archived !== false; // default true (archive); pass {archived:false} to restore
+    const updated = await store.setChannelArchived(channelId, archived);
+    await store.appendAudit({ actor: principal.sub, action: archived ? "channel.archive" : "channel.unarchive", target: channelId });
+    broadcast?.(channelId, { type: "channel_archived", channelId, archived });
+    sendJson(res, 200, updated);
+  });
+
   router.add("POST", "/channels/:id/marking", async ({ req, res, params, principal }) => {
     const channelId = params.id!;
     const channel = await store.getChannel(channelId);
@@ -448,7 +473,7 @@ function buildRouter(
   // Store method — the same isMember gate every per-channel route below already applies.
   router.add("GET", "/channels", async ({ res, principal }) => {
     const chans = await store.listChannels();
-    const mine: Array<Channel & { members?: string[]; agentKind?: AgentKind; agentId?: string; agentModel?: string }> = [];
+    const mine: Array<Channel & { members?: string[]; agentKind?: AgentKind; agentId?: string; agentModel?: string; sessionId?: string; owned?: boolean }> = [];
     for (const c of chans) {
       if (!(await store.isMember(c.id, principal.sub))) continue;
       if (c.kind === "dm") {
@@ -465,7 +490,17 @@ function buildRouter(
         // header (see the model picker) instead of defaulting every agent channel to assistant.
         const agentMember = (await store.listMembers(c.id)).find((m) => m.memberType === "agent");
         const agent = agentMember ? await store.getAgent(agentMember.memberRef) : null;
-        mine.push(agent ? { ...c, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model } : c);
+        if (agent) {
+          // For a coding channel, recover the live session id (so a reloaded client routes input
+          // straight back to the running agent instead of posting a plain message that never reaches
+          // pi) and whether the caller owns the agent (only the owner may switch it to edit mode —
+          // the gate enforces this too, this just hides the control for everyone else).
+          const sessionId = agent.kind === "coding" ? (await control?.liveSession(c.id))?.id : undefined;
+          const owned = agent.ownerSub === principal.sub;
+          mine.push({ ...c, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, sessionId, owned });
+        } else {
+          mine.push(c);
+        }
       } else {
         mine.push(c);
       }
@@ -1038,6 +1073,7 @@ function buildRouter(
     }
     const existed = await store.isMember(channelId, memberRef);
     await store.addMember({ channelId, memberRef, memberType: "user", role });
+    if (!existed) subscribe?.(memberRef, channelId); // add to the newly-added member's live socket
     await store.appendAudit({ actor: principal.sub, action: existed ? "channel.set_role" : "channel.add_member", target: channelId, detail: `${memberRef}:${role}` });
     broadcast?.(channelId, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role });
     notify?.(memberRef, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role }); // refresh the affected user's channel list
@@ -1141,6 +1177,10 @@ function buildRouter(
     });
     await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
     await store.addMember({ channelId: channel.id, memberRef: agent.id, memberType: "agent", role: "member" });
+    // Add this new channel to the owner's ALREADY-OPEN subscribeAll socket, so the agent's live
+    // events (agent_output / messages) reach them without a reconnect. subscribeAll only snapshots
+    // the channels that existed when it ran, so a channel created afterward is otherwise silent.
+    subscribe?.(principal.sub, channel.id);
     await store.appendAudit({ actor: principal.sub, action: "agent.spawn", target: agent.id });
     // A coding agent needs a live runner session (Sprint 4's control plane); the assistant path
     // runs synchronously per-message (triggerAssistants) and never gets one. If this deployment
@@ -1150,14 +1190,49 @@ function buildRouter(
       // same way at start(); this just records an accurate hostType), else in-process.
       const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
       const session = await control.spawn({ agent, channelId: channel.id, hostType });
-      sendJson(res, 201, { agent, channel, session });
+      // Enrich the channel exactly as GET /channels does (agentKind/id/model, live sessionId, and
+      // owned) so the client renders the coding surface — including the owner-only edit-mode control —
+      // immediately, without waiting for a reload to pick up the richer shape.
+      const enriched = { ...channel, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, sessionId: session.id, owned: true };
+      sendJson(res, 201, { agent, channel: enriched, session });
       return;
     }
-    sendJson(res, 201, { agent, channel });
+    sendJson(res, 201, { agent, channel: { ...channel, agentKind: agent.kind, agentId: agent.id, agentModel: agent.model, owned: true } });
   });
 
   router.add("GET", "/agents", async ({ res, principal }) => {
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
+  });
+
+  // (Re)attach a coding channel to a live runner session. A reloaded client — or one that opens a
+  // coding channel whose original session ended when the daemon/server restarted — calls this to get
+  // a session id to drive. Idempotent: an already-running session is returned as-is (200); a fresh
+  // one is spawned only when none is live (201). Any member may reattach (reading/prompting the agent
+  // isn't owner-gated — only granting execute is). 404 when no control plane is wired.
+  router.add("POST", "/channels/:id/session", async ({ res, params, principal }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const agentMember = (await store.listMembers(channelId)).find((m) => m.memberType === "agent");
+    const agent = agentMember ? await store.getAgent(agentMember.memberRef) : null;
+    if (!agent || agent.kind !== "coding") {
+      sendJson(res, 404, { error: "not_a_coding_channel" });
+      return;
+    }
+    const existing = await control.liveSession(channelId);
+    if (existing) {
+      sendJson(res, 200, { session: existing });
+      return;
+    }
+    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    const session = await control.spawn({ agent, channelId, hostType });
+    sendJson(res, 201, { session });
   });
 
   // The models the gateway offers, for the chat window's model picker. Proxies SecRouter's
@@ -1239,7 +1314,17 @@ function buildRouter(
       return;
     }
     const body = (await readJsonBody(req)) as { text?: string };
-    await control.sendInput(params.id!, body.text ?? "");
+    const text = body.text ?? "";
+    // Persist the driver's prompt as a real message + broadcast it, so the coding-agent
+    // conversation (their prompts AND pi's replies — see control.ts's output persistence) survives
+    // a session restart / reload and shows for everyone in the channel, not just the sender.
+    if (text.trim() !== "") {
+      const message = await store.appendMessage({ channelId: session.channelId, authorRef: principal.sub, authorType: "user", content: text });
+      // Re-attach the plaintext — the stored row carries only the content HASH (see the POST message
+      // route), so broadcasting it raw would arrive as content == null and render as a redaction.
+      broadcast?.(session.channelId, { type: "message", message: { ...message, content: text } });
+    }
+    await control.sendInput(params.id!, text);
     sendJson(res, 202, { status: "accepted" });
   });
 
@@ -1346,11 +1431,15 @@ export function createHttpServer(deps: {
   runnerToken?: RunnerToken;
   /** Default model for an assistant with no explicit one (config.assistantModel). Unset ⇒ "auto". */
   assistantModel?: string;
+  /** Subscribe a user's already-open subscribeAll socket(s) to a channel the moment it's created,
+   * so a new channel/agent/DM is live without a reconnect (wired to hub.subscribe). Unset ⇒ new
+   * channels only go live on the client's next reconnect. */
+  subscribe?: (sub: string, channelId: string) => void;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

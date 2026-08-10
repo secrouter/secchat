@@ -373,8 +373,21 @@ void main() {
       expect(fake.sendInputCalls.single.text, 'run the tests');
       expect(fake.postMessageCalls, isEmpty);
 
-      // The user's own line is still visible locally even though it never
-      // went through postMessage.
+      // The prompt is no longer echoed locally; the backend persists it and
+      // broadcasts it back as a real `message` (so it survives a reload and
+      // renders like any message). Simulate that echo and assert it appears.
+      fake.emitWs(WsMessageEvent(
+        Message(
+          id: 'srv-1',
+          seq: 1,
+          authorRef: _principal.sub,
+          authorType: AuthorType.user,
+          content: 'run the tests',
+          createdAt: DateTime(2026, 1, 1),
+        ),
+        channelId: 'agent-ch-1',
+      ));
+      await pumpSettled(tester);
       expect(find.text('run the tests'), findsOneWidget);
     },
   );

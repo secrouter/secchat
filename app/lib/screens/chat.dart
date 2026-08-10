@@ -76,6 +76,7 @@ class _ChatScreenState extends State<ChatScreen> {
   TypingState? _typing;
   ConnStatus _connStatus = ConnStatus.idle;
   StreamSubscription<WsEvent>? _wsSub;
+  Timer? _wsReconnect;
 
   // `GET /channels` only ever reports `kind: "agent"`, never distinguishing
   // an assistant channel from a coding-agent one, and never carries a
@@ -91,8 +92,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // model picker. Loaded once at boot; empty (or a failed load) just hides the
   // picker, leaving the deployment default in effect.
   List<ModelInfo> _models = const [];
+
+  // Whether the sidebar reveals archived channels (off by default — archiving is
+  // the declutter path for heavy testing).
+  bool _showArchived = false;
   final Set<String> _endedSessionIds = {};
-  int _localEchoSeq = 0;
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
@@ -203,6 +207,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Archive or restore a channel from the sidebar, updating the local list
+  /// optimistically so it hides/reappears immediately.
+  Future<void> _archiveChannel(Channel channel, bool archived) async {
+    setState(() {
+      _channels = [
+        for (final c in _channels) c.id == channel.id ? c.withArchived(archived) : c,
+      ];
+      if (_selected?.id == channel.id) _selected = _selected!.withArchived(archived);
+    });
+    try {
+      await widget.api.archiveChannel(channel.id, archived: archived);
+    } catch (error) {
+      // Roll back on failure.
+      if (!mounted) return;
+      setState(() {
+        _channels = [
+          for (final c in _channels) c.id == channel.id ? c.withArchived(!archived) : c,
+        ];
+        if (_selected?.id == channel.id) _selected = _selected!.withArchived(!archived);
+      });
+      _showError(error);
+    }
+  }
+
   /// Switch an assistant channel's model (header picker → PATCH /agents/:id),
   /// then reflect it locally so the header updates without a reload.
   Future<void> _setAgentModel(Channel channel, String model) async {
@@ -261,6 +289,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _typingPrune?.cancel();
+    _wsReconnect?.cancel();
     _daemon.dispose();
     _wsSub?.cancel();
     super.dispose();
@@ -277,6 +306,13 @@ class _ChatScreenState extends State<ChatScreen> {
       for (final c in channels) {
         if (c.agentKind != null) {
           _agentKindByChannel[c.id] = c.agentKind!;
+        }
+        // Recover a coding channel's live session id so a reloaded client routes
+        // input back to the running agent (see `_codingSessionIdFor`) instead of
+        // posting a plain message that never reaches pi. Absent ⇒ no live session;
+        // `_ensureCodingSession` (on select) starts one on demand.
+        if (c.sessionId != null) {
+          _sessionIdByChannel[c.id] = c.sessionId!;
         }
       }
       setState(() {
@@ -332,6 +368,27 @@ class _ChatScreenState extends State<ChatScreen> {
     // Viewing a channel marks it read up to its latest message; then refresh the
     // other channels' unread counts. (Events arrive on the always-open global socket.)
     unawaited(_markChannelRead(channel.id).then((_) => _loadUnread()));
+
+    // A coding channel needs a live runner session to receive input. If we don't
+    // already have one (fresh reload, or the prior session died with the daemon),
+    // (re)attach on open so both the composer's routing and the coding strip work.
+    unawaited(_ensureCodingSession(channel));
+  }
+
+  /// Ensures [channel] (when a coding-agent channel) has a live session id in
+  /// [_sessionIdByChannel], (re)starting one via the API if needed. Best-effort:
+  /// a failure just leaves the channel without a session (the composer falls back
+  /// to posting a plain message, and the coding strip stays hidden).
+  Future<void> _ensureCodingSession(Channel channel) async {
+    if (_agentKindByChannel[channel.id] != AgentKind.coding) return;
+    if (_sessionIdByChannel[channel.id] != null) return;
+    try {
+      final session = await widget.api.ensureSession(channel.id);
+      if (!mounted) return;
+      setState(() => _sessionIdByChannel[channel.id] = session.id);
+    } catch (_) {
+      // Non-fatal — leave the channel session-less; sending falls back to a plain post.
+    }
   }
 
   /// Fetches unread counts for every channel into [_unreadByChannel]. Failures
@@ -522,19 +579,27 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Opens the single long-lived socket delivering events for ALL the user's channels; each event
   /// carries its `channelId`, routed in [_handleEvent]. Reconnects if it had dropped.
   void _subscribeAll() {
+    _wsReconnect?.cancel();
     _wsSub?.cancel();
     setState(() => _connStatus = ConnStatus.connecting);
     _wsSub = widget.api.subscribeAll().listen(
       _handleEvent,
-      onError: (Object _) {
-        if (mounted) setState(() => _connStatus = ConnStatus.down);
-        _wsSub = null;
-      },
-      onDone: () {
-        if (mounted) setState(() => _connStatus = ConnStatus.down);
-        _wsSub = null;
-      },
+      onError: (Object _) => _scheduleWsReconnect(),
+      onDone: _scheduleWsReconnect,
     );
+  }
+
+  /// The global socket dropped (network blip, server restart). Without this the app would go silent
+  /// until the user next selected a channel; instead retry on a short delay so live events (new
+  /// messages, agent output) resume on their own.
+  void _scheduleWsReconnect() {
+    _wsSub = null;
+    if (!mounted) return;
+    setState(() => _connStatus = ConnStatus.down);
+    _wsReconnect?.cancel();
+    _wsReconnect = Timer(const Duration(seconds: 3), () {
+      if (mounted && _wsSub == null) _subscribeAll();
+    });
   }
 
   void _handleEvent(WsEvent event) {
@@ -899,6 +964,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await _runCommand(channel, command, marking);
       return;
     }
+    // In a coding-agent channel with a live session, EVERY message drives pi (not just /pi). The
+    // backend persists + broadcasts both the prompt and pi's reply, so no local echo is needed.
+    final sessionId = _codingSessionIdFor(channel.id);
+    if (sessionId != null) {
+      try {
+        await widget.api.sendInput(sessionId, text);
+      } catch (error) {
+        _showError(error);
+      }
+      return;
+    }
     await _sendPlain(channel, text, marking, attachmentIds);
   }
 
@@ -926,15 +1002,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendPlain(Channel channel, String text, String marking, List<String> attachmentIds) async {
     final sessionId = _codingSessionIdFor(channel.id);
     if (sessionId != null) {
-      // A coding agent is driven by its runner, not chat history: input
-      // goes to the session, and the agent's reply streams back as
-      // `agent_output` / `tool_decision` WS events (handled in
-      // `_handleEvent`), never as a `message`. There's no response body to
-      // append here, so echo the user's own line locally -- otherwise it
-      // would simply vanish from the transcript.
+      // A coding agent is driven by its runner, not chat history: input goes to
+      // the session. The backend persists + broadcasts BOTH the prompt (as a real
+      // `message`) and pi's reply, so the line comes back over the channel socket
+      // -- no local echo (which would double it).
       await widget.api.sendInput(sessionId, text);
-      if (!mounted) return;
-      setState(() => _append(channel.id, MessageEntry(_localEcho(text, marking))));
       return;
     }
     // Append straight from the POST response rather than waiting for a WS
@@ -975,6 +1047,8 @@ class _ChatScreenState extends State<ChatScreen> {
     switch (command.command.name) {
       case 'help':
         _showCommandHelp();
+      case 'invite':
+        await _inviteToChannel(channel, command.args.trim());
       case 'shrug':
         final base = command.args.trim();
         await _sendPlain(channel, base.isEmpty ? kShrug : '$base $kShrug', marking, const []);
@@ -993,9 +1067,48 @@ class _ChatScreenState extends State<ChatScreen> {
           );
           return;
         }
+        // The backend persists + broadcasts the prompt as a message, so no local echo.
         await widget.api.sendInput(sessionId, input);
-        if (!mounted) return;
-        setState(() => _append(channel.id, MessageEntry(_localEcho('/pi $input'))));
+    }
+  }
+
+  /// `/invite <name-or-email>` — resolve the query against the seen-users directory and add that
+  /// user to the current team channel. Only human channels (a DM's pair is fixed; an agent channel
+  /// is owner+agent). A user who has never signed in isn't in the directory yet, so can't be found.
+  Future<void> _inviteToChannel(Channel channel, String query) async {
+    if (query.isEmpty) {
+      _showError('Usage: /invite <name-or-email>');
+      return;
+    }
+    if (channel.kind != ChannelKind.human) {
+      _showError('/invite works in a team channel — not a DM or agent channel.');
+      return;
+    }
+    final q = query.toLowerCase();
+    final matches = _usersBySub.values
+        .where((u) =>
+            u.sub == query ||
+            (u.email != null && u.email!.toLowerCase() == q) ||
+            (u.displayName != null && u.displayName!.toLowerCase() == q))
+        .toList();
+    if (matches.isEmpty) {
+      _showError('No user matching "$query" — they may need to sign in once first.');
+      return;
+    }
+    if (matches.length > 1) {
+      _showError('"$query" matches ${matches.length} users — try their email to disambiguate.');
+      return;
+    }
+    final user = matches.first;
+    try {
+      await widget.api.addMember(channel.id, user.sub);
+      if (!mounted) return;
+      final where = channel.name.isEmpty ? 'this channel' : '#${channel.name}';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Invited ${user.label} to $where')),
+      );
+    } catch (error) {
+      _showError(error);
     }
   }
 
@@ -1073,22 +1186,6 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-
-  /// A locally-synthesized "sent" message for text handed to `sendInput`,
-  /// which -- unlike `postMessage` -- has no server response to render
-  /// instead. The `local-` id prefix keeps it out of the way of real
-  /// message ids (server ids are never expected to collide with it), so it
-  /// can't be mistaken for a duplicate by `_appendMessageUnlessDuplicate`
-  /// elsewhere.
-  Message _localEcho(String text, [String marking = 'UNCLASSIFIED']) => Message(
-    id: 'local-${_localEchoSeq++}',
-    seq: 0,
-    authorRef: widget.principal.sub,
-    authorType: AuthorType.user,
-    content: text,
-    createdAt: DateTime.now(),
-    marking: marking,
-  );
 
   Future<void> _handleNewChannel() async {
     final name = await showNewItemDialog(
@@ -1214,6 +1311,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   onNewDm: _handleNewDm,
                   onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
                   onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
+                  onArchive: _archiveChannel,
+                  showArchived: _showArchived,
+                  onToggleShowArchived: () =>
+                      setState(() => _showArchived = !_showArchived),
                 ),
                 Expanded(child: _buildMain()),
               ],
@@ -1243,6 +1344,7 @@ class _ChatScreenState extends State<ChatScreen> {
         key: ValueKey(selected.id),
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
+        canGrant: selected.owned,
         onGrantExecute: () => widget.api.grantExecute(sessionId),
       );
     }
@@ -1333,6 +1435,7 @@ class _ChatScreenState extends State<ChatScreen> {
       entries: topLevel,
       typing: _typing,
       currentUserSub: widget.principal.sub,
+      labelForSub: _labelForSub,
       onToggleReaction: _toggleReaction,
       replyCounts: replyCounts,
       onOpenThread: canThread ? _openThread : null,
@@ -1375,6 +1478,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: MessageList(
             entries: [MessageEntry(parent), ...replies.map(MessageEntry.new)],
             currentUserSub: widget.principal.sub,
+            labelForSub: _labelForSub,
             onToggleReaction: _toggleReaction,
             isAdmin: widget.principal.isAdmin,
             onRedact: _redactMessage,

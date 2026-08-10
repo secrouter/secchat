@@ -23,6 +23,9 @@ class ChatSidebar extends StatelessWidget {
     required this.onNewAssistant,
     required this.onNewCodingAgent,
     required this.onNewDm,
+    this.onArchive,
+    this.showArchived = false,
+    this.onToggleShowArchived,
     this.errorText,
   });
 
@@ -49,6 +52,15 @@ class ChatSidebar extends StatelessWidget {
   final VoidCallback onNewAssistant;
   final VoidCallback onNewCodingAgent;
   final VoidCallback onNewDm;
+
+  /// Archive (or restore, when `channel.archived`) a channel. Null hides the action.
+  final void Function(Channel channel, bool archived)? onArchive;
+
+  /// When true, archived channels are shown (dimmed) instead of hidden.
+  final bool showArchived;
+
+  /// Toggle [showArchived]. Null hides the toggle.
+  final VoidCallback? onToggleShowArchived;
 
   /// The label a DM shows in the rail: the other participant's display name
   /// (from the directory), falling back to their sub, then the channel name.
@@ -145,8 +157,18 @@ class ChatSidebar extends StatelessWidget {
       );
     }
 
-    final dms = channels.where((c) => c.kind == ChannelKind.dm).toList();
-    final rest = channels.where((c) => c.kind != ChannelKind.dm).toList();
+    // Hide archived channels unless the toggle is on. The currently-open channel always stays
+    // visible so archiving it doesn't yank it out from under you.
+    bool visible(Channel c) => showArchived || !c.archived || c.id == selectedChannelId;
+    final shown = channels.where(visible).toList();
+
+    // Categorise: team channels, agents (assistant + coding), and DMs — each its own section.
+    int byLabel(Channel a, Channel b) =>
+        (a.name).toLowerCase().compareTo((b.name).toLowerCase());
+    final teamChannels = shown.where((c) => c.kind == ChannelKind.human).toList()..sort(byLabel);
+    final agents = shown.where((c) => c.kind == ChannelKind.agent).toList()..sort(byLabel);
+    final dms = shown.where((c) => c.kind == ChannelKind.dm).toList()
+      ..sort((a, b) => _dmLabel(a).toLowerCase().compareTo(_dmLabel(b).toLowerCase()));
 
     Widget item(Channel channel, {String? labelOverride, bool present = false}) => _ChannelListItem(
       channel: channel,
@@ -156,6 +178,7 @@ class ChatSidebar extends StatelessWidget {
       unread: unreadByChannel[channel.id] ?? 0,
       present: present,
       onTap: () => onSelect(channel),
+      onArchive: onArchive == null ? null : () => onArchive!(channel, !channel.archived),
     );
 
     // A DM peer's online state → the rail dot.
@@ -167,15 +190,51 @@ class ChatSidebar extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
       children: [
-        if (rest.isNotEmpty) ...[
+        if (teamChannels.isNotEmpty) ...[
           const _SectionHeader('CHANNELS'),
-          for (final channel in rest) item(channel),
+          for (final channel in teamChannels) item(channel),
+        ],
+        if (agents.isNotEmpty) ...[
+          const _SectionHeader('AGENTS'),
+          for (final channel in agents) item(channel),
         ],
         if (dms.isNotEmpty) ...[
           const _SectionHeader('DIRECT MESSAGES'),
           for (final channel in dms) item(channel, labelOverride: _dmLabel(channel), present: dmPresent(channel)),
         ],
+        if (onToggleShowArchived != null) ...[
+          const SizedBox(height: 8),
+          _ShowArchivedToggle(showArchived: showArchived, onTap: onToggleShowArchived!),
+        ],
       ],
+    );
+  }
+}
+
+/// The footer toggle that reveals/hides archived channels.
+class _ShowArchivedToggle extends StatelessWidget {
+  const _ShowArchivedToggle({required this.showArchived, required this.onTap});
+
+  final bool showArchived;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          children: [
+            Icon(showArchived ? Icons.unarchive_outlined : Icons.archive_outlined,
+                size: 15, color: AppColors.textMuted),
+            const SizedBox(width: 8),
+            Text(showArchived ? 'Hide archived' : 'Show archived',
+                style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -257,7 +316,7 @@ class _UnreadBadge extends StatelessWidget {
   }
 }
 
-class _ChannelListItem extends StatelessWidget {
+class _ChannelListItem extends StatefulWidget {
   const _ChannelListItem({
     required this.channel,
     required this.label,
@@ -265,6 +324,7 @@ class _ChannelListItem extends StatelessWidget {
     required this.agentKind,
     required this.unread,
     required this.onTap,
+    this.onArchive,
     this.present = false,
   });
 
@@ -275,17 +335,41 @@ class _ChannelListItem extends StatelessWidget {
   final int unread;
   final VoidCallback onTap;
 
+  /// Archive (or restore) this channel. Null hides the action.
+  final VoidCallback? onArchive;
+
   /// A DM peer who's online — shows a small presence dot on the channel icon.
   final bool present;
 
   @override
+  State<_ChannelListItem> createState() => _ChannelListItemState();
+}
+
+class _ChannelListItemState extends State<_ChannelListItem> {
+  bool _hovering = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Padding(
+    final channel = widget.channel;
+    final isSelected = widget.isSelected;
+    final agentKind = widget.agentKind;
+    final unread = widget.unread;
+    final present = widget.present;
+    // An archived item is dimmed; its archive control is the "restore" direction.
+    final archived = channel.archived;
+    final showArchiveBtn = widget.onArchive != null && (_hovering || archived);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: Opacity(
+        opacity: archived ? 0.55 : 1,
+        child: Padding(
       padding: const EdgeInsets.symmetric(vertical: 1),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: onTap,
+          onTap: widget.onTap,
           borderRadius: BorderRadius.circular(AppRadius.sm),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
@@ -328,7 +412,7 @@ class _ChannelListItem extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    label,
+                    widget.label,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13.5,
@@ -340,14 +424,48 @@ class _ChannelListItem extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 6),
-                if (unread > 0) ...[
-                  _UnreadBadge(count: unread),
-                  const SizedBox(width: 6),
+                if (showArchiveBtn)
+                  _IconAction(
+                    icon: archived ? Icons.unarchive_outlined : Icons.archive_outlined,
+                    tooltip: archived ? 'Restore' : 'Archive',
+                    onTap: widget.onArchive!,
+                  )
+                else ...[
+                  if (unread > 0) ...[
+                    _UnreadBadge(count: unread),
+                    const SizedBox(width: 6),
+                  ],
+                  ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
                 ],
-                ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
               ],
             ),
           ),
+        ),
+      ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A small, low-emphasis icon button used inline in a sidebar row (archive/restore).
+class _IconAction extends StatelessWidget {
+  const _IconAction({required this.icon, required this.tooltip, required this.onTap});
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Icon(icon, size: 15, color: AppColors.textMuted),
         ),
       ),
     );
