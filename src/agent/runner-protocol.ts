@@ -30,6 +30,39 @@ export type RunnerMessage =
   | { type: "event"; sessionId: Id; event: RunnerEvent }
   | { type: "heartbeat"; sessionIds?: Id[] };
 
+/** Parse a JSON frame SecChat sent DOWN into a RunnerCommand, or null if it isn't a shape we accept
+ * (the daemon side of the wire — SecChat is trusted, but a garbled/￼partial frame is still ignored
+ * rather than acted on). */
+export function parseRunnerCommand(raw: string): RunnerCommand | null {
+  let cmd: unknown;
+  try {
+    cmd = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!cmd || typeof cmd !== "object") return null;
+  const c = cmd as Record<string, unknown>;
+  const sid = c.sessionId;
+  if (typeof sid !== "string") return null;
+  switch (c.type) {
+    case "start":
+      if (typeof c.agentId !== "string" || typeof c.ownerSub !== "string") return null;
+      return { type: "start", sessionId: sid, agentId: c.agentId, ownerSub: c.ownerSub, workspace: typeof c.workspace === "string" ? c.workspace : undefined };
+    case "input":
+      if (typeof c.text !== "string") return null;
+      return { type: "input", sessionId: sid, text: c.text };
+    case "tool_answer": {
+      const d = c.decision as Record<string, unknown> | undefined;
+      if (typeof c.requestId !== "string" || !d || typeof d.allow !== "boolean" || typeof d.reason !== "string") return null;
+      return { type: "tool_answer", sessionId: sid, requestId: c.requestId, decision: { allow: d.allow, reason: d.reason } };
+    }
+    case "stop":
+      return { type: "stop", sessionId: sid };
+    default:
+      return null;
+  }
+}
+
 /** Parse a JSON frame from a daemon into a RunnerMessage, or null if it isn't a shape we accept.
  * Defensive: a daemon is a separate, possibly-older process, so unknown/garbled frames are ignored
  * rather than trusted. */
