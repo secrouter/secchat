@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'brand_icon.dart';
 
 /// Confirms a step-up re-authentication before a privileged action the server
 /// gated on freshness. Resolves to true if the user chooses to re-authenticate.
@@ -17,7 +18,7 @@ Future<bool?> showStepUpDialog(BuildContext context, {String? action}) {
       ),
       title: const Row(
         children: [
-          Icon(Icons.verified_user_outlined, color: AppColors.accent, size: 20),
+          BrandIcon('secure', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
           Text(
             'Re-authentication required',
