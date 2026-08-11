@@ -25,8 +25,10 @@ export function makeControlPlane(deps: {
   getAgent: (id: string) => Promise<Agent | null>;
   broadcast?: (channelId: string, payload: unknown) => void;
   /** Persist a coding agent's output turn as a channel message (authorType "agent"). Unset ⇒ the
-   * legacy ephemeral agent_output broadcast (not stored). Wired to store.appendMessage. */
-  appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message>;
+   * legacy ephemeral agent_output broadcast (not stored). Wired to the GOVERNED append
+   * (governance/append.ts) in production — marking stamp + DLP — which returns the ENRICHED
+   * message whose `content` is what was actually persisted (possibly a withheld notice). */
+  appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message & { content: string }>;
   leaseTtlMs?: number;
   now?: () => number;
 }): AgentControl {
@@ -47,14 +49,15 @@ export function makeControlPlane(deps: {
         // to the ephemeral agent_output stream when no persister is wired (tests / bare deployments).
         if (deps.appendAgentMessage) {
           const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
-          // The stored row carries only the content HASH (never the plaintext — see the POST message
-          // route), and no display name. Re-attach the plaintext (else the client renders a redaction
-          // tombstone) and the agent's name + kind (else the byline shows the opaque agent id) —
-          // matching how GET /channels/:id/messages enriches history.
+          // Broadcast EXACTLY what was persisted: the governed append returns the enriched message
+          // whose `content` carries the plaintext (the stored row holds only the hash) — or a
+          // withheld notice when DLP/marking blocked the output. Never re-attach event.text here:
+          // that would leak blocked content into the live event. Add the agent's display name + kind
+          // so the byline shows the name, not the opaque agent id (matches GET /channels enrichment).
           const agent = await deps.getAgent(session.agentId);
           deps.broadcast?.(session.channelId, {
             type: "message",
-            message: { ...message, content: event.text, displayName: agent?.name, agentKind: agent?.kind },
+            message: { ...message, displayName: agent?.name, agentKind: agent?.kind },
           });
         } else {
           deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });

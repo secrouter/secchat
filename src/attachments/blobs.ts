@@ -4,7 +4,7 @@
 // directory (FsBlobStore) in production, an in-memory Map (MemoryBlobStore) for tests/dev.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** The sha256 (hex) of a byte buffer — the content address AND the value bound into the message hash. */
@@ -17,6 +17,12 @@ export interface BlobStore {
   write(sha256: string, bytes: Buffer): Promise<void>;
   /** The bytes for `sha256`, or null if absent (never stored, or purged on redaction). */
   read(sha256: string): Promise<Buffer | null>;
+  /** Remove `sha256`'s bytes — the SANITIZATION half of redaction (the metadata row and the
+   * chain-bound manifest digest stay; only the content is destroyed). Idempotent: deleting an
+   * absent blob is a no-op. Callers must refcount first — content addressing dedups, so a sha
+   * still referenced by another live message's attachment must NOT be deleted (see
+   * Store.hasLiveAttachmentReference). */
+  delete(sha256: string): Promise<void>;
 }
 
 /** Filesystem-backed, content-addressed under `dir` (bytes at `<dir>/<sha256>`). */
@@ -45,6 +51,16 @@ export class FsBlobStore implements BlobStore {
       return null; // ENOENT (or a bad address) reads as "absent", not an error
     }
   }
+
+  async delete(sha256: string): Promise<void> {
+    try {
+      await unlink(this.#path(sha256));
+    } catch (err) {
+      // Already absent is success (idempotent); anything else (EACCES, EIO) is a REAL failure —
+      // an incomplete CUI purge must surface, never pass silently.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
 }
 
 /** In-memory blob store for tests / the dev in-memory deployment (no filesystem). */
@@ -56,5 +72,8 @@ export class MemoryBlobStore implements BlobStore {
   async read(sha256: string): Promise<Buffer | null> {
     const b = this.#blobs.get(sha256);
     return b ? Buffer.from(b) : null;
+  }
+  async delete(sha256: string): Promise<void> {
+    this.#blobs.delete(sha256);
   }
 }

@@ -949,6 +949,21 @@ export class PgStore implements Store, SessionStore {
     return rows.map(rowToAttachment);
   }
 
+  async hasLiveAttachmentReference(sha256: string, excludingMessageId: Id): Promise<boolean> {
+    // Live = an unclaimed upload row (may yet be claimed), or a claimed row of any OTHER message
+    // that is not redacted. One indexed probe; content addressing means one sha can back many rows.
+    const { rows } = await this.#pool.query(
+      `SELECT 1
+         FROM attachments a
+         LEFT JOIN messages m ON m.id = a.message_id
+        WHERE a.sha256 = $1
+          AND (a.message_id IS NULL OR (a.message_id <> $2 AND m.redacted_at IS NULL))
+        LIMIT 1`,
+      [sha256, excludingMessageId],
+    );
+    return rows.length > 0;
+  }
+
   async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {
     const { rows } = await this.#pool.query<AttachmentRow>(
       `SELECT ${this.#attachmentCols} FROM attachments WHERE channel_id = $1 AND message_id IS NOT NULL ORDER BY ins_seq`,
