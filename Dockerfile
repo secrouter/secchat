@@ -44,6 +44,12 @@ COPY tsconfig.json ./
 # index.html exists, so no server code change is needed to switch between them.
 COPY --from=flutter-web /src/app/build/web ./app/build/web
 
+# Attachment uploads (content-addressed blobs) land in ./uploads. WORKDIR /app is root-owned, so
+# create the dir up front and hand it to the runtime `node` user — otherwise the first upload's
+# mkdir fails with EACCES and every attachment 500s. Mount a volume here (see compose.yaml) to
+# persist across container recreates.
+RUN mkdir -p /app/uploads && chown node:node /app/uploads
+
 # Run as the image's built-in non-root user rather than root.
 USER node
 

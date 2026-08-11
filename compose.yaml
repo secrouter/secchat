@@ -48,6 +48,9 @@ services:
       - "${SECCHAT_HTTP_PORT:-47010}:47010"
     volumes:
       - ${SUITE_CA_PATH:-../../out/seccert-root.pem}:/etc/ssl/certs/suite-ca.pem:ro
+      # Persist uploaded attachment blobs across container recreates (the dir is created writable
+      # for the `node` user in the Dockerfile).
+      - uploads:/app/uploads
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:47010/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -57,3 +60,4 @@ services:
 
 volumes:
   pgdata: {}
+  uploads: {}
