@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -1006,14 +1007,21 @@ class _ChatScreenState extends State<ChatScreen> {
     await _sendPlain(channel, text, marking, attachmentIds);
   }
 
-  /// Picks + uploads files for [channel] (at the channel's marking when it's marked), returning the
-  /// created attachments to stage. Used by the composer's attach affordance.
+  /// Picks (browser dialog on web) + uploads files for [channel], returning the created attachments
+  /// to stage. Used by the composer's attach affordance. On desktop, drag-and-drop uses
+  /// [_uploadPickedFiles] directly (there's no native pick dialog here — see file_transfer_stub).
   Future<List<Attachment>> _attachFiles(Channel channel) async {
     final picked = await pickFiles();
-    if (picked.isEmpty) return const [];
+    return _uploadPickedFiles(channel, picked);
+  }
+
+  /// Uploads already-obtained [files] to [channel] (at the channel's marking when it's marked),
+  /// returning the created attachments to stage. Shared by the attach button and desktop drag-drop.
+  Future<List<Attachment>> _uploadPickedFiles(Channel channel, List<PickedFile> files) async {
+    if (files.isEmpty) return const [];
     final marking = channel.isMarked ? channel.cuiMarking : null;
     final uploaded = <Attachment>[];
-    for (final f in picked) {
+    for (final f in files) {
       uploaded.add(await widget.api.uploadAttachment(
         channel.id,
         bytes: f.bytes,
@@ -1471,7 +1479,10 @@ class _ChatScreenState extends State<ChatScreen> {
             key: ValueKey('composer-${selected.id}'),
             onSend: _handleSend,
             // Attach files on chat channels; coding-agent channels are a linear pi conversation (no attach).
-            onAttach: _isCodingChannel(selected.id) ? null : () => _attachFiles(selected),
+            // The attach BUTTON needs a file dialog, which only exists on web (native file picking is
+            // a stub — see file_transfer_stub); on desktop, drag-and-drop is the upload path instead.
+            onAttach: (_isCodingChannel(selected.id) || !kIsWeb) ? null : () => _attachFiles(selected),
+            onDropUpload: _isCodingChannel(selected.id) ? null : (files) => _uploadPickedFiles(selected, files),
             onTyping: () => _emitTyping(selected.id),
             initialText: _draftsByChannel[selected.id] ?? '',
             onDraftChanged: (text) => _draftsByChannel[selected.id] = text,
@@ -1580,7 +1591,8 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         MessageComposer(
           onSend: (text, marking, attachmentIds) => _sendReply(channel, parent.id, text, marking, attachmentIds),
-          onAttach: () => _attachFiles(channel),
+          onAttach: kIsWeb ? () => _attachFiles(channel) : null, // web-only file dialog; desktop uses drop
+          onDropUpload: (files) => _uploadPickedFiles(channel, files),
           markingLevels: widget.principal.marking.levels,
           markingCategories: widget.principal.marking.categories,
           markingPolicy: widget.principal.marking,
