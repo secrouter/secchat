@@ -578,7 +578,11 @@ class _MessageBubble extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadius.sm),
       );
     } else {
+      // A received message gets its own bubble too — a slightly recessed surface (vs own's raised
+      // one) so the two are still easy to tell apart at a glance.
       decoration = BoxDecoration(
+        color: AppColors.surface,
+        border: Border.all(color: AppColors.borderSoft),
         borderRadius: BorderRadius.circular(AppRadius.sm),
       );
     }
