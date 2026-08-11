@@ -111,7 +111,7 @@ test("a read-only tool needs no grant; input + stop route to the owning daemon",
   assert.ok(commands.some((c) => c.type === "input" && c.text === "list the repo"));
 });
 
-test("a foreign daemon can't drive another owner's session; a dead daemon ends its sessions", async () => {
+test("a foreign daemon can't drive another owner's session; a daemon DISCONNECT does not end its sessions", async () => {
   const h = await harness();
   const { conn } = attachDaemon(h.registry, "alice");
   const session = await h.control.spawn({ agent: h.agent, channelId: h.channel.id, hostType: "local" });
@@ -123,11 +123,13 @@ test("a foreign daemon can't drive another owner's session; a dead daemon ends i
     await flush();
   assert.equal(h.events.length, before, "an event from the wrong daemon is dropped");
 
-  // alice's daemon dying ends its session cleanly (session_ended broadcast + status ended).
+  // alice's daemon dropping its socket is a TRANSIENT reconnect (proxy idle-close), not the end of
+  // its sessions — the pi process survives and the daemon re-attaches. So no session_ended fires and
+  // the session stays active; a truly-gone daemon is culled by the reaper once its lease lapses.
   h.remote.handleDaemonGone(conn);
   await flush();
-  assert.ok(h.events.some((e) => e.payload.type === "session_ended"));
-  assert.equal((await h.control.getSession(session.id))?.status, "ended");
+  assert.ok(!h.events.some((e) => e.payload.type === "session_ended"), "a disconnect must not end the session");
+  assert.equal((await h.control.getSession(session.id))?.status, "active");
 });
 
 test("with NO daemon attached, spawn falls back to the in-process server runner", async () => {

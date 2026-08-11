@@ -226,7 +226,7 @@ test("end-to-end coding agent: bash denied in plan mode, allowed ONCE after the 
     runner: scripted.runner,
     getAgent: (id) => store.getAgent(id),
   });
-  const server = createHttpServer({ verifyToken: twoUsers, store, control });
+  const server = createHttpServer({ verifyToken: twoUsers, store, control, hasRemoteRunner: () => true });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as { port: number };
   const base = `http://127.0.0.1:${port}`;

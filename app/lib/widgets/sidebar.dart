@@ -26,6 +26,8 @@ class ChatSidebar extends StatelessWidget {
     this.onArchive,
     this.showArchived = false,
     this.onToggleShowArchived,
+    this.sortByUnread = false,
+    this.onToggleSort,
     this.errorText,
   });
 
@@ -61,6 +63,13 @@ class ChatSidebar extends StatelessWidget {
 
   /// Toggle [showArchived]. Null hides the toggle.
   final VoidCallback? onToggleShowArchived;
+
+  /// When true, each section is ordered by unread count (most unread first, then
+  /// by name) instead of alphabetically — so channels needing attention rise.
+  final bool sortByUnread;
+
+  /// Toggle [sortByUnread]. Null hides the sort control.
+  final VoidCallback? onToggleSort;
 
   /// The label a DM shows in the rail: the other participant's display name
   /// (from the directory), falling back to their sub, then the channel name.
@@ -163,12 +172,20 @@ class ChatSidebar extends StatelessWidget {
     final shown = channels.where(visible).toList();
 
     // Categorise: team channels, agents (assistant + coding), and DMs — each its own section.
-    int byLabel(Channel a, Channel b) =>
-        (a.name).toLowerCase().compareTo((b.name).toLowerCase());
-    final teamChannels = shown.where((c) => c.kind == ChannelKind.human).toList()..sort(byLabel);
-    final agents = shown.where((c) => c.kind == ChannelKind.agent).toList()..sort(byLabel);
-    final dms = shown.where((c) => c.kind == ChannelKind.dm).toList()
-      ..sort((a, b) => _dmLabel(a).toLowerCase().compareTo(_dmLabel(b).toLowerCase()));
+    // A channel's sort key is its rail label (a DM's is the peer's name). In unread mode the primary
+    // key is the unread count (descending) so channels needing attention rise to the top of each
+    // section, with the label as the tie-breaker; otherwise it's purely alphabetical.
+    String sortLabel(Channel c) => (c.kind == ChannelKind.dm ? _dmLabel(c) : c.name).toLowerCase();
+    int cmp(Channel a, Channel b) {
+      if (sortByUnread) {
+        final byUnread = (unreadByChannel[b.id] ?? 0).compareTo(unreadByChannel[a.id] ?? 0);
+        if (byUnread != 0) return byUnread;
+      }
+      return sortLabel(a).compareTo(sortLabel(b));
+    }
+    final teamChannels = shown.where((c) => c.kind == ChannelKind.human).toList()..sort(cmp);
+    final agents = shown.where((c) => c.kind == ChannelKind.agent).toList()..sort(cmp);
+    final dms = shown.where((c) => c.kind == ChannelKind.dm).toList()..sort(cmp);
 
     Widget item(Channel channel, {String? labelOverride, bool present = false}) => _ChannelListItem(
       channel: channel,
@@ -190,6 +207,7 @@ class ChatSidebar extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
       children: [
+        if (onToggleSort != null) _SortControl(sortByUnread: sortByUnread, onToggle: onToggleSort!),
         if (teamChannels.isNotEmpty) ...[
           const _SectionHeader('CHANNELS'),
           for (final channel in teamChannels) item(channel),
@@ -207,6 +225,64 @@ class ChatSidebar extends StatelessWidget {
           _ShowArchivedToggle(showArchived: showArchived, onTap: onToggleShowArchived!),
         ],
       ],
+    );
+  }
+}
+
+/// The header control that switches channel ordering between name and unread.
+class _SortControl extends StatelessWidget {
+  const _SortControl({required this.sortByUnread, required this.onToggle});
+
+  final bool sortByUnread;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
+      child: Row(
+        children: [
+          const Text(
+            'SORT',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: AppColors.textFaint),
+          ),
+          const Spacer(),
+          _SortChip(label: 'Name', active: !sortByUnread, onTap: sortByUnread ? onToggle : null),
+          const SizedBox(width: 4),
+          _SortChip(label: 'Unread', active: sortByUnread, onTap: sortByUnread ? null : onToggle),
+        ],
+      ),
+    );
+  }
+}
+
+class _SortChip extends StatelessWidget {
+  const _SortChip({required this.label, required this.active, required this.onTap});
+
+  final String label;
+  final bool active;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: active ? AppColors.accentSoft : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+            color: active ? AppColors.accent : AppColors.textMuted,
+          ),
+        ),
+      ),
     );
   }
 }

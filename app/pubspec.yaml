@@ -16,6 +16,9 @@ dependencies:
   flutter_markdown_plus: ^1.0.12
   flutter_markdown_plus_latex: ^1.0.5
   markdown: ^7.3.1
+  # Desktop drag-and-drop file upload (macOS/Windows/Linux). No-op on web/mobile,
+  # where file picking is the browser dialog instead. Brings cross_file (XFile).
+  desktop_drop: ^0.5.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

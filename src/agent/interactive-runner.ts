@@ -7,6 +7,7 @@
 // otherwise lives only in the control plane's tool_decision broadcast, visible as chat text too.
 
 import type { Id, Runner, RunnerEvent } from "../types.ts";
+import type { AgentChatEnvelope } from "./chat-protocol.ts";
 
 // Broad on purpose — this is a demo heuristic for deciding when to ask for the tool at all. It is
 // NOT a safety boundary: the gate (evaluateTool in gate.ts) is the only thing that actually decides
@@ -24,15 +25,25 @@ export function makeInteractiveRunner(): Runner {
     },
 
     async sendInput(sessionId, text) {
-      emit?.(sessionId, { type: "output", text: `· ${text}` }); // echo the ask back into the channel first
+      // Chat messages arrive as the shared envelope ({from, message, authorized}); unwrap it so the
+      // demo echo shows the human's words, not raw JSON. A direct /sessions/:id/input driver may send
+      // plain text, which falls through unchanged.
+      let ask = text;
+      try {
+        const env = JSON.parse(text) as Partial<AgentChatEnvelope>;
+        if (env && typeof env.message === "string") ask = env.message;
+      } catch {
+        // not an envelope — treat as raw text
+      }
+      emit?.(sessionId, { type: "output", text: `· ${ask}` }); // echo the ask back into the channel first
 
-      if (MUTATING_INTENT.test(text)) {
+      if (MUTATING_INTENT.test(ask)) {
         const requestId = `req-${++n}`;
         const turnId = `turn-${n}`;
-        pendingInput.set(requestId, text);
-        emit?.(sessionId, { type: "tool_request", tool: "bash", input: text, requestId, turnId });
+        pendingInput.set(requestId, ask);
+        emit?.(sessionId, { type: "tool_request", tool: "bash", input: ask, requestId, turnId });
       } else {
-        emit?.(sessionId, { type: "output", text: "(nothing to run — ask me to build/run/deploy something)" });
+        emit?.(sessionId, { type: "output", text: "(demo runner — connect your desktop app to run a real coding agent)" });
       }
     },
 

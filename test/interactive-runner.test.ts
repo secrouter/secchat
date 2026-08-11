@@ -69,7 +69,7 @@ test("sendInput without a mutating verb only echoes and suggests — no tool_req
   assert.deepEqual(events[0], { sessionId: SESSION_ID, event: { type: "output", text: "· hello there" } });
   assert.deepEqual(events[1], {
     sessionId: SESSION_ID,
-    event: { type: "output", text: "(nothing to run — ask me to build/run/deploy something)" },
+    event: { type: "output", text: "(demo runner — connect your desktop app to run a real coding agent)" },
   });
   assert.equal(
     events.some((e) => e.event.type === "tool_request"),

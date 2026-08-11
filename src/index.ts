@@ -9,6 +9,7 @@
 import { buildOverview } from "./admin/overview.ts";
 import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
+import { startReaper } from "./agent/reaper.ts";
 import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
 import { makePiRunner } from "./agent/pi-runner.ts";
 import { makeAuthGateway } from "./auth/bff.ts";
@@ -149,6 +150,14 @@ const control = makeControlPlane({
     store.appendMessage({ channelId, authorRef: agentId, authorType: "agent", content: text }),
 });
 
+// The orphan reaper — the ONLY thing that ends a coding session whose daemon is truly gone. A
+// daemon renews its live sessions' leases on a heartbeat (every ~20s); once that stops for longer
+// than the lease TTL (a real disconnect, not a reconnect blip — which no longer ends sessions, see
+// remote-runner's handleDaemonGone), the sweep marks the session "orphaned". A reaped session is no
+// longer "live", so the next message to that channel (re)spawns a fresh one — which pi resumes from
+// the durable session id. Ticks every 15s.
+const reaper = startReaper(store, { now: () => Date.now(), intervalMs: 15_000 });
+
 if (config.devMode && !config.databaseUrl) {
   // DEV ONLY (SECCHAT_DEV_MODE=1, in-memory only): seed so /admin + the client have sample data.
   // Skipped with a real DB so it doesn't accumulate duplicate rows on every restart.
@@ -240,6 +249,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     hub?.close();
     runnerHub.close();
+    reaper.stop();
     // Best-effort: stop every still-active session's runner so a real subprocess (pi) never
     // outlives this process as an orphan. Never blocks shutdown on it — a hung/slow runner.stop()
     // must not delay the exit any more than the SIGKILL fallback it already carries internally.

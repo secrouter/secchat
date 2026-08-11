@@ -75,12 +75,14 @@ export function makeRemoteRunner(deps: {
     }
   }
 
-  function handleDaemonGone(conn: RunnerConnection): void {
-    for (const [sessionId, sub] of [...owners.entries()]) {
-      if (sub !== conn.ownerSub) continue;
-      owners.delete(sessionId);
-      emit(sessionId, { type: "exit" }); // ends the session cleanly; the reaper is the backstop
-    }
+  function handleDaemonGone(_conn: RunnerConnection): void {
+    // A daemon's socket dropping is almost always a TRANSIENT reconnect (a proxy idle-closing the
+    // WS), NOT the end of its sessions: the pi processes live in the daemon's own long-lived runner
+    // and survive the blip, and the daemon re-attaches within seconds under the same owner (routing
+    // is by owner via the registry, so it simply resumes hosting). Ending the sessions here made
+    // EVERY reconnect kill live coding sessions ("agents die after a few minutes"). So leave them
+    // be — the reconnected daemon's heartbeat keeps renewing their leases, and if the daemon is
+    // truly gone the orphan reaper (startReaper in index.ts) culls them once the lease lapses.
   }
 
   return { runner, handleDaemonMessage, handleDaemonGone };

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -8,6 +9,7 @@ import '../commands.dart';
 import '../marking.dart';
 import '../mentions.dart';
 import '../models.dart';
+import '../platform/file_transfer.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'markdown_text.dart';
@@ -28,6 +30,7 @@ class MessageComposer extends StatefulWidget {
     super.key,
     required this.onSend,
     this.onAttach,
+    this.onDropUpload,
     this.enabled = true,
     this.markingLevels = const [],
     this.markingCategories = const [],
@@ -50,6 +53,11 @@ class MessageComposer extends StatefulWidget {
   /// Picks + uploads files, returning the created attachments to STAGE for the
   /// next send. Null ⇒ no attach affordance (e.g. coding-agent channels).
   final Future<List<Attachment>> Function()? onAttach;
+
+  /// Uploads already-obtained [files] (from a desktop drag-and-drop) and returns
+  /// the created attachments to STAGE. Null ⇒ drag-and-drop disabled (e.g. web,
+  /// or a channel that doesn't take attachments).
+  final Future<List<Attachment>> Function(List<PickedFile> files)? onDropUpload;
 
   final bool enabled;
 
@@ -194,6 +202,22 @@ class _MessageComposerState extends State<MessageComposer> {
       return KeyEventResult.handled;
     }
 
+    // Tab accepts the top autocomplete suggestion: a `@`-mention (username) if the caret is in one,
+    // else a `/`-command. With no suggestion showing, Tab falls through to normal focus traversal.
+    if (key == LogicalKeyboardKey.tab && !keys.isShiftPressed) {
+      final mentions = _mentionMatches;
+      if (mentions.isNotEmpty) {
+        _applyMention(mentions.first);
+        return KeyEventResult.handled;
+      }
+      final commands = suggestCommands(_controller.text);
+      if (commands.isNotEmpty) {
+        _applySuggestion(commands.first);
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
     final isEnter = key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter;
     if (!isEnter) return KeyEventResult.ignored;
@@ -249,6 +273,64 @@ class _MessageComposerState extends State<MessageComposer> {
       }
     } finally {
       if (mounted) setState(() => _attaching = false);
+    }
+  }
+
+  /// Whether a desktop drag is currently hovering the composer (drives the highlight).
+  bool _dragOver = false;
+
+  /// Reads dropped files' bytes, uploads them (via [MessageComposer.onDropUpload]), and STAGES the
+  /// results — the drag-and-drop counterpart to [_attach].
+  Future<void> _handleDrop(List<DropItem> items) async {
+    if (widget.onDropUpload == null || _attaching) return;
+    final files = items.whereType<DropItemFile>().toList(); // ignore dropped directories
+    if (files.isEmpty) return;
+    setState(() => _attaching = true);
+    try {
+      final picked = <PickedFile>[];
+      for (final item in files) {
+        final bytes = await item.readAsBytes();
+        picked.add(PickedFile(
+          filename: item.name,
+          contentType: (item.mimeType?.isNotEmpty ?? false) ? item.mimeType! : _inferContentType(item.name),
+          bytes: bytes,
+        ));
+      }
+      final added = await widget.onDropUpload!(picked);
+      if (mounted && added.isNotEmpty) setState(() => _pending.addAll(added));
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _attaching = false);
+    }
+  }
+
+  /// Best-effort MIME from a filename extension (desktop drops often carry no mimeType). Text types
+  /// matter most: the backend's DLP only scans textual content.
+  static String _inferContentType(String filename) {
+    final dot = filename.lastIndexOf('.');
+    switch (dot < 0 ? '' : filename.substring(dot + 1).toLowerCase()) {
+      case 'txt':
+      case 'log':
+      case 'md':
+        return 'text/plain';
+      case 'json':
+        return 'application/json';
+      case 'csv':
+        return 'text/csv';
+      case 'png':
+        return 'image/png';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'gif':
+        return 'image/gif';
+      case 'pdf':
+        return 'application/pdf';
+      default:
+        return 'application/octet-stream';
     }
   }
 
@@ -423,11 +505,13 @@ class _MessageComposerState extends State<MessageComposer> {
   Widget build(BuildContext context) {
     final suggestions = suggestCommands(_controller.text);
     final mentionMatches = _mentionMatches;
-    return Container(
+    final body = Container(
       padding: const EdgeInsets.fromLTRB(18, 10, 18, 14),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surface,
-        border: Border(top: BorderSide(color: AppColors.border)),
+        border: Border(
+          top: BorderSide(color: _dragOver ? AppColors.accent : AppColors.border, width: _dragOver ? 2 : 1),
+        ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -454,6 +538,36 @@ class _MessageComposerState extends State<MessageComposer> {
             ],
           ),
           if (_showPreview) _preview(),
+        ],
+      ),
+    );
+
+    // Desktop drag-and-drop: drop files onto the composer to upload + stage them. Disabled when
+    // there's no uploader (web uses the attach dialog; coding channels take no attachments).
+    if (widget.onDropUpload == null) return body;
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragOver = true),
+      onDragExited: (_) => setState(() => _dragOver = false),
+      onDragDone: (details) {
+        setState(() => _dragOver = false);
+        unawaited(_handleDrop(details.files));
+      },
+      child: Stack(
+        children: [
+          body,
+          if (_dragOver)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  color: AppColors.accentSoft,
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Drop files to attach',
+                    style: TextStyle(color: AppColors.accent, fontSize: 14, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
