@@ -85,6 +85,21 @@ export interface User {
   lastSeenAt: string; // ISO-8601 UTC — most recent time this principal was observed
 }
 
+/** A user's git SSH identity — an ed25519 keypair minted server-side (src/ssh/keys.ts) so it can be
+ * INJECTED into the agentic runtimes (the Kubernetes pool pod, the desktop runner daemon) for git
+ * authentication without the user ever handling the private key. One per user; regenerating replaces
+ * it (keyed on `sub`). The private half lives ONLY as `privateKeyEnc` — an AES-256-GCM envelope under
+ * the deployment master key (config.secretKey) — and is decrypted solely to inject it into a runner
+ * the owner owns. It is NEVER returned by any API: routes project to `publicKey` + `fingerprint`. */
+export interface UserSshKey {
+  sub: string; // owner (Principal.sub) — the directory key
+  keyType: string; // "ssh-ed25519"
+  publicKey: string; // authorized_keys line — safe to display
+  fingerprint: string; // "SHA256:..." — safe to display
+  privateKeyEnc: string; // AES-256-GCM envelope (opaque); server-only, never serialized to a client
+  createdAt: string; // ISO-8601 UTC
+}
+
 /** A spawned agent, owned by — and acting as — exactly one user (decision #2/#7). Sprint 2
  * implements `assistant` (server-side model chat, NO runner); `coding` (runner + tools +
  * owner-gated execution) lands in Sprint 4. Its model calls are always attributed to
@@ -100,6 +115,13 @@ export interface Agent {
    * workspace. Only meaningful for the "desktop" launch environment (a local path on the pool would
    * be invalid). */
   workspace?: string;
+  /** WHERE this coding agent's runner runs — the launch environment chosen at creation (see
+   * agent/launch-env.ts). `"desktop"` = the owner's own desktop daemon; `"pool"` = a server-launched
+   * Kubernetes pod. Persisted so every (re)spawn routes to the SAME place (routing is PER-AGENT, not
+   * per-owner — a user can have both a desktop agent and a pool agent at once). Unset ⇒ legacy agents,
+   * which fall back to the owner's daemon-if-attached-else-server behavior. Not meaningful for an
+   * assistant agent (no runner). */
+  launchEnv?: "desktop" | "pool";
   createdAt: string;
 }
 
@@ -309,6 +331,16 @@ export interface Store {
   upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }): Promise<User>;
   listUsers(): Promise<User[]>;
   getUser(sub: string): Promise<User | null>;
+
+  // Per-user git SSH identity (db/migrations/0011_user_ssh_keys.sql; src/ssh/keys.ts) — injected into
+  // agentic runtimes for git auth. The private key is persisted ONLY as an encrypted envelope.
+  /** Create or REPLACE a user's SSH key (regenerating overwrites the prior one). */
+  setUserSshKey(key: UserSshKey): Promise<void>;
+  /** The user's SSH key row, INCLUDING the encrypted private envelope, or null. Callers that return
+   * it to a client MUST project away `privateKeyEnc` first (see the /me/ssh-key route). */
+  getUserSshKey(sub: string): Promise<UserSshKey | null>;
+  /** Remove a user's SSH key. Returns whether a row was removed. */
+  deleteUserSshKey(sub: string): Promise<boolean>;
   /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
    * or null. Used to keep POST /dm idempotent (one DM per pair, never a duplicate). */
   findDmChannel(subA: string, subB: string): Promise<Channel | null>;
@@ -464,7 +496,10 @@ export interface AgentSession {
   id: Id;
   agentId: Id;
   channelId: Id;
-  hostType: "server" | "local";
+  /** Where this session's runner runs: `"server"` (in-process pi), `"local"` (the owner's desktop
+   * daemon), or `"pool"` (a server-launched Kubernetes pod). Recorded metadata — routing itself is
+   * decided at start() from the agent's launchEnv (see agent/router-runner.ts). */
+  hostType: "server" | "local" | "pool";
   runnerId?: string;
   status: SessionStatus;
   createdAt: string;
@@ -494,10 +529,27 @@ export type RunnerEvent =
   | { type: "status"; status: SessionStatus }
   | { type: "exit"; code?: number };
 
+/** The decrypted git SSH material handed to a runner so `git` inside a coding session authenticates
+ * as the agent's OWNER. Assembled by the control plane from the owner's UserSshKey (private key
+ * decrypted with config.secretKey) plus the deployment's optional pinned known_hosts, threaded
+ * through Runner.start — and, for a remote daemon, the runner-protocol — to pi-runner, which writes
+ * it to an ephemeral per-session key file and points GIT_SSH_COMMAND at it. Injected only into a
+ * runtime the owner owns (their pool pod / their desktop daemon), never a shared one. */
+export interface GitSshMaterial {
+  privateKey: string; // OpenSSH-format ed25519 private key (written to the session's id_ed25519, 0600)
+  publicKey: string; // the matching authorized_keys line (written alongside as id_ed25519.pub)
+  knownHosts?: string; // optional pinned known_hosts; absent ⇒ StrictHostKeyChecking=accept-new (TOFU)
+}
+
 /** Hosts a pi process for a session. Abstract so the control plane is testable against a fake;
  * a real server runner + the local `secagent daemon` (Sprint 5) implement it later. */
 export interface Runner {
-  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string }): Promise<void>;
+  /** `gitSsh`, when present, is the owner's decrypted git identity to inject for this session (see
+   * GitSshMaterial). Optional — a runner with no key configured, or an impl that doesn't support
+   * injection, simply omits/ignores it. `launchEnv` is the agent's chosen environment, on which a
+   * composite runner (agent/router-runner.ts) routes this session to the desktop daemon, the pool, or
+   * the in-process server runner; a concrete single runner ignores it. */
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool" }): Promise<void>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   /** Deliver the gate's verdict for a pending tool_request back to the runner. */
   answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;
@@ -524,7 +576,7 @@ export interface SessionStore {
  * Runner, applies the execute-gate to tool requests, and streams output to the channel; the HTTP
  * routes just call these. A port so the HTTP layer stays testable with a fake. */
 export interface AgentControl {
-  spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" }): Promise<AgentSession>;
+  spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession>;
   /** Owner-only (enforced via the gate). Returns the gate decision — deny is not an error. */
   grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
   sendInput(sessionId: Id, text: string): Promise<void>;

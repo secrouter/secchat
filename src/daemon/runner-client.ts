@@ -49,7 +49,9 @@ export function makeRunnerClient(deps: {
       switch (cmd.type) {
         case "start":
           live.add(cmd.sessionId);
-          await deps.runner.start({ sessionId: cmd.sessionId, agentId: cmd.agentId, ownerSub: cmd.ownerSub, workspace: cmd.workspace });
+          // gitSsh (if SecChat sent one) is the owner's git identity to inject for this session — the
+          // local runner writes it to an ephemeral per-session key file (see pi-runner.ts).
+          await deps.runner.start({ sessionId: cmd.sessionId, agentId: cmd.agentId, ownerSub: cmd.ownerSub, workspace: cmd.workspace, gitSsh: cmd.gitSsh });
           return;
         case "input":
           await deps.runner.sendInput(cmd.sessionId, cmd.text);

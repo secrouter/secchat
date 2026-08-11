@@ -38,7 +38,10 @@ export function makeRemoteRunner(deps: {
       const conn = deps.registry.get(input.ownerSub);
       if (!conn) throw new Error(`no runner daemon attached for owner ${input.ownerSub}`);
       owners.set(input.sessionId, input.ownerSub);
-      conn.send({ type: "start", sessionId: input.sessionId, agentId: input.agentId, ownerSub: input.ownerSub, workspace: input.workspace });
+      // gitSsh (the owner's decrypted git identity) rides the start frame to the daemon over the
+      // authed /runner channel; the daemon's local runner writes it for this session. Only ever sent
+      // to the owner's OWN attached daemon (registry.get(ownerSub) above).
+      conn.send({ type: "start", sessionId: input.sessionId, agentId: input.agentId, ownerSub: input.ownerSub, workspace: input.workspace, gitSsh: input.gitSsh });
     },
     async sendInput(sessionId, text) {
       deps.registry.get(owners.get(sessionId) ?? "")?.send({ type: "input", sessionId, text });

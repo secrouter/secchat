@@ -28,7 +28,10 @@ import { attachRunnerHub } from "./ws/runner-hub.ts";
 import { RunnerRegistry } from "./agent/runner-registry.ts";
 import { makeRemoteRunner } from "./agent/remote-runner.ts";
 import { makeRouterRunner } from "./agent/router-runner.ts";
+import { makePoolRunner, type PoolRunner } from "./agent/pool-runner.ts";
+import { inClusterNamespace, inClusterRequest, makeK8sClient } from "./agent/k8s.ts";
 import { FsBlobStore } from "./attachments/blobs.ts";
+import { decryptSecret } from "./ssh/keys.ts";
 import type { Hub } from "./ws/hub.ts";
 import type { Runner, SessionStore, Store } from "./types.ts";
 import { fileURLToPath } from "node:url";
@@ -139,12 +142,42 @@ const remoteRunner = makeRemoteRunner({
   registry: runnerRegistry,
   renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
 });
-const runner = makeRouterRunner({ server: serverRunner, remote: remoteRunner.runner, hasRemote: (sub) => runnerRegistry.has(sub) });
+// Optional Kubernetes agent pool: an agent whose launchEnv is "pool" runs in a server-launched pod
+// (running the runnerd image) that attaches back at /runner?pool=<sessionId>. Enabled only when a pool
+// image AND a runner-token minter are configured (the pod attaches as the owner with a minted token).
+let poolRunner: PoolRunner | undefined;
+if (config.pool && config.runnerToken) {
+  const namespace = config.pool.namespace || inClusterNamespace() || "secchat-pool";
+  const k8s = makeK8sClient({ namespace, request: inClusterRequest(config.pool.apiServer) });
+  poolRunner = makePoolRunner({
+    k8s,
+    config: config.pool,
+    mintRunnerToken: (sub) => config.runnerToken!.mint(sub),
+    renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
+  });
+  console.error(`▸ agent pool: enabled (namespace ${namespace}, image ${config.pool.image})`);
+} else if (config.pool && !config.runnerToken) {
+  console.error("▸ agent pool: SECCHAT_POOL_IMAGE is set but no runner-token secret (SECCHAT_RUNNER_TOKEN_SECRET / session secret) — pool DISABLED");
+}
+const runner = makeRouterRunner({ server: serverRunner, remote: remoteRunner.runner, pool: poolRunner?.runner, hasRemote: (sub) => runnerRegistry.has(sub) });
+// Per-user git SSH identity injection (K8s pool / desktop daemon): when a master key is configured
+// (config.secretKey), resolve the spawning owner's key, decrypt the private half, and hand it to
+// their runner so `git` in the coding session authenticates as them. Undefined when the feature is
+// off — no key is ever injected. Only the owner's OWN key is fetched (keyed on ownerSub).
+const getGitSsh = config.secretKey
+  ? async (ownerSub: string) => {
+      const row = await store.getUserSshKey(ownerSub);
+      if (!row) return undefined;
+      const privateKey = decryptSecret(row.privateKeyEnc, config.secretKey!);
+      return { privateKey, publicKey: row.publicKey, ...(config.gitKnownHosts ? { knownHosts: config.gitKnownHosts } : {}) };
+    }
+  : undefined;
 const control = makeControlPlane({
   sessions: store,
   runner,
   getAgent: (id) => store.getAgent(id),
   broadcast,
+  getGitSsh,
   // Persist coding-agent output as real channel messages (survives session restart; renders as
   // markdown) — through the GOVERNED append: the channel's marking stamps the output, portion
   // markings fold/spillage-check, and DLP scans it like any human post (block ⇒ a clean withheld
@@ -224,6 +257,11 @@ const server = createHttpServer({
   // subscribeAll snapshot note in ws/hub.ts) — lazy like `broadcast`, since hub is created after.
   subscribe: (sub, channelId) => hub?.subscribe(sub, channelId),
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
+  // Per-user git SSH identities (POST/GET/DELETE /me/ssh-key). Present only when a master key is
+  // configured; unset ⇒ those routes 503 (feature off).
+  ssh: config.secretKey ? { secretKey: config.secretKey, knownHosts: config.gitKnownHosts } : undefined,
+  // Whether the Kubernetes agent pool is available — drives the "Online pool" launch-env option.
+  poolConfigured: Boolean(poolRunner),
 });
 hub = attachWsHub(server, {
   verifyToken,
@@ -242,6 +280,9 @@ const runnerHub = attachRunnerHub(server, {
   verifyToken,
   registry: runnerRegistry,
   remote: remoteRunner,
+  // Pool pods attach with `?pool=<sessionId>` and route to the PoolRunner (by session), off the
+  // per-owner registry so they can't supersede the owner's desktop daemon.
+  pool: poolRunner,
   // A daemon may attach with a scoped runner token (minted via POST /auth/runner-token) as well as
   // a full OIDC/dev bearer.
   verifyRunnerToken: config.runnerToken ? (t) => config.runnerToken!.verify(t) : undefined,
