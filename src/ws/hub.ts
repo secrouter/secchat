@@ -8,13 +8,11 @@
 // Store/VerifyToken injection pattern the rest of the backend uses — this module never
 // imports a concrete verifier or store.
 //
-// v1 SCOPE / LIMITATIONS (see also frame.ts's header):
-//  - No message fragmentation (frame.ts decodes single frames only).
-//  - No cross-"data"-event reassembly: each socket `"data"` chunk is handed to decodeFrames()
-//    independently. decodeFrames() keeps no state across calls (by design — see its doc
-//    comment), so a frame split across two TCP segments would be silently dropped rather
-//    than reassembled. Acceptable for v1: this hub only exchanges small JSON control/
-//    broadcast messages, which fit in a single segment in practice.
+// SCOPE / LIMITATIONS (see also frame.ts's header):
+//  - Inbound framing goes through a per-connection FrameDecoder: bytes are carried across
+//    socket `"data"` events and FIN=0/continuation fragmentation is reassembled, so a frame
+//    split across TCP segments arrives whole. A decoder that reports a hostile frame (over
+//    the size bound) destroys the connection.
 //  - Text frames only. The inbound messages this hub interprets are a per-channel `{ "type":
 //    "subscribe", "channelId": "..." }` and an all-my-channels `{ "type": "subscribeAll" }` (the
 //    latter needs deps.channelsForSub); anything else that isn't valid JSON of those shapes is
@@ -27,10 +25,10 @@ import type { Duplex } from "node:stream";
 import type { AuthGateway, Principal, VerifyToken } from "../types.ts";
 import {
   computeAcceptKey,
-  decodeFrames,
   encodeCloseFrame,
   encodePong,
   encodeTextFrame,
+  FrameDecoder,
   OPCODE,
   type DecodedFrame,
 } from "./frame.ts";
@@ -227,19 +225,27 @@ export function attachWsHub(
     const conn: Connection = { socket, sub: principal.sub, channels: new Set() };
     trackConnection(conn);
 
-    socket.on("data", (chunk: Buffer) => {
-      for (const frame of decodeFrames(chunk)) handleFrame(conn, frame);
-    });
+    // Per-connection decoder: carries partial frames across "data" events + reassembles
+    // fragmentation (frame.ts FrameDecoder). A thrown decode (over the size bound) means a
+    // hostile/broken peer — destroy the socket rather than buffering unboundedly.
+    const decoder = new FrameDecoder();
+    const onData = (chunk: Buffer) => {
+      try {
+        for (const frame of decoder.push(chunk)) handleFrame(conn, frame);
+      } catch {
+        socket.destroy();
+      }
+    };
+    socket.on("data", onData);
     socket.once("close", () => untrackConnection(conn));
     socket.once("error", () => untrackConnection(conn));
 
     // Bytes the client pipelined immediately after the handshake, before the 101 response
     // even went out, land in `head` rather than a later "data" event — decode those too so
     // an eager client's first message isn't silently lost. Empty in the common case (a
-    // client that waits for "open" before sending anything).
-    if (head.length > 0) {
-      for (const frame of decodeFrames(head)) handleFrame(conn, frame);
-    }
+    // client that waits for "open" before sending anything). Runs through the SAME decoder,
+    // so a message split between `head` and the first "data" event reassembles too.
+    if (head.length > 0) onData(head);
   }
 
   function onUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {

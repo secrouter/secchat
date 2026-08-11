@@ -12,6 +12,7 @@ import {
   encodeCloseFrame,
   encodePong,
   encodeTextFrame,
+  FrameDecoder,
   OPCODE,
 } from "../src/ws/frame.ts";
 import { attachWsHub } from "../src/ws/hub.ts";
@@ -22,26 +23,28 @@ import type { VerifyToken } from "../src/types.ts";
 // ---------------------------------------------------------------------------------------
 
 /** Build a MASKED client-style frame (mirrors what a real WebSocket client sends) so we can
- * exercise decodeFrames() — which only ever decodes masked, client→server frames — without
+ * exercise the decoders — which only ever decode masked, client→server frames — without
  * a live socket. Deliberately reimplements the length-encoding rather than calling into
- * frame.ts's own (unmasked, server-side) encoder, so this is a real independent check. */
-function encodeMaskedClientFrame(opcode: number, payload: Buffer): Buffer {
+ * frame.ts's own (unmasked, server-side) encoder, so this is a real independent check.
+ * `fin=false` builds a fragment (the FrameDecoder continuation tests). */
+function encodeMaskedClientFrame(opcode: number, payload: Buffer, fin = true): Buffer {
   const maskKey = Buffer.from([0x12, 0x34, 0x56, 0x78]);
   const masked = Buffer.allocUnsafe(payload.length);
   for (let i = 0; i < payload.length; i++) masked[i] = payload[i]! ^ maskKey[i % 4]!;
 
+  const finBit = fin ? 0x80 : 0x00;
   const len = payload.length;
   let header: Buffer;
   if (len < 126) {
-    header = Buffer.from([0x80 | opcode, 0x80 | len]);
+    header = Buffer.from([finBit | opcode, 0x80 | len]);
   } else if (len <= 0xffff) {
     header = Buffer.alloc(4);
-    header[0] = 0x80 | opcode;
+    header[0] = finBit | opcode;
     header[1] = 0x80 | 126;
     header.writeUInt16BE(len, 2);
   } else {
     header = Buffer.alloc(10);
-    header[0] = 0x80 | opcode;
+    header[0] = finBit | opcode;
     header[1] = 0x80 | 127;
     header.writeBigUInt64BE(BigInt(len), 2);
   }
@@ -113,6 +116,89 @@ test("decodeFrames: a truncated frame at the end of the buffer is dropped, not t
 test("decodeFrames: empty and tiny buffers return no frames rather than throwing", () => {
   assert.deepEqual(decodeFrames(Buffer.alloc(0)), []);
   assert.deepEqual(decodeFrames(Buffer.from([0x81])), []); // one byte — not even a full base header
+});
+
+// ---------------------------------------------------------------------------------------
+// FrameDecoder — the per-connection decoder (cross-read carry + fragmentation reassembly)
+// ---------------------------------------------------------------------------------------
+
+test("FrameDecoder: a frame split across two reads (mid-payload) reassembles — the runner-hub bug", () => {
+  // A multi-KB TEXT frame like a daemon's output/tool_request — bigger than one TCP segment.
+  const text = "x".repeat(3000);
+  const wire = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from(text));
+  const decoder = new FrameDecoder();
+
+  // First read ends mid-payload (typical MSS cut): nothing complete yet, nothing LOST.
+  assert.deepEqual(decoder.push(wire.subarray(0, 1460)), []);
+  const frames = decoder.push(wire.subarray(1460));
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0]!.opcode, OPCODE.TEXT);
+  assert.equal(frames[0]!.payload.toString("utf8"), text);
+});
+
+test("FrameDecoder: a split inside the HEADER (before the length is even readable) also carries", () => {
+  const wire = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("hello"));
+  const decoder = new FrameDecoder();
+  assert.deepEqual(decoder.push(wire.subarray(0, 1)), []); // just the first header byte
+  const frames = decoder.push(wire.subarray(1));
+  assert.equal(frames[0]!.payload.toString("utf8"), "hello");
+});
+
+test("FrameDecoder: complete frames in a chunk are emitted immediately; only the partial tail carries", () => {
+  const a = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("one"));
+  const b = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("two"));
+  const c = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("three"));
+  const decoder = new FrameDecoder();
+
+  const first = decoder.push(Buffer.concat([a, b, c.subarray(0, 4)]));
+  assert.deepEqual(first.map((f) => f.payload.toString("utf8")), ["one", "two"]);
+  const second = decoder.push(c.subarray(4));
+  assert.deepEqual(second.map((f) => f.payload.toString("utf8")), ["three"]);
+});
+
+test("FrameDecoder: FIN=0 + continuation frames reassemble into ONE message under the initiating opcode", () => {
+  const decoder = new FrameDecoder();
+  const f1 = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("Hel"), false);
+  const f2 = encodeMaskedClientFrame(OPCODE.CONTINUATION, Buffer.from("lo, "), false);
+  const f3 = encodeMaskedClientFrame(OPCODE.CONTINUATION, Buffer.from("world"), true);
+
+  assert.deepEqual(decoder.push(f1), []);
+  assert.deepEqual(decoder.push(f2), []);
+  const frames = decoder.push(f3);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0]!.opcode, OPCODE.TEXT);
+  assert.equal(frames[0]!.payload.toString("utf8"), "Hello, world");
+});
+
+test("FrameDecoder: a control frame interleaved mid-fragmentation passes through immediately", () => {
+  const decoder = new FrameDecoder();
+  const ping = encodeMaskedClientFrame(OPCODE.PING, Buffer.from("hb"));
+  decoder.push(encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("par"), false));
+
+  const mid = decoder.push(ping);
+  assert.equal(mid.length, 1);
+  assert.equal(mid[0]!.opcode, OPCODE.PING);
+
+  const done = decoder.push(encodeMaskedClientFrame(OPCODE.CONTINUATION, Buffer.from("tial"), true));
+  assert.equal(done[0]!.payload.toString("utf8"), "partial");
+});
+
+test("FrameDecoder: protocol slop is fail-safe — stray continuation dropped, new data frame discards an unfinished message", () => {
+  const decoder = new FrameDecoder();
+  // Stray continuation with nothing in progress: dropped, not thrown.
+  assert.deepEqual(decoder.push(encodeMaskedClientFrame(OPCODE.CONTINUATION, Buffer.from("junk"), true)), []);
+
+  // Start a fragmented message, then a NEW complete data frame arrives: the unfinished one is
+  // discarded (never interleaved), the new frame is delivered.
+  decoder.push(encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("abandoned"), false));
+  const frames = decoder.push(encodeMaskedClientFrame(OPCODE.TEXT, Buffer.from("fresh")));
+  assert.deepEqual(frames.map((f) => f.payload.toString("utf8")), ["fresh"]);
+});
+
+test("FrameDecoder: the size bound throws on an oversized carry (caller destroys the socket)", () => {
+  const decoder = new FrameDecoder({ maxMessageBytes: 1024 });
+  const big = encodeMaskedClientFrame(OPCODE.TEXT, Buffer.alloc(4096, 0x61));
+  assert.throws(() => decoder.push(big), /exceeds/);
 });
 
 test("encodeCloseFrame / encodePong: opcodes and payloads are correct", () => {

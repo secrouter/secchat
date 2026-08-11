@@ -63,14 +63,18 @@ case "${1:-help}" in
   wiring) require_env; wiring ;;
   backup)
     # State SecDeploy's encrypted-backup flow collects for this stack. Stack must be UP.
-    # secchat keeps ALL state in Postgres (no separate uploads volume — see db/migrations/), so
-    # the SQL dump + .env is the complete state.
+    # Rows/chains live in Postgres; attachment BYTES live on the uploads volume (content-addressed
+    # blobs, SECCHAT_UPLOADS_DIR) — the backup is only complete with BOTH. A backup that missed
+    # the blobs would restore chain-bound attachment manifests attesting to files that 404.
     require_env; shift
     dir="${1:?usage: $0 backup <dir>}"; mkdir -p "$dir"
     echo "→ pg_dump secchat → $dir/secchat.sql"
     compose exec -T postgres pg_dump -U secchat -d secchat > "$dir/secchat.sql"
     cp .env "$dir/.env"   # needed to reconstruct DATABASE_URL/PG_PASSWORD on restore
-    echo "  ✓ secchat backup → $dir (secchat.sql, .env)"
+    echo "→ attachment blobs → $dir/uploads/"
+    rm -rf "$dir/uploads"
+    compose cp secchat:/var/lib/secchat/uploads "$dir/uploads"
+    echo "  ✓ secchat backup → $dir (secchat.sql, .env, uploads/)"
     ;;
   restore)
     # Reinitialize this stack from a backup dir. REPLACES state — this wipes the Postgres
@@ -87,6 +91,15 @@ case "${1:-help}" in
     compose exec -T postgres psql -U secchat -d secchat < "$dir/secchat.sql"
     echo "→ starting SecChat"
     compose up -d --build
+    # Reinstate the attachment blobs onto the fresh uploads volume (down -v wiped it). An older
+    # backup without uploads/ restores rows only — downloads of those attachments will 404
+    # bytes_missing, so say so rather than silently skipping.
+    if [ -d "$dir/uploads" ]; then
+      echo "→ restoring attachment blobs"
+      compose cp "$dir/uploads/." secchat:/var/lib/secchat/uploads
+    else
+      echo "  ! no uploads/ in $dir (pre-blob-backup era) — attachment bytes NOT restored"
+    fi
     echo "  ✓ secchat restore complete"
     ;;
   logs) require_env; shift; compose logs -f "$@" ;;

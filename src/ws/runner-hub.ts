@@ -14,8 +14,9 @@ import type { Duplex } from "node:stream";
 import type { VerifyToken } from "../types.ts";
 import type { RunnerRegistry, RunnerConnection } from "../agent/runner-registry.ts";
 import type { RemoteRunner } from "../agent/remote-runner.ts";
+import type { PoolRunner } from "../agent/pool-runner.ts";
 import { parseRunnerMessage, type RunnerCommand } from "../agent/runner-protocol.ts";
-import { computeAcceptKey, decodeFrames, encodeCloseFrame, encodePong, encodeTextFrame, OPCODE } from "./frame.ts";
+import { computeAcceptKey, encodeCloseFrame, encodePong, encodeTextFrame, FrameDecoder, OPCODE } from "./frame.ts";
 
 export interface RunnerHub {
   close(): void;
@@ -28,6 +29,11 @@ export function attachRunnerHub(
     verifyToken: VerifyToken;
     registry: RunnerRegistry;
     remote: RemoteRunner;
+    /** The Kubernetes pool runner. When a daemon attaches with `?pool=<sessionId>` (a server-launched
+     * pool pod), its connection is routed HERE by session — never into the per-owner `registry` — so
+     * a pool pod can't supersede the owner's desktop daemon. Unset ⇒ the pool isn't configured and a
+     * `?pool=` attach is treated as a normal daemon. */
+    pool?: PoolRunner;
     /** Verify a scoped runner token (auth/runner-token.ts). Tried FIRST — a cookie-session desktop
      * user mints one of these for its daemon; a standalone daemon on a server still authenticates
      * with its own OIDC bearer via `verifyToken`. Unset ⇒ only the bearer path. */
@@ -42,6 +48,12 @@ export function attachRunnerHub(
     const fromQuery = url.searchParams.get("token");
     if (fromQuery) return fromQuery;
     return req.headers["sec-websocket-protocol"]?.split(",")[0]?.trim();
+  }
+
+  /** A pool pod attaches as `/runner?pool=<sessionId>` — the marker that routes it to the PoolRunner
+   * by session instead of the per-owner registry. Absent for a normal desktop daemon. */
+  function extractPoolSession(req: IncomingMessage): string | undefined {
+    return new URL(req.url ?? "/", "http://runner.internal").searchParams.get("pool") ?? undefined;
   }
 
   async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
@@ -87,16 +99,23 @@ export function attachRunnerHub(
     };
     socketByRunner.set(runnerId, socket);
 
-    // Register — superseding any prior daemon for this owner (last-attach wins); close the old one.
-    const superseded = deps.registry.register(conn);
-    if (superseded) {
-      const old = socketByRunner.get(superseded.runnerId);
-      socketByRunner.delete(superseded.runnerId);
-      try {
-        old?.write(encodeCloseFrame());
-        old?.destroy();
-      } catch {
-        // ignore
+    // A pool pod (?pool=<sessionId>) is routed to the PoolRunner BY SESSION and kept OFF the per-owner
+    // registry, so it can't supersede the owner's real desktop daemon. A normal daemon registers as
+    // the owner's runner (last-attach wins), superseding + closing any prior one.
+    const poolSessionId = deps.pool ? extractPoolSession(req) : undefined;
+    if (poolSessionId) {
+      deps.pool!.handlePoolAttach(poolSessionId, conn);
+    } else {
+      const superseded = deps.registry.register(conn);
+      if (superseded) {
+        const old = socketByRunner.get(superseded.runnerId);
+        socketByRunner.delete(superseded.runnerId);
+        try {
+          old?.write(encodeCloseFrame());
+          old?.destroy();
+        } catch {
+          // ignore
+        }
       }
     }
 
@@ -105,12 +124,27 @@ export function attachRunnerHub(
       if (gone) return;
       gone = true;
       socketByRunner.delete(runnerId);
-      deps.registry.unregister(ownerSub, runnerId);
-      deps.remote.handleDaemonGone(conn); // ends the daemon's live sessions cleanly
+      if (poolSessionId) {
+        deps.pool!.handlePoolGone(poolSessionId, conn); // an ephemeral pod dropping ends its session
+      } else {
+        deps.registry.unregister(ownerSub, runnerId);
+        deps.remote.handleDaemonGone(conn); // ends the daemon's live sessions cleanly
+      }
     };
 
+    // Per-connection decoder (frame.ts FrameDecoder): a daemon's output/tool_request frames are
+    // routinely multi-KB — larger than one TCP segment — so partial bytes MUST carry across
+    // "data" events or agent output vanishes and the execute-gate handshake stalls mid-turn.
+    const decoder = new FrameDecoder();
     const onData = (chunk: Buffer) => {
-      for (const frame of decodeFrames(chunk)) {
+      let frames;
+      try {
+        frames = decoder.push(chunk);
+      } catch {
+        socket.destroy(); // over the size bound — hostile or broken daemon
+        return;
+      }
+      for (const frame of frames) {
         switch (frame.opcode) {
           case OPCODE.PING:
             socket.write(encodePong(frame.payload));
@@ -121,7 +155,10 @@ export function attachRunnerHub(
             break;
           case OPCODE.TEXT: {
             const msg = parseRunnerMessage(frame.payload.toString("utf8"));
-            if (msg) deps.remote.handleDaemonMessage(conn, msg);
+            if (msg) {
+              if (poolSessionId) deps.pool!.handlePoolMessage(poolSessionId, conn, msg);
+              else deps.remote.handleDaemonMessage(conn, msg);
+            }
             break;
           }
           default:

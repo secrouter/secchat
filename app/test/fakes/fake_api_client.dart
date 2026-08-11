@@ -86,6 +86,33 @@ class FakeApiClient implements ApiClient {
   @override
   Future<Principal> getMe() async => me;
 
+  /// Git SSH identity fake state. `sshEnabled=false` makes [getSshKey] throw a 503
+  /// (feature-off), matching the real server; otherwise it returns [sshKey].
+  SshKeyInfo? sshKey;
+  bool sshEnabled = true;
+
+  @override
+  Future<SshKeyInfo?> getSshKey() async {
+    if (!sshEnabled) throw const ApiException(503, 'ssh_keys_unavailable');
+    return sshKey;
+  }
+
+  @override
+  Future<SshKeyInfo> generateSshKey() async {
+    sshKey = const SshKeyInfo(
+      keyType: 'ssh-ed25519',
+      publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAFAKEKEY test@example',
+      fingerprint: 'SHA256:fakefingerprintvalue',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    );
+    return sshKey!;
+  }
+
+  @override
+  Future<void> deleteSshKey() async {
+    sshKey = null;
+  }
+
   @override
   Future<List<Channel>> getChannels() async {
     getChannelsCallCount++;

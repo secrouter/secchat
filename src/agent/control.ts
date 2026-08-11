@@ -17,7 +17,7 @@
 import { canGrantExecute, classifyTool, evaluateTool } from "./gate.ts";
 // canGrantExecute is used both for the owner-only grant check AND, now, to decide whether the author
 // of the current turn may cause a mutation at all (the enforced side of "behavior control").
-import type { Agent, AgentControl, AgentSession, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
+import type { Agent, AgentControl, AgentSession, GitSshMaterial, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
 
@@ -27,8 +27,15 @@ export function makeControlPlane(deps: {
   getAgent: (id: string) => Promise<Agent | null>;
   broadcast?: (channelId: string, payload: unknown) => void;
   /** Persist a coding agent's output turn as a channel message (authorType "agent"). Unset ⇒ the
-   * legacy ephemeral agent_output broadcast (not stored). Wired to store.appendMessage. */
-  appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message>;
+   * legacy ephemeral agent_output broadcast (not stored). Wired to the GOVERNED append
+   * (governance/append.ts) in production — marking stamp + DLP — which returns the ENRICHED
+   * message whose `content` is what was actually persisted (possibly a withheld notice). */
+  appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message & { content: string }>;
+  /** Resolve the OWNER's decrypted git SSH identity to inject into this session's runner (git auth
+   * inside the coding agent), or undefined when the feature is off or the owner has no key. Wired in
+   * src/index.ts from the store + config.secretKey; unset ⇒ no key is ever injected. Only the owner's
+   * own key is ever fetched here — attribution and injection both key on the agent's `ownerSub`. */
+  getGitSsh?: (ownerSub: string) => Promise<GitSshMaterial | undefined>;
   leaseTtlMs?: number;
   now?: () => number;
 }): AgentControl {
@@ -55,14 +62,15 @@ export function makeControlPlane(deps: {
         // to the ephemeral agent_output stream when no persister is wired (tests / bare deployments).
         if (deps.appendAgentMessage) {
           const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
-          // The stored row carries only the content HASH (never the plaintext — see the POST message
-          // route), and no display name. Re-attach the plaintext (else the client renders a redaction
-          // tombstone) and the agent's name + kind (else the byline shows the opaque agent id) —
-          // matching how GET /channels/:id/messages enriches history.
+          // Broadcast EXACTLY what was persisted: the governed append returns the enriched message
+          // whose `content` carries the plaintext (the stored row holds only the hash) — or a
+          // withheld notice when DLP/marking blocked the output. Never re-attach event.text here:
+          // that would leak blocked content into the live event. Add the agent's display name + kind
+          // so the byline shows the name, not the opaque agent id (matches GET /channels enrichment).
           const agent = await deps.getAgent(session.agentId);
           deps.broadcast?.(session.channelId, {
             type: "message",
-            message: { ...message, content: event.text, displayName: agent?.name, agentKind: agent?.kind },
+            message: { ...message, displayName: agent?.name, agentKind: agent?.kind },
           });
         } else {
           deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
@@ -142,6 +150,18 @@ export function makeControlPlane(deps: {
       leaseExpiresAt: new Date(now() + leaseTtlMs).toISOString(),
     });
 
+    // Resolve the owner's git identity to inject (if the feature is on and they have a key) — so git
+    // inside the coding session authenticates as them. Best-effort: a lookup failure must not block
+    // spawning the session (the agent simply runs without git auth).
+    let gitSsh: GitSshMaterial | undefined;
+    if (deps.getGitSsh) {
+      try {
+        gitSsh = await deps.getGitSsh(input.agent.ownerSub);
+      } catch {
+        gitSsh = undefined;
+      }
+    }
+
     await deps.runner.start({
       sessionId: session.id,
       agentId: input.agent.id,
@@ -149,6 +169,10 @@ export function makeControlPlane(deps: {
       // A coding agent's mounted local directory (if any) becomes pi's cwd; omit the key entirely
       // when unset so the runner falls back to its per-agent scratch workspace.
       ...(input.agent.workspace ? { workspace: input.agent.workspace } : {}),
+      ...(gitSsh ? { gitSsh } : {}),
+      // The agent's chosen environment routes this session (agent/router-runner.ts) — desktop daemon,
+      // Kubernetes pool, or the in-process server runner.
+      ...(input.agent.launchEnv ? { launchEnv: input.agent.launchEnv } : {}),
     });
     await deps.sessions.setSessionStatus(session.id, "active");
 

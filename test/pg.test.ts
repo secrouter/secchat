@@ -120,6 +120,38 @@ if (!DATABASE_URL) {
     assert.equal((await store.verifyChains()).messagesOk, true);
   });
 
+  test("hasLiveAttachmentReference: refcounts a deduped sha across unclaimed uploads + unredacted messages", async () => {
+    const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
+    const SHA = "a".repeat(64);
+    const mk = (filename: string) => ({
+      channelId: channel.id, uploadedBy: "user-alice", filename, contentType: "text/plain",
+      byteSize: 5, sha256: SHA, marking: "CUI",
+    });
+
+    // Two messages carrying the same sha + one unclaimed upload of it.
+    const a1 = await store.addAttachment(mk("one.txt"));
+    const a2 = await store.addAttachment(mk("two.txt"));
+    const a3 = await store.addAttachment(mk("unclaimed.txt"));
+    const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "m1" });
+    const m2 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "m2" });
+    await store.claimAttachments(m1.id, [a1.id]);
+    await store.claimAttachments(m2.id, [a2.id]);
+
+    // From m1's perspective: m2 (unredacted) and the unclaimed upload both keep the sha live.
+    assert.equal(await store.hasLiveAttachmentReference(SHA, m1.id), true);
+
+    // Redact m2 → the unclaimed upload alone still keeps it live.
+    await store.redactMessage(m2.id, "user-alice", "spill");
+    assert.equal(await store.hasLiveAttachmentReference(SHA, m1.id), true);
+
+    // Claim the last upload onto m1 itself → nothing OUTSIDE m1 references the sha anymore.
+    await store.claimAttachments(m1.id, [a3.id]);
+    assert.equal(await store.hasLiveAttachmentReference(SHA, m1.id), false);
+    // …and an unrelated sha was never live.
+    assert.equal(await store.hasLiveAttachmentReference("b".repeat(64), m1.id), false);
+  });
+
   test("mentions: recorded once per (message,user), newest-first + enriched, seen-marking, redacted ⇒ null content", async () => {
     const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", name: "standup", createdBy: "user-alice" });
     await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "owner" });
@@ -239,6 +271,41 @@ if (!DATABASE_URL) {
     await store.addMember({ channelId: grp.id, memberRef: a, memberType: "user", role: "owner" });
     await store.addMember({ channelId: grp.id, memberRef: b, memberType: "user", role: "member" });
     assert.equal((await store.findDmChannel(a, b))?.id, dm.id);
+  });
+
+  test("user ssh keys: set (upsert-replaces on sub), get (incl. encrypted private), delete (0011)", async () => {
+    const sub = `u-${randomUUID()}`;
+    assert.equal(await store.getUserSshKey(sub), null);
+    assert.equal(await store.deleteUserSshKey(sub), false); // nothing to delete yet
+
+    await store.setUserSshKey({
+      sub,
+      keyType: "ssh-ed25519",
+      publicKey: "ssh-ed25519 AAAAC3Nza... a@x.mil",
+      fingerprint: "SHA256:aaaa",
+      privateKeyEnc: "v1.iv.tag.ct",
+      createdAt: new Date().toISOString(),
+    });
+    const got = await store.getUserSshKey(sub);
+    assert.ok(got);
+    assert.equal(got!.fingerprint, "SHA256:aaaa");
+    assert.equal(got!.privateKeyEnc, "v1.iv.tag.ct"); // the encrypted envelope round-trips through pg
+
+    // Regenerate: same sub, new material REPLACES the row (ON CONFLICT upsert — one key per user).
+    await store.setUserSshKey({
+      sub,
+      keyType: "ssh-ed25519",
+      publicKey: "ssh-ed25519 BBBB... a@x.mil",
+      fingerprint: "SHA256:bbbb",
+      privateKeyEnc: "v1.iv2.tag2.ct2",
+      createdAt: new Date().toISOString(),
+    });
+    const replaced = await store.getUserSshKey(sub);
+    assert.equal(replaced!.fingerprint, "SHA256:bbbb");
+    assert.equal(replaced!.privateKeyEnc, "v1.iv2.tag2.ct2");
+
+    assert.equal(await store.deleteUserSshKey(sub), true);
+    assert.equal(await store.getUserSshKey(sub), null);
   });
 
   test("redaction: content is omitted (key absent) from listMessages, but the chain stays intact, and exactly one audit event is appended", async () => {
@@ -525,6 +592,12 @@ if (!DATABASE_URL) {
 
     const all = await store.listAllAgents();
     assert.ok(all.some((a) => a.id === agent.id));
+
+    // launch_env (0012) round-trips for a coding agent pinned to the pool; absent for one without.
+    const pooled = await store.createAgent({ ownerSub: owner, kind: "coding", name: "pool bot", launchEnv: "pool" });
+    assert.equal(pooled.launchEnv, "pool");
+    assert.equal((await store.getAgent(pooled.id))!.launchEnv, "pool");
+    assert.equal(agent.launchEnv, undefined); // the assistant above set none
   });
 
   // ── SessionStore ───────────────────────────────────────────────────────────────────────────

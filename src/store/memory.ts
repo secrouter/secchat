@@ -73,6 +73,7 @@ import type {
   SessionStore,
   Store,
   User,
+  UserSshKey,
   Webhook,
 } from "../types.ts";
 
@@ -95,6 +96,7 @@ export class MemoryStore implements Store, SessionStore {
   #webhooksById = new Map<Id, Webhook>();
   #webhooksByToken = new Map<string, Webhook>(); // same rows as #webhooksById, keyed by the bearer token
   #users = new Map<string, User>(); // sub -> directory entry (seen-users), insertion order
+  #sshKeys = new Map<string, UserSshKey>(); // sub -> git SSH identity (private key held encrypted)
 
   async createChannel(input: Omit<Channel, "id" | "createdAt">): Promise<Channel> {
     const channel: Channel = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -192,6 +194,20 @@ export class MemoryStore implements Store, SessionStore {
 
   async getUser(sub: string): Promise<User | null> {
     return this.#users.get(sub) ?? null;
+  }
+
+  // ── Per-user git SSH identity (private key held as an encrypted envelope) ───────────────────────
+
+  async setUserSshKey(key: UserSshKey): Promise<void> {
+    this.#sshKeys.set(key.sub, key); // regenerate replaces
+  }
+
+  async getUserSshKey(sub: string): Promise<UserSshKey | null> {
+    return this.#sshKeys.get(sub) ?? null;
+  }
+
+  async deleteUserSshKey(sub: string): Promise<boolean> {
+    return this.#sshKeys.delete(sub);
   }
 
   /** Scans dm channels for one whose user members are exactly {subA, subB}. There are few DMs per
@@ -436,6 +452,17 @@ export class MemoryStore implements Store, SessionStore {
 
   async listAttachmentsForMessage(messageId: Id): Promise<Attachment[]> {
     return [...this.#attachments.values()].filter((a) => a.messageId === messageId).map((a) => ({ ...a }));
+  }
+
+  async hasLiveAttachmentReference(sha256: string, excludingMessageId: Id): Promise<boolean> {
+    for (const a of this.#attachments.values()) {
+      if (a.sha256 !== sha256) continue;
+      if (a.messageId == null) return true; // unclaimed upload — may yet be claimed
+      if (a.messageId === excludingMessageId) continue;
+      const owner = this.#messagesById.get(a.messageId);
+      if (owner && !owner.redactedAt) return true;
+    }
+    return false;
   }
 
   async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {
