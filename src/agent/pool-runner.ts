@@ -82,7 +82,10 @@ export function buildPoolPodSpec(input: {
       restartPolicy: "Never",
       automountServiceAccountToken: false, // the agent pod has no business talking to the K8s API
       activeDeadlineSeconds: config.activeDeadlineSeconds, // hard TTL backstop against a leaked pod
-      securityContext: { runAsNonRoot: true, seccompProfile: { type: "RuntimeDefault" } },
+      // runAsNonRoot needs a NUMERIC uid: with only a non-numeric image USER (the node image's
+      // `node`), the kubelet can't verify non-root at admission and REFUSES to start the pod. 1000 is
+      // the `node` user in the runnerd image's node base — pinning it satisfies the check.
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: "RuntimeDefault" } },
       containers: [
         {
           name: "runnerd",
