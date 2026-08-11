@@ -17,9 +17,18 @@ import type { AddressInfo } from "node:net";
 import { accessSync, constants as fsConstants, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter as pathDelimiter, join as pathJoin } from "node:path";
+import { homedir } from "node:os";
 import { makeControlPlane } from "../src/agent/control.ts";
-import { makePiRunner } from "../src/agent/pi-runner.ts";
+import { makePiRunner, resolveMountPath } from "../src/agent/pi-runner.ts";
 import { MemoryStore } from "../src/store/memory.ts";
+
+test("resolveMountPath: expands ~ , resolves relative to home, leaves absolute alone", () => {
+  assert.equal(resolveMountPath("~"), homedir());
+  assert.equal(resolveMountPath("~/project"), pathJoin(homedir(), "project"));
+  assert.equal(resolveMountPath("  ~/agent_test/  "), pathJoin(homedir(), "agent_test"));
+  assert.equal(resolveMountPath("repo"), pathJoin(homedir(), "repo")); // bare relative → under home
+  assert.equal(resolveMountPath("/Users/me/project"), "/Users/me/project");
+});
 
 // ── Locate pi, exactly like pi-runner.ts's own PI_BIN resolution (env override, else PATH) ────
 

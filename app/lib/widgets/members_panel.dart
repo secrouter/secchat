@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'brand_icon.dart';
 import 'user_picker.dart';
 
 /// Opens the channel members panel: view the roster, and — for an owner or a platform admin —
@@ -129,7 +130,7 @@ class _MembersDialogState extends State<_MembersDialog> {
               padding: const EdgeInsets.fromLTRB(18, 16, 12, 10),
               child: Row(
                 children: [
-                  const Icon(Icons.group_outlined, size: 18, color: AppColors.accent),
+                  const BrandIcon('principal', size: 18, color: AppColors.accent),
                   const SizedBox(width: 8),
                   Text(
                     'Members${members != null ? ' · ${members.length}' : ''}',

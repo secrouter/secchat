@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'brand_icon.dart';
 
 /// Confirmation dialog for redacting (purging) a message — a destructive,
 /// audited action. Requires a reason (the audit record). Resolves to the
@@ -42,7 +43,7 @@ class _RedactDialogState extends State<_RedactDialog> {
       ),
       title: const Row(
         children: [
-          Icon(Icons.gpp_bad_outlined, color: AppColors.bad, size: 20),
+          BrandIcon('redact', color: AppColors.bad, size: 20),
           SizedBox(width: 8),
           Text(
             'Redact message',

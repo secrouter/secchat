@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../marking.dart';
 import '../theme.dart';
+import 'brand_icon.dart';
 
 /// A dialog that picks a channel classification — a level from the ladder plus,
 /// for a level that has them, optional CUI categories (caveats). Levels below
@@ -83,7 +84,7 @@ class _MarkingPickerDialogState extends State<_MarkingPickerDialog> {
       ),
       title: const Row(
         children: [
-          Icon(Icons.shield_outlined, color: AppColors.accent, size: 20),
+          BrandIcon('secure', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
           Text(
             'Channel classification',

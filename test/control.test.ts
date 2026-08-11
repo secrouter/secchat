@@ -209,6 +209,27 @@ test("grantExecute is owner-only, and a \"once\" grant authorizes exactly one mu
   assert.equal(calls.answerTool[1]?.decision.allow, false);
 });
 
+test("a secondary participant's turn cannot mutate even while an owner grant is active (behavior control)", async () => {
+  const { store, grants } = makeFakeSessionStore();
+  const { runner, calls, emit } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const control = makeControlPlane({ sessions: store, runner, getAgent });
+
+  const session = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  // The owner grants execute...
+  await control.grantExecute({ sessionId: session.id, byUser: AGENT.ownerSub, scope: "once" });
+  // ...but a SECONDARY user drives this turn.
+  await control.sendInput(session.id, "please edit the config", "colleague-2");
+  await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-1" });
+  assert.equal(calls.answerTool[0]?.decision.allow, false, "a non-owner turn can't mutate, grant or not");
+  assert.equal(grants.get(session.id)?.consumed ?? false, false, "and the owner's grant is NOT burned by it");
+
+  // The OWNER's own turn still mutates under that grant.
+  await control.sendInput(session.id, "yes, edit it", AGENT.ownerSub);
+  await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-2" });
+  assert.equal(calls.answerTool[1]?.decision.allow, true, "the owner's turn mutates under the grant");
+});
+
 test("a \"once\" grant survives an intervening READ tool call — only the MUTATE call it authorizes consumes it", async () => {
   // Regression guard for a literal-but-buggy reading of "consume when allowed and the grant is
   // once-scoped": a read tool is always allow:true regardless of any grant, so that check alone
