@@ -42,9 +42,9 @@
 // only thing secchat's typecheck ever sees is the `string` this file builds.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Id, Runner, RunnerEvent } from "../types.ts";
 import { AGENT_CHAT_PRIMER } from "./chat-protocol.ts";
@@ -244,6 +244,18 @@ function buildChildEnv(configDir: string, extra: NodeJS.ProcessEnv | undefined):
   return env;
 }
 
+/** Normalize a user-typed mount path: expand a leading `~`/`~/…` to the home dir, and resolve a
+ * relative path against the home dir (so "repo" → ~/repo). Returns an absolute path. Node's fs never
+ * expands `~`, which is why a raw "~/x" fails ENOENT — this is the single place that fixes it. */
+export function resolveMountPath(p: string): string {
+  let path = p.trim();
+  if (path === "~") path = homedir();
+  else if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
+  // resolve() normalizes too (strips a trailing slash, collapses ..) so "/x" and "/x/" map to the
+  // SAME cwd — pi keys a session to its cwd, so they must be identical across spawns.
+  return resolve(isAbsolute(path) ? path : join(homedir(), path));
+}
+
 export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
   const piBin = opts.piBin ?? process.env.PI_BIN ?? "pi";
   const provider = opts.provider ?? process.env.PI_PROVIDER ?? "secrouter";
@@ -367,7 +379,22 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     const stateRoot = process.env.SECCHAT_PI_STATE_DIR?.trim() || join(tmpdir(), "secchat-pi-state");
     const sessionDir = join(stateRoot, "sessions");
     mkdirSync(sessionDir, { recursive: true });
-    const workspaceDir = input.workspace ?? defaultWorkspace ?? join(stateRoot, "workspaces", agentId);
+    const scratchWorkspace = defaultWorkspace ?? join(stateRoot, "workspaces", agentId);
+    // A mounted folder (input.workspace) is a user-typed path: expand a leading ~ (Node's fs does
+    // NOT — an unexpanded "~/x" mkdir's a literal "~" dir and fails ENOENT) and resolve a relative
+    // path against the user's home (a bare "repo" means ~/repo, not something under the daemon's
+    // cwd). It must already exist to actually EXPOSE its files; if it doesn't (typo / bad path),
+    // fall back to the scratch workspace and surface why, rather than silently creating an empty dir.
+    let workspaceDir = scratchWorkspace;
+    let mountWarning: string | undefined;
+    if (input.workspace && input.workspace.trim() !== "") {
+      const resolved = resolveMountPath(input.workspace);
+      if (existsSync(resolved)) {
+        workspaceDir = resolved;
+      } else {
+        mountWarning = `Workspace folder not found: ${input.workspace} (resolved to ${resolved}). Using a scratch workspace instead — check the path (must be an existing absolute folder, e.g. /Users/you/project).`;
+      }
+    }
     mkdirSync(workspaceDir, { recursive: true });
     // The workspace is durable and shared across resumes now — never auto-remove it on session end
     // (that would throw away the files AND the project the session is keyed to).
@@ -463,7 +490,10 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     });
 
     sessions.set(sessionId, session);
-    emit?.(sessionId, { type: "output", text: "▸ coding session ready (pi)" });
+    // Show the ACTUAL working directory so it's obvious which folder is exposed (a mounted repo vs a
+    // scratch dir) — and warn if a requested mount couldn't be used.
+    emit?.(sessionId, { type: "output", text: `▸ coding session ready (pi) — workspace: ${workspaceDir}` });
+    if (mountWarning) emit?.(sessionId, { type: "output", text: `⚠ ${mountWarning}` });
   }
 
   async function sendInput(sessionId: Id, text: string): Promise<void> {
