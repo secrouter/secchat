@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken } from "../types.ts";
+import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken } from "../types.ts";
 import { encryptSecret, generateEd25519 } from "../ssh/keys.ts";
 import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
@@ -49,6 +49,16 @@ interface SshKeyDeps {
  * spreading the row. */
 function publicSshKey(row: UserSshKey): { keyType: string; publicKey: string; fingerprint: string; createdAt: string } {
   return { keyType: row.keyType, publicKey: row.publicKey, fingerprint: row.fingerprint, createdAt: row.createdAt };
+}
+
+/** The session record's hostType for a spawn — derived from the agent's launchEnv (per-agent routing:
+ * pool→"pool", desktop→"local"), falling back to the legacy daemon-if-attached-else-server for an
+ * agent created before launchEnv was persisted. Routing itself is decided in agent/router-runner.ts;
+ * this only labels the session for the admin console. */
+function deriveHostType(agent: Agent, hasRemoteRunner?: (ownerSub: string) => boolean): "server" | "local" | "pool" {
+  if (agent.launchEnv === "pool") return "pool";
+  if (agent.launchEnv === "desktop") return "local";
+  return hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
 }
 
 /** Read a raw (non-JSON) request body into a Buffer, rejecting once it exceeds `maxBytes`. Unlike
@@ -267,7 +277,7 @@ async function triggerCodingAgents(
   // after a reload/restart, when no session is running yet.
   let session = await control.liveSession(channelId);
   if (!session) {
-    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    const hostType = deriveHostType(agent, hasRemoteRunner);
     session = await control.spawn({ agent, channelId, hostType });
   }
   const user = await store.getUser(authorSub);
@@ -299,6 +309,9 @@ function buildRouter(
   assistantModel?: string,
   subscribe?: (sub: string, channelId: string) => void,
   ssh?: SshKeyDeps,
+  /** Whether the Kubernetes agent pool is configured — drives the "Online pool" launch environment's
+   * availability (POST /agents + GET /runner/environments). Unset/false ⇒ pool shown as "coming soon". */
+  poolConfigured?: boolean,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -1319,6 +1332,7 @@ function buildRouter(
     // A coding agent must run in a real launch environment (the user's desktop app, or the online
     // pool once deployed). Validate the chosen environment BEFORE creating anything, so an
     // unavailable choice doesn't strand an agent/channel — and never falls back to the demo stub.
+    let launchEnv: "desktop" | "pool" | undefined;
     if (kind === "coding") {
       if (!control) {
         sendJson(res, 503, { error: "coding_unavailable", detail: "This deployment has no coding-agent control plane." });
@@ -1326,7 +1340,7 @@ function buildRouter(
       }
       const env = resolveLaunchEnv(body.launchEnv, {
         desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
-        poolConfigured: false, // no online pool deployed yet — flip when it lands
+        poolConfigured: poolConfigured ?? false,
       });
       if (!env) {
         sendJson(res, 400, { error: "unknown_launch_env", detail: `No such launch environment: ${body.launchEnv}` });
@@ -1336,8 +1350,11 @@ function buildRouter(
         sendJson(res, 409, { error: "launch_env_unavailable", env: env.id, reason: env.reason, detail: env.detail });
         return;
       }
+      // Persist the chosen environment so every (re)spawn of this agent routes to the SAME place
+      // (per-agent routing — see agent/router-runner.ts).
+      launchEnv = env.id;
     }
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, workspace });
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, workspace, launchEnv });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",
@@ -1357,7 +1374,7 @@ function buildRouter(
     if (kind === "coding" && control) {
       // Host the session on the owner's runner daemon when one is attached (routing is decided the
       // same way at start(); this just records an accurate hostType), else in-process.
-      const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+      const hostType = deriveHostType(agent, hasRemoteRunner);
       const session = await control.spawn({ agent, channelId: channel.id, hostType });
       // Enrich the channel exactly as GET /channels does (agentKind/id/model, live sessionId, and
       // owned) so the client renders the coding surface — including the owner-only edit-mode control —
@@ -1380,7 +1397,7 @@ function buildRouter(
     sendJson(res, 200, {
       environments: launchEnvironmentsFor({
         desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
-        poolConfigured: false, // no online pool deployed yet — flip when it lands
+        poolConfigured: poolConfigured ?? false,
       }),
     });
   });
@@ -1411,7 +1428,7 @@ function buildRouter(
       sendJson(res, 200, { session: existing });
       return;
     }
-    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    const hostType = deriveHostType(agent, hasRemoteRunner);
     const session = await control.spawn({ agent, channelId, hostType });
     sendJson(res, 201, { session });
   });
@@ -1614,11 +1631,14 @@ export function createHttpServer(deps: {
   /** Per-user git SSH identities (config.secretKey + config.gitKnownHosts). Unset ⇒ POST/GET/DELETE
    * /me/ssh-key 503 (the feature is off without a master key). */
   ssh?: SshKeyDeps;
+  /** Whether the Kubernetes agent pool is configured (config.pool + a runner-token minter). Drives
+   * the "Online pool" launch-environment availability. Unset ⇒ pool unavailable ("coming soon"). */
+  poolConfigured?: boolean;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

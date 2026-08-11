@@ -148,6 +148,9 @@ export function makeControlPlane(deps: {
       // when unset so the runner falls back to its per-agent scratch workspace.
       ...(input.agent.workspace ? { workspace: input.agent.workspace } : {}),
       ...(gitSsh ? { gitSsh } : {}),
+      // The agent's chosen environment routes this session (agent/router-runner.ts) — desktop daemon,
+      // Kubernetes pool, or the in-process server runner.
+      ...(input.agent.launchEnv ? { launchEnv: input.agent.launchEnv } : {}),
     });
     await deps.sessions.setSessionStatus(session.id, "active");
 

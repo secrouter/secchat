@@ -115,6 +115,13 @@ export interface Agent {
    * workspace. Only meaningful for the "desktop" launch environment (a local path on the pool would
    * be invalid). */
   workspace?: string;
+  /** WHERE this coding agent's runner runs — the launch environment chosen at creation (see
+   * agent/launch-env.ts). `"desktop"` = the owner's own desktop daemon; `"pool"` = a server-launched
+   * Kubernetes pod. Persisted so every (re)spawn routes to the SAME place (routing is PER-AGENT, not
+   * per-owner — a user can have both a desktop agent and a pool agent at once). Unset ⇒ legacy agents,
+   * which fall back to the owner's daemon-if-attached-else-server behavior. Not meaningful for an
+   * assistant agent (no runner). */
+  launchEnv?: "desktop" | "pool";
   createdAt: string;
 }
 
@@ -489,7 +496,10 @@ export interface AgentSession {
   id: Id;
   agentId: Id;
   channelId: Id;
-  hostType: "server" | "local";
+  /** Where this session's runner runs: `"server"` (in-process pi), `"local"` (the owner's desktop
+   * daemon), or `"pool"` (a server-launched Kubernetes pod). Recorded metadata — routing itself is
+   * decided at start() from the agent's launchEnv (see agent/router-runner.ts). */
+  hostType: "server" | "local" | "pool";
   runnerId?: string;
   status: SessionStatus;
   createdAt: string;
@@ -536,8 +546,10 @@ export interface GitSshMaterial {
 export interface Runner {
   /** `gitSsh`, when present, is the owner's decrypted git identity to inject for this session (see
    * GitSshMaterial). Optional — a runner with no key configured, or an impl that doesn't support
-   * injection, simply omits/ignores it. */
-  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial }): Promise<void>;
+   * injection, simply omits/ignores it. `launchEnv` is the agent's chosen environment, on which a
+   * composite runner (agent/router-runner.ts) routes this session to the desktop daemon, the pool, or
+   * the in-process server runner; a concrete single runner ignores it. */
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool" }): Promise<void>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   /** Deliver the gate's verdict for a pending tool_request back to the runner. */
   answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;
@@ -564,7 +576,7 @@ export interface SessionStore {
  * Runner, applies the execute-gate to tool requests, and streams output to the channel; the HTTP
  * routes just call these. A port so the HTTP layer stays testable with a fake. */
 export interface AgentControl {
-  spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" }): Promise<AgentSession>;
+  spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession>;
   /** Owner-only (enforced via the gate). Returns the gate decision — deny is not an error. */
   grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
   sendInput(sessionId: Id, text: string): Promise<void>;
