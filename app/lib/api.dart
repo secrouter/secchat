@@ -32,6 +32,31 @@ class ApiException implements Exception {
   String toString() => 'ApiException($statusCode): $message';
 }
 
+/// A user's git SSH identity as the server exposes it — the PUBLIC key + its
+/// fingerprint (and when it was created). The private key is generated and held
+/// server-side (encrypted) and is never part of this shape. Defined here rather
+/// than in models.dart since it's local to the profile SSH-key feature.
+class SshKeyInfo {
+  const SshKeyInfo({
+    required this.keyType,
+    required this.publicKey,
+    required this.fingerprint,
+    required this.createdAt,
+  });
+
+  final String keyType; // "ssh-ed25519"
+  final String publicKey; // authorized_keys line — copy this to the git host
+  final String fingerprint; // "SHA256:..." (matches `ssh-keygen -lf`)
+  final String createdAt; // ISO-8601
+
+  factory SshKeyInfo.fromJson(Map<String, dynamic> json) => SshKeyInfo(
+        keyType: json['keyType'] as String? ?? 'ssh-ed25519',
+        publicKey: json['publicKey'] as String? ?? '',
+        fingerprint: json['fingerprint'] as String? ?? '',
+        createdAt: json['createdAt'] as String? ?? '',
+      );
+}
+
 abstract class ApiClient {
   /// The SecChat origin this client talks to — used to wire the bundled runner daemon (desktop).
   Uri get origin;
@@ -60,6 +85,22 @@ abstract class ApiClient {
   /// then presented automatically on subsequent privileged actions. Call this
   /// after catching [ApiException.isStepUpRequired], then retry the action.
   Future<void> stepUp();
+
+  /// This user's git SSH identity (`GET /me/ssh-key`) — the public key +
+  /// fingerprint, or null if none exists yet. The private key is generated and
+  /// held server-side (encrypted) and is NEVER returned. Throws
+  /// [ApiException] with statusCode 503 when the deployment hasn't enabled the
+  /// feature (no master key). Used by the profile SSH-key dialog.
+  Future<SshKeyInfo?> getSshKey();
+
+  /// Generate — or REGENERATE, replacing the prior — this user's git SSH key
+  /// (`POST /me/ssh-key`). Returns the public key to add to the enclave git
+  /// host. Regenerating invalidates the old key everywhere it was added.
+  Future<SshKeyInfo> generateSshKey();
+
+  /// Revoke this user's git SSH key (`DELETE /me/ssh-key`) so it stops being
+  /// injected into future coding sessions.
+  Future<void> deleteSshKey();
 
   /// The user directory (`GET /users`): real users seen via SSO, with their
   /// group claims. Powers the DM picker + roster.
@@ -341,6 +382,25 @@ class HttpApiClient implements ApiClient {
   @override
   Future<Principal> getMe() async =>
       Principal.fromJson(await _get('/me') as Map<String, dynamic>);
+
+  @override
+  Future<SshKeyInfo?> getSshKey() async {
+    try {
+      return SshKeyInfo.fromJson(await _get('/me/ssh-key') as Map<String, dynamic>);
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return null; // authenticated, just no key yet
+      rethrow; // 503 (feature off) and everything else surface to the caller
+    }
+  }
+
+  @override
+  Future<SshKeyInfo> generateSshKey() async =>
+      SshKeyInfo.fromJson(await _post('/me/ssh-key') as Map<String, dynamic>);
+
+  @override
+  Future<void> deleteSshKey() async {
+    await _delete('/me/ssh-key');
+  }
 
   /// `GET /auth/status` -- `{"sso": bool}`, unauthenticated. Lets the login
   /// screen decide whether to render the "Sign in with SecSSO" button.

@@ -54,7 +54,8 @@ src/
   auth/           SecSSO (Authentik) JWKS token verification
   http/           bare-Node HTTP server + routes
   ws/             stdlib WebSocket hub (realtime) + runner-daemon attach hub
-  agent/          coding-agent control plane + execute-gate + runner ports (server / remote)
+  agent/          coding-agent control plane + execute-gate + runner ports (server / remote / K8s pool)
+  ssh/            per-user git SSH identities (ed25519 + AES-256-GCM at rest; see docs/git-ssh-keys.md)
   daemon/         the runner daemon: attaches to SecChat, runs pi (see docs/runner-daemon.md)
 test/             node:test suites, one per module
 db/migrations/    SQL schema (applied by the Postgres store when it lands)
@@ -64,6 +65,16 @@ The **runner daemon** runs coding agents on a machine of your choosing (bundled 
 or standalone on a server/container) and attaches out to SecChat, while the execute-gate stays on the
 server — see [docs/runner-daemon.md](docs/runner-daemon.md). Package it with `npm run bundle:runnerd`
 (desktop bundle) or `Dockerfile.runnerd` (container).
+
+**Per-user git SSH keys** (optional) give each user a server-managed ed25519 identity that SecChat
+injects into their coding-agent runtimes so `git` authenticates as them — the private key is held
+AES-256-GCM-encrypted at rest and never leaves the server. Set `SECCHAT_SECRET_KEY` to enable it;
+see [docs/git-ssh-keys.md](docs/git-ssh-keys.md).
+
+**Kubernetes agent pool** (optional) runs a coding agent in a server-launched, ephemeral pod (the
+runnerd image) instead of the user's desktop — the pod attaches back over `/runner` and the
+execute-gate is unchanged. Set `SECCHAT_POOL_IMAGE` to enable it; see
+[docs/agent-pool.md](docs/agent-pool.md).
 
 ## Deploy (Docker Compose stack)
 
@@ -90,10 +101,12 @@ cp .env.example .env
 ./bootstrap/secchat.sh down [-v]      stop (-v also wipes volumes/state)
 ```
 
-**All state lives in Postgres** — channels, messages, agents, the audit log, everything (see
-`db/migrations/`); migrations are applied automatically on boot. There is no separate uploads
-volume, so `backup` (a `pg_dump` plus the `.env` needed to reconstruct `DATABASE_URL`) captures
-the stack's complete state, and `restore` reinstates it from a clean volume.
+**State lives in two places** — rows, chains, and the audit log in **Postgres** (see
+`db/migrations/`; migrations are applied automatically on boot), and attachment **bytes** on the
+`uploads` volume (content-addressed blobs under `SECCHAT_UPLOADS_DIR`). `backup` captures both —
+the `pg_dump`, the `.env` needed to reconstruct `DATABASE_URL`, and the blobs — and `restore`
+reinstates both from clean volumes. A backup without the blobs would restore chain-bound
+attachment manifests attesting to files that no longer exist.
 
 **Web client**: the image serves `clients/web-minimal` (dependency-free, always present in the
 repo). It does **not** build the Flutter client (`app/`) — that toolchain doesn't belong in

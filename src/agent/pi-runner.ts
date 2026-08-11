@@ -42,11 +42,11 @@
 // only thing secchat's typecheck ever sees is the `string` this file builds.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { Id, Runner, RunnerEvent } from "../types.ts";
+import type { GitSshMaterial, Id, Runner, RunnerEvent } from "../types.ts";
 import { AGENT_CHAT_PRIMER } from "./chat-protocol.ts";
 
 /** Prefix on the extension's `ctx.ui.confirm()` title that marks a request as OUR gate's (vs. some
@@ -227,6 +227,34 @@ function extractResultText(result: unknown): string {
   return text;
 }
 
+/** Writes the owner's git SSH identity (src/ssh/keys.ts, injected via Runner.start's `gitSsh`) into
+ * an ephemeral per-session `.ssh` dir UNDER configDir — so it is torn down with the rest of configDir
+ * on session end (cleanupFs), never persisted — and returns the `GIT_SSH_COMMAND` that makes `git`
+ * inside pi's shell tool use ONLY this key. `IdentitiesOnly=yes` stops ssh from also offering the
+ * host's own agent/default keys; the host key is pinned strictly when the deployment supplied
+ * known_hosts, else trust-on-first-use (`accept-new`, which still pins after the first connect). The
+ * private key is chmod 0600 explicitly (writeFileSync's mode is subject to umask). */
+function setupGitSsh(configDir: string, gitSsh: GitSshMaterial): string {
+  const sshDir = join(configDir, "ssh");
+  mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+  const keyPath = join(sshDir, "id_ed25519");
+  const nl = (s: string) => (s.endsWith("\n") ? s : `${s}\n`);
+  writeFileSync(keyPath, nl(gitSsh.privateKey), { mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+  writeFileSync(`${keyPath}.pub`, nl(gitSsh.publicKey), { mode: 0o644 });
+  const knownHostsPath = join(sshDir, "known_hosts");
+  let strict: string;
+  if (gitSsh.knownHosts && gitSsh.knownHosts.trim()) {
+    writeFileSync(knownHostsPath, nl(gitSsh.knownHosts), { mode: 0o644 });
+    strict = "yes";
+  } else {
+    writeFileSync(knownHostsPath, "", { mode: 0o644 }); // accept-new appends the host key here on first connect
+    strict = "accept-new";
+  }
+  // GIT_SSH_COMMAND is run via `sh -c`, so the quoted paths tolerate spaces in the temp dir.
+  return `ssh -i "${keyPath}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=${strict} -o UserKnownHostsFile="${knownHostsPath}"`;
+}
+
 function buildChildEnv(configDir: string, extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of INHERITED_ENV_KEYS) {
@@ -365,7 +393,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     }
   }
 
-  async function start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string }): Promise<void> {
+  async function start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial }): Promise<void> {
     const { sessionId, agentId } = input;
 
     const configDir = mkdtempSync(join(tmpdir(), "secchat-pi-config-"));
@@ -428,9 +456,13 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     ];
 
     if (process.env.SECCHAT_PI_DEBUG === "1") console.error(`[pi spawn] ${piBin} ${args.join(" ")}`);
+    const childEnv = buildChildEnv(configDir, extraEnv);
+    // Inject the owner's git identity for THIS session (if SecChat sent one): git inside pi's shell
+    // tool authenticates as the agent's owner via GIT_SSH_COMMAND pointing at an ephemeral key file.
+    if (input.gitSsh) childEnv.GIT_SSH_COMMAND = setupGitSsh(configDir, input.gitSsh);
     const child = spawn(piBin, args, {
       cwd: workspaceDir,
-      env: buildChildEnv(configDir, extraEnv),
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
 

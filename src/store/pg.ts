@@ -83,6 +83,7 @@ import type {
   SessionStore,
   Store,
   User,
+  UserSshKey,
   Webhook,
 } from "../types.ts";
 
@@ -137,6 +138,15 @@ interface MemberRow {
   role: string;
 }
 
+interface SshKeyRow {
+  sub: string;
+  key_type: string;
+  public_key: string;
+  fingerprint: string;
+  private_key_enc: string;
+  created_at: Date;
+}
+
 interface AgentRow {
   id: string;
   owner_sub: string;
@@ -144,6 +154,7 @@ interface AgentRow {
   name: string | null;
   model: string | null;
   workspace: string | null;
+  launch_env: string | null;
   created_at: Date;
 }
 
@@ -281,6 +292,17 @@ function rowToUser(row: UserRow): User {
   });
 }
 
+function rowToSshKey(row: SshKeyRow): UserSshKey {
+  return {
+    sub: row.sub,
+    keyType: row.key_type,
+    publicKey: row.public_key,
+    fingerprint: row.fingerprint,
+    privateKeyEnc: row.private_key_enc,
+    createdAt: iso(row.created_at),
+  };
+}
+
 function rowToMember(row: MemberRow): Member {
   return {
     channelId: row.channel_id,
@@ -298,6 +320,7 @@ function rowToAgent(row: AgentRow): Agent {
     name: row.name ?? undefined,
     model: row.model ?? undefined,
     workspace: row.workspace ?? undefined,
+    launchEnv: (row.launch_env as Agent["launchEnv"]) ?? undefined,
     createdAt: iso(row.created_at),
   });
 }
@@ -572,6 +595,38 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToUser(rows[0]) : null;
   }
 
+  // ── per-user git SSH identity (db/migrations/0011_user_ssh_keys.sql) ───────────────────────────
+
+  /** Upsert on the `sub` PK — regenerating a key REPLACES the prior row. `private_key_enc` is the
+   * AES-256-GCM envelope; the plaintext private key is never stored. Mirrors MemoryStore.setUserSshKey. */
+  async setUserSshKey(key: UserSshKey): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO user_ssh_keys (sub, key_type, public_key, fingerprint, private_key_enc, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (sub) DO UPDATE SET
+         key_type = EXCLUDED.key_type,
+         public_key = EXCLUDED.public_key,
+         fingerprint = EXCLUDED.fingerprint,
+         private_key_enc = EXCLUDED.private_key_enc,
+         created_at = EXCLUDED.created_at`,
+      [key.sub, key.keyType, key.publicKey, key.fingerprint, key.privateKeyEnc, key.createdAt],
+    );
+  }
+
+  async getUserSshKey(sub: string): Promise<UserSshKey | null> {
+    const { rows } = await this.#pool.query<SshKeyRow>(
+      `SELECT sub, key_type, public_key, fingerprint, private_key_enc, created_at
+         FROM user_ssh_keys WHERE sub = $1`,
+      [sub],
+    );
+    return rows[0] ? rowToSshKey(rows[0]) : null;
+  }
+
+  async deleteUserSshKey(sub: string): Promise<boolean> {
+    const result = await this.#pool.query(`DELETE FROM user_ssh_keys WHERE sub = $1`, [sub]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
   /** A dm channel whose user-members are exactly {subA, subB} — two user members, both present.
    * The count guard rules out a would-be group DM; the two EXISTS clauses pin both participants. */
   async findDmChannel(subA: string, subB: string): Promise<Channel | null> {
@@ -596,15 +651,15 @@ export class PgStore implements Store, SessionStore {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     await this.#pool.query(
-      `INSERT INTO agents (id, owner_sub, kind, name, model, workspace, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.workspace ?? null, createdAt],
+      `INSERT INTO agents (id, owner_sub, kind, name, model, workspace, launch_env, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.workspace ?? null, input.launchEnv ?? null, createdAt],
     );
-    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, workspace: input.workspace, createdAt });
+    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, workspace: input.workspace, launchEnv: input.launchEnv, createdAt });
   }
 
   async getAgent(id: Id): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents WHERE id = $1`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE id = $1`,
       [id],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
@@ -613,7 +668,7 @@ export class PgStore implements Store, SessionStore {
   async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
       `UPDATE agents SET model = $2 WHERE id = $1
-       RETURNING id, owner_sub, kind, name, model, workspace, created_at`,
+       RETURNING id, owner_sub, kind, name, model, workspace, launch_env, created_at`,
       [id, model],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
@@ -622,7 +677,7 @@ export class PgStore implements Store, SessionStore {
   /** Owner's agents, creation order (ins_seq). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
       [ownerSub],
     );
     return rows.map(rowToAgent);
@@ -631,7 +686,7 @@ export class PgStore implements Store, SessionStore {
   /** Every agent, creation order, regardless of owner — for the admin / audit-review console. */
   async listAllAgents(): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents ORDER BY ins_seq`,
     );
     return rows.map(rowToAgent);
   }
@@ -947,6 +1002,21 @@ export class PgStore implements Store, SessionStore {
       [messageId],
     );
     return rows.map(rowToAttachment);
+  }
+
+  async hasLiveAttachmentReference(sha256: string, excludingMessageId: Id): Promise<boolean> {
+    // Live = an unclaimed upload row (may yet be claimed), or a claimed row of any OTHER message
+    // that is not redacted. One indexed probe; content addressing means one sha can back many rows.
+    const { rows } = await this.#pool.query(
+      `SELECT 1
+         FROM attachments a
+         LEFT JOIN messages m ON m.id = a.message_id
+        WHERE a.sha256 = $1
+          AND (a.message_id IS NULL OR (a.message_id <> $2 AND m.redacted_at IS NULL))
+        LIMIT 1`,
+      [sha256, excludingMessageId],
+    );
+    return rows.length > 0;
   }
 
   async listAttachmentsForChannel(channelId: Id): Promise<Attachment[]> {

@@ -9,7 +9,9 @@
 --
 -- Bytes live OUTSIDE Postgres: content-addressed on the filesystem under SECCHAT_UPLOADS_DIR, at
 -- <dir>/<sha256> (dedup by content; the download route re-checks channel membership). Redaction of the
--- owning message deletes the bytes (the row + its sha256 stay as a tombstone, bound in the chain).
+-- owning message deletes the bytes UNLESS the same sha256 is still referenced by an unclaimed upload
+-- or another unredacted message (content-address dedup ⇒ refcount first — see the redact route +
+-- Store.hasLiveAttachmentReference); the row + its sha256 stay as a tombstone, bound in the chain.
 
 BEGIN;
 

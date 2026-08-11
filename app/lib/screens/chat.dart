@@ -31,6 +31,7 @@ import '../widgets/mentions_panel.dart';
 import '../widgets/pins_panel.dart';
 import '../widgets/search_panel.dart';
 import '../widgets/sidebar.dart';
+import '../widgets/ssh_key_dialog.dart';
 import '../widgets/step_up_dialog.dart';
 import '../widgets/user_picker.dart';
 
@@ -1382,6 +1383,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onMentions: _openMentions,
             mentionCount: _unseenMentions,
             runnerState: _daemon.supported ? _daemon.state : null,
+            onSshKeys: () => showSshKeyDialog(context, api: widget.api),
           ),
           Expanded(
             child: Row(
