@@ -15,7 +15,7 @@
 // import it), so it's fully testable offline with fakes — see test/control.test.ts.
 
 import { canGrantExecute, classifyTool, evaluateTool } from "./gate.ts";
-import type { Agent, AgentControl, AgentSession, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
+import type { Agent, AgentControl, AgentSession, GitSshMaterial, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
 
@@ -29,6 +29,11 @@ export function makeControlPlane(deps: {
    * (governance/append.ts) in production — marking stamp + DLP — which returns the ENRICHED
    * message whose `content` is what was actually persisted (possibly a withheld notice). */
   appendAgentMessage?: (channelId: string, agentId: string, text: string) => Promise<Message & { content: string }>;
+  /** Resolve the OWNER's decrypted git SSH identity to inject into this session's runner (git auth
+   * inside the coding agent), or undefined when the feature is off or the owner has no key. Wired in
+   * src/index.ts from the store + config.secretKey; unset ⇒ no key is ever injected. Only the owner's
+   * own key is ever fetched here — attribution and injection both key on the agent's `ownerSub`. */
+  getGitSsh?: (ownerSub: string) => Promise<GitSshMaterial | undefined>;
   leaseTtlMs?: number;
   now?: () => number;
 }): AgentControl {
@@ -123,6 +128,18 @@ export function makeControlPlane(deps: {
       leaseExpiresAt: new Date(now() + leaseTtlMs).toISOString(),
     });
 
+    // Resolve the owner's git identity to inject (if the feature is on and they have a key) — so git
+    // inside the coding session authenticates as them. Best-effort: a lookup failure must not block
+    // spawning the session (the agent simply runs without git auth).
+    let gitSsh: GitSshMaterial | undefined;
+    if (deps.getGitSsh) {
+      try {
+        gitSsh = await deps.getGitSsh(input.agent.ownerSub);
+      } catch {
+        gitSsh = undefined;
+      }
+    }
+
     await deps.runner.start({
       sessionId: session.id,
       agentId: input.agent.id,
@@ -130,6 +147,7 @@ export function makeControlPlane(deps: {
       // A coding agent's mounted local directory (if any) becomes pi's cwd; omit the key entirely
       // when unset so the runner falls back to its per-agent scratch workspace.
       ...(input.agent.workspace ? { workspace: input.agent.workspace } : {}),
+      ...(gitSsh ? { gitSsh } : {}),
     });
     await deps.sessions.setSessionStatus(session.id, "active");
 

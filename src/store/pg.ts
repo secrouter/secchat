@@ -83,6 +83,7 @@ import type {
   SessionStore,
   Store,
   User,
+  UserSshKey,
   Webhook,
 } from "../types.ts";
 
@@ -135,6 +136,15 @@ interface MemberRow {
   member_ref: string;
   member_type: string;
   role: string;
+}
+
+interface SshKeyRow {
+  sub: string;
+  key_type: string;
+  public_key: string;
+  fingerprint: string;
+  private_key_enc: string;
+  created_at: Date;
 }
 
 interface AgentRow {
@@ -279,6 +289,17 @@ function rowToUser(row: UserRow): User {
     groups: row.groups ?? [],
     lastSeenAt: iso(row.last_seen_at),
   });
+}
+
+function rowToSshKey(row: SshKeyRow): UserSshKey {
+  return {
+    sub: row.sub,
+    keyType: row.key_type,
+    publicKey: row.public_key,
+    fingerprint: row.fingerprint,
+    privateKeyEnc: row.private_key_enc,
+    createdAt: iso(row.created_at),
+  };
 }
 
 function rowToMember(row: MemberRow): Member {
@@ -570,6 +591,38 @@ export class PgStore implements Store, SessionStore {
       [sub],
     );
     return rows[0] ? rowToUser(rows[0]) : null;
+  }
+
+  // ── per-user git SSH identity (db/migrations/0011_user_ssh_keys.sql) ───────────────────────────
+
+  /** Upsert on the `sub` PK — regenerating a key REPLACES the prior row. `private_key_enc` is the
+   * AES-256-GCM envelope; the plaintext private key is never stored. Mirrors MemoryStore.setUserSshKey. */
+  async setUserSshKey(key: UserSshKey): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO user_ssh_keys (sub, key_type, public_key, fingerprint, private_key_enc, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (sub) DO UPDATE SET
+         key_type = EXCLUDED.key_type,
+         public_key = EXCLUDED.public_key,
+         fingerprint = EXCLUDED.fingerprint,
+         private_key_enc = EXCLUDED.private_key_enc,
+         created_at = EXCLUDED.created_at`,
+      [key.sub, key.keyType, key.publicKey, key.fingerprint, key.privateKeyEnc, key.createdAt],
+    );
+  }
+
+  async getUserSshKey(sub: string): Promise<UserSshKey | null> {
+    const { rows } = await this.#pool.query<SshKeyRow>(
+      `SELECT sub, key_type, public_key, fingerprint, private_key_enc, created_at
+         FROM user_ssh_keys WHERE sub = $1`,
+      [sub],
+    );
+    return rows[0] ? rowToSshKey(rows[0]) : null;
+  }
+
+  async deleteUserSshKey(sub: string): Promise<boolean> {
+    const result = await this.#pool.query(`DELETE FROM user_ssh_keys WHERE sub = $1`, [sub]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   /** A dm channel whose user-members are exactly {subA, subB} — two user members, both present.

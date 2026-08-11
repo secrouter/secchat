@@ -55,6 +55,7 @@ src/
   http/           bare-Node HTTP server + routes
   ws/             stdlib WebSocket hub (realtime) + runner-daemon attach hub
   agent/          coding-agent control plane + execute-gate + runner ports (server / remote)
+  ssh/            per-user git SSH identities (ed25519 + AES-256-GCM at rest; see docs/git-ssh-keys.md)
   daemon/         the runner daemon: attaches to SecChat, runs pi (see docs/runner-daemon.md)
 test/             node:test suites, one per module
 db/migrations/    SQL schema (applied by the Postgres store when it lands)
@@ -64,6 +65,11 @@ The **runner daemon** runs coding agents on a machine of your choosing (bundled 
 or standalone on a server/container) and attaches out to SecChat, while the execute-gate stays on the
 server — see [docs/runner-daemon.md](docs/runner-daemon.md). Package it with `npm run bundle:runnerd`
 (desktop bundle) or `Dockerfile.runnerd` (container).
+
+**Per-user git SSH keys** (optional) give each user a server-managed ed25519 identity that SecChat
+injects into their coding-agent runtimes so `git` authenticates as them — the private key is held
+AES-256-GCM-encrypted at rest and never leaves the server. Set `SECCHAT_SECRET_KEY` to enable it;
+see [docs/git-ssh-keys.md](docs/git-ssh-keys.md).
 
 ## Deploy (Docker Compose stack)
 

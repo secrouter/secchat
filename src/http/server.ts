@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, VerifyToken } from "../types.ts";
+import type { AdminOverview, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken } from "../types.ts";
+import { encryptSecret, generateEd25519 } from "../ssh/keys.ts";
 import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
@@ -32,6 +33,22 @@ import { attachmentsManifest } from "../attachments/manifest.ts";
 interface AttachmentDeps {
   blobs: BlobStore;
   maxUploadBytes: number;
+}
+
+/** Per-user git SSH identities (POST/GET/DELETE /me/ssh-key + injection). Present only when the
+ * deployment set a master key (config.secretKey); unset ⇒ those routes 503 and no key is injected. */
+interface SshKeyDeps {
+  /** AES-256-GCM master key for the private-key envelope at rest (config.secretKey). */
+  secretKey: Buffer;
+  /** Optional pinned known_hosts injected into runners alongside the key (config.gitKnownHosts). */
+  knownHosts?: string;
+}
+
+/** Project a stored SSH key to the CLIENT-SAFE shape. The one place that decides what leaves the
+ * server — it NEVER includes `privateKeyEnc` (the encrypted private key), so a route can't leak it by
+ * spreading the row. */
+function publicSshKey(row: UserSshKey): { keyType: string; publicKey: string; fingerprint: string; createdAt: string } {
+  return { keyType: row.keyType, publicKey: row.publicKey, fingerprint: row.fingerprint, createdAt: row.createdAt };
 }
 
 /** Read a raw (non-JSON) request body into a Buffer, rejecting once it exceeds `maxBytes`. Unlike
@@ -281,6 +298,7 @@ function buildRouter(
   runnerToken?: RunnerToken,
   assistantModel?: string,
   subscribe?: (sub: string, channelId: string) => void,
+  ssh?: SshKeyDeps,
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -363,6 +381,63 @@ function buildRouter(
     const token = await runnerToken.mint(principal.sub);
     await store.appendAudit({ actor: principal.sub, action: "auth.runner_token" });
     sendJson(res, 200, { token });
+  });
+
+  // ── Per-user git SSH identity ────────────────────────────────────────────────────────────────
+  // A profile-level ed25519 key SecChat generates, holds encrypted, and INJECTS into the user's
+  // agentic runtimes (the K8s pool pod / their desktop daemon) so `git` inside a coding session
+  // authenticates as them. The user copies the PUBLIC key to the enclave git host once. The private
+  // key is never returned by any of these routes — only the public key + fingerprint.
+
+  // Generate (or REGENERATE, replacing the prior) this user's key. Returns the public key to add to
+  // the git host. Regenerating invalidates the old key everywhere it was added — an intentional
+  // rotation/revocation lever.
+  router.add("POST", "/me/ssh-key", async ({ res, principal }) => {
+    if (!ssh) {
+      sendJson(res, 503, { error: "ssh_keys_unavailable" });
+      return;
+    }
+    const comment = principal.email?.trim() || principal.sub; // a human-legible label on the public line
+    const generated = generateEd25519(comment);
+    const row: UserSshKey = {
+      sub: principal.sub,
+      keyType: generated.keyType,
+      publicKey: generated.publicKey,
+      fingerprint: generated.fingerprint,
+      // The private key lives ONLY as an AES-256-GCM envelope — plaintext never touches the store.
+      privateKeyEnc: encryptSecret(generated.privateKeyOpenSSH, ssh.secretKey),
+      createdAt: new Date().toISOString(),
+    };
+    await store.setUserSshKey(row);
+    // Audit records the fingerprint (metadata, not the key) so a rotation is on the chain.
+    await store.appendAudit({ actor: principal.sub, action: "ssh_key.generate", target: principal.sub, detail: generated.fingerprint });
+    sendJson(res, 201, publicSshKey(row));
+  });
+
+  // The user's current public key + fingerprint (for the profile UI), or 404 if they have none.
+  router.add("GET", "/me/ssh-key", async ({ res, principal }) => {
+    if (!ssh) {
+      sendJson(res, 503, { error: "ssh_keys_unavailable" });
+      return;
+    }
+    const row = await store.getUserSshKey(principal.sub);
+    if (!row) {
+      sendJson(res, 404, { error: "no_ssh_key" });
+      return;
+    }
+    sendJson(res, 200, publicSshKey(row));
+  });
+
+  // Revoke the key: drops it from the store so it stops being injected into future sessions. (The
+  // user should also remove the public key from the git host.)
+  router.add("DELETE", "/me/ssh-key", async ({ res, principal }) => {
+    if (!ssh) {
+      sendJson(res, 503, { error: "ssh_keys_unavailable" });
+      return;
+    }
+    const removed = await store.deleteUserSshKey(principal.sub);
+    if (removed) await store.appendAudit({ actor: principal.sub, action: "ssh_key.revoke", target: principal.sub });
+    sendJson(res, removed ? 200 : 404, { removed });
   });
 
   // The user directory (seen-users): everyone who has signed in via SSO, with their real group
@@ -1536,11 +1611,14 @@ export function createHttpServer(deps: {
    * so a new channel/agent/DM is live without a reconnect (wired to hub.subscribe). Unset ⇒ new
    * channels only go live on the client's next reconnect. */
   subscribe?: (sub: string, channelId: string) => void;
+  /** Per-user git SSH identities (config.secretKey + config.gitKnownHosts). Unset ⇒ POST/GET/DELETE
+   * /me/ssh-key 503 (the feature is off without a master key). */
+  ssh?: SshKeyDeps;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

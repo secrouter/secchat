@@ -14,6 +14,7 @@ import { DlpPolicy, type DlpMode, parseDlpRules } from "./dlp/policy.ts";
 import { type CapabilityPolicy, type CapabilityRule, defaultCapabilityPolicy } from "./auth/capabilities.ts";
 import { makeStepUp, type StepUp } from "./auth/stepup.ts";
 import { makeRunnerToken, type RunnerToken } from "./auth/runner-token.ts";
+import { deriveSecretKey } from "./ssh/keys.ts";
 
 export interface Config {
   host: string;
@@ -95,6 +96,18 @@ export interface Config {
   uploadsDir: string;
   /** Max attachment upload size in bytes (`SECCHAT_MAX_UPLOAD_BYTES`, default 25 MiB). */
   maxUploadBytes: number;
+
+  /** Deployment master key (32 bytes, derived from `SECCHAT_SECRET_KEY`) used to AES-256-GCM-encrypt
+   * per-user SSH private keys at rest (src/ssh/keys.ts). Unset ⇒ the git-SSH-identity feature is
+   * OFF: `/me/ssh-key` 503s and no key is injected into runners. Never falls back to a guessable key.
+   * Use a long, high-entropy secret (it is folded to 256 bits via SHA-256). */
+  secretKey?: Buffer;
+  /** True only when `secretKey` is set — gates the per-user SSH-key routes + injection. */
+  sshEnabled: boolean;
+  /** Optional pinned SSH `known_hosts` content (`SECCHAT_GIT_KNOWN_HOSTS`) for the enclave git
+   * host(s), injected into runners so git verifies the host key strictly. Unset ⇒ runners use
+   * StrictHostKeyChecking=accept-new (trust-on-first-use), which still pins after the first connect. */
+  gitKnownHosts?: string;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -168,6 +181,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // attach with its own token). Longer TTL than step-up — it authorizes a work-session's runner.
   const runnerTokenSecret = env.SECCHAT_RUNNER_TOKEN_SECRET?.trim() || sessionSecret;
   const runnerToken = runnerTokenSecret ? makeRunnerToken(runnerTokenSecret, Number(opt(env, "SECCHAT_RUNNER_TOKEN_TTL", "43200"))) : undefined;
+  // Master key for encrypting per-user SSH private keys at rest. A DEDICATED secret is required (it is
+  // not defaulted to the session secret): SSH private keys are long-lived credentials injected into
+  // runtimes, so their at-rest key is deliberately separate from the short-lived cookie signer.
+  const sshSecret = env.SECCHAT_SECRET_KEY?.trim() || undefined;
+  const secretKey = sshSecret ? deriveSecretKey(sshSecret) : undefined;
+  const gitKnownHosts = env.SECCHAT_GIT_KNOWN_HOSTS?.trim() || undefined;
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -196,5 +215,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runnerToken,
     uploadsDir: opt(env, "SECCHAT_UPLOADS_DIR", "./uploads"),
     maxUploadBytes: Number(opt(env, "SECCHAT_MAX_UPLOAD_BYTES", "26214400")), // 25 MiB
+    secretKey,
+    sshEnabled: Boolean(secretKey),
+    gitKnownHosts,
   };
 }

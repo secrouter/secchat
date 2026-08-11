@@ -24,12 +24,16 @@ class AppTopBar extends StatelessWidget {
     this.onMentions,
     this.mentionCount = 0,
     this.runnerState,
+    this.onSshKeys,
   });
 
   final Principal principal;
   final ConnStatus status;
   final VoidCallback onSignOut;
   final VoidCallback? onSearch;
+
+  /// Opens the git SSH-key manager (profile). Null ⇒ no SSH-key affordance.
+  final VoidCallback? onSshKeys;
 
   /// The bundled runner daemon's live state (desktop). Null ⇒ no runner chip (web/mobile).
   final ValueListenable<RunnerDaemonState>? runnerState;
@@ -74,6 +78,14 @@ class AppTopBar extends StatelessWidget {
           const SizedBox(width: 16),
           _UserChip(principal: principal),
           const SizedBox(width: 4),
+          if (onSshKeys != null) ...[
+            IconButton(
+              onPressed: onSshKeys,
+              icon: const Icon(Icons.vpn_key, size: 18),
+              tooltip: 'Git SSH key',
+              color: AppColors.textMuted,
+            ),
+          ],
           IconButton(
             onPressed: onSignOut,
             icon: const Icon(Icons.logout, size: 18),

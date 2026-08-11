@@ -29,6 +29,7 @@ import { RunnerRegistry } from "./agent/runner-registry.ts";
 import { makeRemoteRunner } from "./agent/remote-runner.ts";
 import { makeRouterRunner } from "./agent/router-runner.ts";
 import { FsBlobStore } from "./attachments/blobs.ts";
+import { decryptSecret } from "./ssh/keys.ts";
 import type { Hub } from "./ws/hub.ts";
 import type { Runner, SessionStore, Store } from "./types.ts";
 import { fileURLToPath } from "node:url";
@@ -140,11 +141,24 @@ const remoteRunner = makeRemoteRunner({
   renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
 });
 const runner = makeRouterRunner({ server: serverRunner, remote: remoteRunner.runner, hasRemote: (sub) => runnerRegistry.has(sub) });
+// Per-user git SSH identity injection (K8s pool / desktop daemon): when a master key is configured
+// (config.secretKey), resolve the spawning owner's key, decrypt the private half, and hand it to
+// their runner so `git` in the coding session authenticates as them. Undefined when the feature is
+// off — no key is ever injected. Only the owner's OWN key is fetched (keyed on ownerSub).
+const getGitSsh = config.secretKey
+  ? async (ownerSub: string) => {
+      const row = await store.getUserSshKey(ownerSub);
+      if (!row) return undefined;
+      const privateKey = decryptSecret(row.privateKeyEnc, config.secretKey!);
+      return { privateKey, publicKey: row.publicKey, ...(config.gitKnownHosts ? { knownHosts: config.gitKnownHosts } : {}) };
+    }
+  : undefined;
 const control = makeControlPlane({
   sessions: store,
   runner,
   getAgent: (id) => store.getAgent(id),
   broadcast,
+  getGitSsh,
   // Persist coding-agent output as real channel messages (survives session restart; renders as
   // markdown) — through the GOVERNED append: the channel's marking stamps the output, portion
   // markings fold/spillage-check, and DLP scans it like any human post (block ⇒ a clean withheld
@@ -224,6 +238,9 @@ const server = createHttpServer({
   // subscribeAll snapshot note in ws/hub.ts) — lazy like `broadcast`, since hub is created after.
   subscribe: (sub, channelId) => hub?.subscribe(sub, channelId),
   attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
+  // Per-user git SSH identities (POST/GET/DELETE /me/ssh-key). Present only when a master key is
+  // configured; unset ⇒ those routes 503 (feature off).
+  ssh: config.secretKey ? { secretKey: config.secretKey, knownHosts: config.gitKnownHosts } : undefined,
 });
 hub = attachWsHub(server, {
   verifyToken,
