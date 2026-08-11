@@ -379,6 +379,60 @@ void main() {
     expect(_fieldText(tester), 'hey @aliceng ');
   });
 
+  testWidgets('Up arrow recalls sent messages from an empty field; Up/Down walk history', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: MessageComposer(onSend: (text, marking, _) async {}))),
+    );
+
+    Future<void> send(String text) async {
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+      await tester.pump();
+    }
+
+    await send('first message');
+    await send('second message');
+    expect(_fieldText(tester), ''); // cleared after send
+
+    // Focus the (empty) field; Up pulls in the most recent sent message.
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(_fieldText(tester), 'second message');
+
+    // Up again walks to the older one; Down walks back.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(_fieldText(tester), 'first message');
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(_fieldText(tester), 'second message');
+
+    // Down past the newest returns to an empty live input.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(_fieldText(tester), '');
+  });
+
+  testWidgets('Up arrow does NOT recall when the field already has text', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: MessageComposer(onSend: (text, marking, _) async {}))),
+    );
+    await tester.enterText(find.byType(TextField), 'sent one');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    await tester.pump();
+
+    // Type a fresh draft, then Up: the field is non-empty, so history must NOT clobber it.
+    await tester.enterText(find.byType(TextField), 'a new draft');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(_fieldText(tester), 'a new draft');
+  });
+
   testWidgets('Ctrl+V of higher-marked in-app content into a marked channel is blocked', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;

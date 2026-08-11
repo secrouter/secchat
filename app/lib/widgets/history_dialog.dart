@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../formatting.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'brand_icon.dart';
 import 'markdown_text.dart';
 
 /// Read-only viewer for a message's edit history (from `GET
@@ -35,7 +36,7 @@ class _HistoryDialog extends StatelessWidget {
       ),
       title: const Row(
         children: [
-          Icon(Icons.history, color: AppColors.accent, size: 20),
+          BrandIcon('history', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
           Text(
             'Edit history',

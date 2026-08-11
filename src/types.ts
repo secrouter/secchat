@@ -579,7 +579,9 @@ export interface AgentControl {
   spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession>;
   /** Owner-only (enforced via the gate). Returns the gate decision — deny is not an error. */
   grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
-  sendInput(sessionId: Id, text: string): Promise<void>;
+  /** `authorSub` is who prompted this turn; the control plane uses it to enforce that only the
+   * owner's prompt can drive a mutation (a secondary participant is plan-mode-only). */
+  sendInput(sessionId: Id, text: string, authorSub?: string): Promise<void>;
   getSession(id: Id): Promise<AgentSession | null>;
   /** The current live (starting|active) session for a coding channel, or null if none is running.
    * Read-only — used to reattach a reloaded client to an already-running session (see GET /channels)

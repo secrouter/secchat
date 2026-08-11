@@ -139,11 +139,13 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               TextField(
                 controller: _workspaceController,
                 style: const TextStyle(color: AppColors.text, fontSize: 13),
-                decoration: const InputDecoration(hintText: '/Users/you/project — mount a repo for the agent'),
+                decoration: const InputDecoration(hintText: '~/project or /Users/you/project'),
               ),
               const SizedBox(height: 4),
               const Text(
-                'The agent works in this folder (reads freely; edits still need your grant). Leave blank for a private scratch workspace.',
+                'An EXISTING folder on your Mac (~ and absolute paths work). The agent works there — '
+                'reads freely; edits still need your grant. Blank = a private scratch workspace. The '
+                'agent shows its actual workspace when it starts.',
                 style: TextStyle(color: AppColors.textMuted, fontSize: 11.5, height: 1.35),
               ),
             ],

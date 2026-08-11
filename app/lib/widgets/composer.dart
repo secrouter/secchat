@@ -129,6 +129,16 @@ class _MessageComposerState extends State<MessageComposer> {
   final List<Attachment> _pending = [];
   bool _attaching = false;
 
+  /// Shell-style recall: the messages this composer has sent (oldest → newest).
+  /// [_histPos] points into it; `_histPos == _sentHistory.length` means "at the
+  /// live input" (not browsing). Up from an EMPTY field pulls in the last sent
+  /// message; further Up/Down then walk the history. [_applyingHistory] guards
+  /// the text listener so a recall doesn't reset the position as if the user
+  /// typed.
+  final List<String> _sentHistory = [];
+  int _histPos = 0;
+  bool _applyingHistory = false;
+
   /// The categories the deployment offers for the currently-selected level.
   List<MarkingCategory> get _availableCategories =>
       widget.markingCategories.where((c) => c.level == _marking.toUpperCase()).toList();
@@ -173,10 +183,47 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   void _onTextChanged() {
+    // A genuine edit (not a history recall) means the user is typing here-and-now: leave history
+    // browsing and return to the live input.
+    if (!_applyingHistory) _histPos = _sentHistory.length;
     // A non-empty edit means the user is typing — let the screen emit a (debounced) signal.
     if (_controller.text.trim().isNotEmpty) widget.onTyping?.call();
     widget.onDraftChanged?.call(_controller.text); // persist the per-channel draft
     setState(() {});
+  }
+
+  /// Puts [text] in the field (from history), caret at the end, WITHOUT counting as a user edit.
+  void _setFromHistory(String text) {
+    _applyingHistory = true;
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _applyingHistory = false;
+  }
+
+  /// Up/Down history recall. Returns true when it consumed the key. Up only starts from an EMPTY,
+  /// non-browsing field (so Up still moves the caret in a multi-line draft); once browsing, Up/Down
+  /// walk older/newer, and Down past the newest returns to an empty live input.
+  bool _recallHistory({required bool older}) {
+    final atLive = _histPos >= _sentHistory.length;
+    if (older) {
+      if (atLive) {
+        if (_controller.text.isNotEmpty || _sentHistory.isEmpty) return false;
+        _histPos = _sentHistory.length - 1;
+      } else if (_histPos > 0) {
+        _histPos--;
+      } else {
+        return true; // already at the oldest — consume, don't move
+      }
+      _setFromHistory(_sentHistory[_histPos]);
+      return true;
+    }
+    // newer
+    if (atLive) return false;
+    _histPos++;
+    _setFromHistory(_histPos >= _sentHistory.length ? '' : _sentHistory[_histPos]);
+    return true;
   }
 
   bool get _canSend =>
@@ -200,6 +247,13 @@ class _MessageComposerState extends State<MessageComposer> {
     if (ctrl && key == LogicalKeyboardKey.keyV && widget.clipboardGuard != null) {
       unawaited(_guardedPaste());
       return KeyEventResult.handled;
+    }
+
+    // Up/Down recall previously-sent messages (shell-style). Up only fires from an empty field; once
+    // browsing, both walk the history. Ignored otherwise, so normal caret movement still works.
+    if (key == LogicalKeyboardKey.arrowUp || key == LogicalKeyboardKey.arrowDown) {
+      final consumed = _recallHistory(older: key == LogicalKeyboardKey.arrowUp);
+      return consumed ? KeyEventResult.handled : KeyEventResult.ignored;
     }
 
     // Tab accepts the top autocomplete suggestion: a `@`-mention (username) if the caret is in one,
@@ -238,6 +292,12 @@ class _MessageComposerState extends State<MessageComposer> {
   Future<void> _handleSend() async {
     final text = _controller.text.trim();
     if ((text.isEmpty && _pending.isEmpty) || _sending || !widget.enabled) return;
+    // Record the sent text for Up-arrow recall (skip a pure-attachment send, and don't stack an
+    // immediate duplicate). Reset the browse position to the live input.
+    if (text.isNotEmpty && (_sentHistory.isEmpty || _sentHistory.last != text)) {
+      _sentHistory.add(text);
+    }
+    _histPos = _sentHistory.length;
     final attachmentIds = _pending.map((a) => a.id).toList();
     final staged = List<Attachment>.of(_pending);
     setState(() {
