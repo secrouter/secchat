@@ -5,9 +5,9 @@ purpose-built replacement for the Mattermost-based `secchat` and the LibreChat-b
 `secassist`. One app: people talk to each other, spawn governed agents, and every message is
 tamper-evidently logged.
 
-> **Status: this rebuild is the canonical SecChat.** SecDeploy ships it as the `secchat`
-> component, replacing the former Mattermost/LibreChat stacks. The work lives on the
-> `rearchitecture` branch pending promotion to the repo default. See `docs/` for the design.
+> **Status: this rebuild is the canonical SecChat** — it is the default branch (`main`). SecDeploy
+> ships it as the `secchat` component, replacing the former Mattermost/LibreChat stacks. See
+> `docs/` for the design.
 
 ## Why it exists
 
