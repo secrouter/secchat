@@ -560,7 +560,13 @@ class _MessageBubble extends StatelessWidget {
       ],
     );
 
-    final avatar = _Avatar(ref: message.authorRef, isAgent: isAgent);
+    final avatar = _Avatar(
+      ref: message.authorRef,
+      isAgent: isAgent,
+      // Initials come from the display name, not the opaque sub — an agent carries its own name,
+      // a user resolves through the directory.
+      label: isAgent ? (message.displayName ?? message.authorRef) : labelForSub(message.authorRef),
+    );
 
     final BoxDecoration decoration;
     if (isAgent) {
@@ -619,10 +625,14 @@ class _MessageBubble extends StatelessWidget {
 }
 
 class _Avatar extends StatelessWidget {
-  const _Avatar({required this.ref, required this.isAgent});
+  const _Avatar({required this.ref, required this.isAgent, this.label});
 
   final String ref;
   final bool isAgent;
+
+  /// The display name to derive initials from. Null ⇒ fall back to [ref] (which,
+  /// for a user, is the opaque sub — so pass a resolved name to avoid hash letters).
+  final String? label;
 
   @override
   Widget build(BuildContext context) {
@@ -640,7 +650,7 @@ class _Avatar extends StatelessWidget {
       child: isAgent
           ? const Icon(Icons.auto_awesome, size: 13, color: AppColors.accent)
           : Text(
-              initialsFor(ref),
+              initialsFor(label ?? ref),
               style: const TextStyle(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
