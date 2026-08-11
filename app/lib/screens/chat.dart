@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -8,10 +9,12 @@ import '../formatting.dart';
 import '../clipboard_guard.dart';
 import '../marking.dart';
 import '../platform/file_transfer.dart';
+import '../mentions.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
 import '../widgets/badges.dart';
+import '../widgets/coding_agent_dialog.dart';
 import '../widgets/coding_strip.dart';
 import '../widgets/composer.dart';
 import '../widgets/edit_dialog.dart';
@@ -96,6 +99,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // Whether the sidebar reveals archived channels (off by default — archiving is
   // the declutter path for heavy testing).
   bool _showArchived = false;
+  bool _sortByUnread = false;
   final Set<String> _endedSessionIds = {};
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
@@ -295,6 +299,29 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
+  /// Pulls any channels not already in the sidebar (e.g. one you were just invited to) and appends
+  /// them, without disturbing the existing list or the current selection. Best-effort — driven by a
+  /// live `membership` add for the current user (see `_handleEvent`).
+  Future<void> _syncChannels() async {
+    try {
+      final fresh = await widget.api.getChannels();
+      if (!mounted) return;
+      final have = _channels.map((c) => c.id).toSet();
+      final added = fresh.where((c) => !have.contains(c.id)).toList();
+      if (added.isEmpty) return;
+      setState(() {
+        for (final c in added) {
+          if (c.agentKind != null) _agentKindByChannel[c.id] = c.agentKind!;
+          if (c.sessionId != null) _sessionIdByChannel[c.id] = c.sessionId!;
+        }
+        _channels = [..._channels, ...added];
+      });
+      unawaited(_loadUnread());
+    } catch (_) {
+      // Non-critical: the channel still appears on the next manual reload.
+    }
+  }
+
   Future<void> _loadChannels() async {
     try {
       final channels = await widget.api.getChannels();
@@ -307,10 +334,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (c.agentKind != null) {
           _agentKindByChannel[c.id] = c.agentKind!;
         }
-        // Recover a coding channel's live session id so a reloaded client routes
-        // input back to the running agent (see `_codingSessionIdFor`) instead of
-        // posting a plain message that never reaches pi. Absent ⇒ no live session;
-        // `_ensureCodingSession` (on select) starts one on demand.
+        // Recover a coding channel's live session id so the coding strip (grant
+        // execute) shows for a reloaded client. Message delivery to pi is handled
+        // server-side now; this is just for the session-scoped UI. Absent ⇒ no live
+        // session; `_ensureCodingSession` (on select) starts one on demand.
         if (c.sessionId != null) {
           _sessionIdByChannel[c.id] = c.sessionId!;
         }
@@ -621,6 +648,9 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             // A BACKGROUND channel got a new message → bump its unread badge live.
             _unreadByChannel[channelId] = (_unreadByChannel[channelId] ?? 0) + 1;
+            // Safety net: a message for a channel not in the sidebar means we were added to it
+            // without seeing the membership event — pull it in so it doesn't stay invisible.
+            if (!_channels.any((c) => c.id == channelId)) unawaited(_syncChannels());
           }
         // Content/social updates apply to any channel's cached transcript (no-op if unloaded), so a
         // background channel stays consistent when re-opened; they don't change unread.
@@ -677,6 +707,18 @@ class _ChatScreenState extends State<ChatScreen> {
           if (isOpen) {
             _typing = null;
             _append(channelId, ErrorEntry(error));
+          }
+        case WsMembershipEvent(:final op, :final memberRef):
+          // A channel I was just added to appears in the sidebar without a reload; one I was removed
+          // from disappears. (A role change needs no sidebar change.) Only my OWN membership matters
+          // here — other people joining/leaving a channel I already see changes nothing in the rail.
+          if (memberRef == widget.principal.sub) {
+            if (op == 'add' && !_channels.any((c) => c.id == channelId)) {
+              unawaited(_syncChannels());
+            } else if (op == 'remove') {
+              _channels = _channels.where((c) => c.id != channelId).toList();
+              if (_selected?.id == channelId) _selected = null;
+            }
           }
       }
     });
@@ -943,16 +985,11 @@ class _ChatScreenState extends State<ChatScreen> {
     _transcripts[channelId] = [...existing, MessageEntry(message)];
   }
 
-  /// The session to drive with `sendInput` for [channelId], or `null` if
-  /// this channel should go through `postMessage` instead -- i.e. it isn't
-  /// a coding-agent channel, or it is one but its session id isn't known
-  /// locally (see the `_agentKindByChannel` doc above: that happens for a
-  /// coding-agent channel from before this session, which degrades to
-  /// looking like a plain agent channel).
-  String? _codingSessionIdFor(String channelId) =>
-      _agentKindByChannel[channelId] == AgentKind.coding
-          ? _sessionIdByChannel[channelId]
-          : null;
+  /// Whether [channelId] is a coding-agent channel. Coding channels disable
+  /// attachments and threads (a linear pi conversation), and `/pi` only works
+  /// in one.
+  bool _isCodingChannel(String channelId) =>
+      _agentKindByChannel[channelId] == AgentKind.coding;
 
   Future<void> _handleSend(String text, String marking, List<String> attachmentIds) async {
     final channel = _selected;
@@ -964,28 +1001,27 @@ class _ChatScreenState extends State<ChatScreen> {
       await _runCommand(channel, command, marking);
       return;
     }
-    // In a coding-agent channel with a live session, EVERY message drives pi (not just /pi). The
-    // backend persists + broadcasts both the prompt and pi's reply, so no local echo is needed.
-    final sessionId = _codingSessionIdFor(channel.id);
-    if (sessionId != null) {
-      try {
-        await widget.api.sendInput(sessionId, text);
-      } catch (error) {
-        _showError(error);
-      }
-      return;
-    }
+    // Every channel — coding-agent channels included — posts through the same message path. The
+    // backend forwards a coding channel's messages to pi (with a "who posted it" header) and
+    // persists pi's reply, so there's no separate client-side session-drive path any more.
     await _sendPlain(channel, text, marking, attachmentIds);
   }
 
-  /// Picks + uploads files for [channel] (at the channel's marking when it's marked), returning the
-  /// created attachments to stage. Used by the composer's attach affordance.
+  /// Picks (browser dialog on web) + uploads files for [channel], returning the created attachments
+  /// to stage. Used by the composer's attach affordance. On desktop, drag-and-drop uses
+  /// [_uploadPickedFiles] directly (there's no native pick dialog here — see file_transfer_stub).
   Future<List<Attachment>> _attachFiles(Channel channel) async {
     final picked = await pickFiles();
-    if (picked.isEmpty) return const [];
+    return _uploadPickedFiles(channel, picked);
+  }
+
+  /// Uploads already-obtained [files] to [channel] (at the channel's marking when it's marked),
+  /// returning the created attachments to stage. Shared by the attach button and desktop drag-drop.
+  Future<List<Attachment>> _uploadPickedFiles(Channel channel, List<PickedFile> files) async {
+    if (files.isEmpty) return const [];
     final marking = channel.isMarked ? channel.cuiMarking : null;
     final uploaded = <Attachment>[];
-    for (final f in picked) {
+    for (final f in files) {
       uploaded.add(await widget.api.uploadAttachment(
         channel.id,
         bytes: f.bytes,
@@ -997,18 +1033,12 @@ class _ChatScreenState extends State<ChatScreen> {
     return uploaded;
   }
 
-  /// Sends ordinary (non-command) text: to the coding-agent session when this
-  /// channel has one, otherwise as a chat message at classification [marking].
+  /// Sends ordinary (non-command) text as a chat message at classification
+  /// [marking]. A coding-agent channel is no different here: the message is
+  /// posted like any other, and the BACKEND forwards it to the agent's pi
+  /// session (with a "who posted it" header) and persists pi's reply — so the
+  /// whole exchange flows through the same message infrastructure.
   Future<void> _sendPlain(Channel channel, String text, String marking, List<String> attachmentIds) async {
-    final sessionId = _codingSessionIdFor(channel.id);
-    if (sessionId != null) {
-      // A coding agent is driven by its runner, not chat history: input goes to
-      // the session. The backend persists + broadcasts BOTH the prompt (as a real
-      // `message`) and pi's reply, so the line comes back over the channel socket
-      // -- no local echo (which would double it).
-      await widget.api.sendInput(sessionId, text);
-      return;
-    }
     // Append straight from the POST response rather than waiting for a WS
     // echo (some backends don't echo the sender's own message back to
     // them); `_appendMessageUnlessDuplicate` dedupes by id in case the
@@ -1060,43 +1090,49 @@ class _ChatScreenState extends State<ChatScreen> {
           );
           return;
         }
-        final sessionId = _codingSessionIdFor(channel.id);
-        if (sessionId == null) {
-          _showError(
-            '/pi works only in a coding-agent channel with an active session.',
-          );
+        if (_agentKindByChannel[channel.id] != AgentKind.coding) {
+          _showError('/pi works only in a coding-agent channel.');
           return;
         }
-        // The backend persists + broadcasts the prompt as a message, so no local echo.
-        await widget.api.sendInput(sessionId, input);
+        // Every message in a coding channel already goes to pi; `/pi` is now just an explicit way
+        // to post one. It flows through the normal message path (backend forwards it to pi).
+        await _sendPlain(channel, input, marking, const []);
     }
   }
 
   /// `/invite <name-or-email>` — resolve the query against the seen-users directory and add that
-  /// user to the current team channel. Only human channels (a DM's pair is fixed; an agent channel
-  /// is owner+agent). A user who has never signed in isn't in the directory yet, so can't be found.
+  /// user to the current channel. Team channels AND agent/assistant channels are collaborative —
+  /// multiple people can share one agent — so both accept invites; only a DM (whose pair is fixed)
+  /// does not. A user who has never signed in isn't in the directory yet, so can't be found.
   Future<void> _inviteToChannel(Channel channel, String query) async {
     if (query.isEmpty) {
       _showError('Usage: /invite <name-or-email>');
       return;
     }
-    if (channel.kind != ChannelKind.human) {
-      _showError('/invite works in a team channel — not a DM or agent channel.');
+    if (channel.kind == ChannelKind.dm) {
+      _showError("/invite doesn't work in a direct message — its two participants are fixed.");
       return;
     }
-    final q = query.toLowerCase();
-    final matches = _usersBySub.values
-        .where((u) =>
-            u.sub == query ||
-            (u.email != null && u.email!.toLowerCase() == q) ||
-            (u.displayName != null && u.displayName!.toLowerCase() == q))
-        .toList();
+    // Refresh the directory first — exactly like the "New DM" picker does — so a failed or raced
+    // initial load (it's fire-and-forget in initState, and errors are swallowed) can't leave invite
+    // matching against an empty roster while DMs, which reload, still work.
+    await _loadUsers();
+    if (!mounted) return;
+    final candidates = _usersBySub.values.where((u) => u.sub != widget.principal.sub).toList();
+    if (candidates.isEmpty) {
+      _showError('The user directory is empty or unavailable right now — try again in a moment.');
+      return;
+    }
+    // Tiered match so a first name or partial works, but an exact hit always wins over a looser one:
+    // exact (sub/email/display name) → prefix on name/email → substring. Case-insensitive throughout.
+    final matches = _matchUsers(candidates, query);
     if (matches.isEmpty) {
       _showError('No user matching "$query" — they may need to sign in once first.');
       return;
     }
     if (matches.length > 1) {
-      _showError('"$query" matches ${matches.length} users — try their email to disambiguate.');
+      final names = matches.take(5).map((u) => u.label).join(', ');
+      _showError('"$query" matches ${matches.length}: $names — be more specific or use their email.');
       return;
     }
     final user = matches.first;
@@ -1110,6 +1146,40 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (error) {
       _showError(error);
     }
+  }
+
+  /// Finds directory [users] matching [query] case-insensitively, preferring the
+  /// tightest tier that yields a hit: exact (sub / email / display name), then a
+  /// prefix of the display name or email, then a substring. Empty when nothing
+  /// matches at any tier. Shared by `/invite` and username tab-completion so they
+  /// resolve names the same forgiving way (a first name or partial is enough).
+  List<User> _matchUsers(List<User> users, String query) {
+    // Accept an @-handle too — that's what mention autocomplete inserts (e.g. "@aliceng", spaces
+    // stripped) and what shows in the suggestion strip, so `/invite @aliceng` must resolve
+    // "Alice Ng". Strip a leading "@" and match the derived mention handle alongside name/email/sub.
+    final raw = query.trim();
+    final q = (raw.startsWith('@') ? raw.substring(1) : raw).toLowerCase();
+    if (q.isEmpty) return const [];
+    String? name(User u) => u.displayName?.toLowerCase();
+    String? email(User u) => u.email?.toLowerCase();
+    String handle(User u) => mentionHandle(u); // already lowercased, [a-z0-9._-]
+    final exact = users
+        .where((u) => u.sub.toLowerCase() == q || name(u) == q || email(u) == q || handle(u) == q)
+        .toList();
+    if (exact.isNotEmpty) return exact;
+    final prefix = users
+        .where((u) =>
+            (name(u)?.startsWith(q) ?? false) ||
+            (email(u)?.startsWith(q) ?? false) ||
+            handle(u).startsWith(q))
+        .toList();
+    if (prefix.isNotEmpty) return prefix;
+    return users
+        .where((u) =>
+            (name(u)?.contains(q) ?? false) ||
+            (email(u)?.contains(q) ?? false) ||
+            handle(u).contains(q))
+        .toList();
   }
 
   void _showCommandHelp() {
@@ -1241,19 +1311,40 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _handleNewAgent(AgentKind kind) async {
-    final isCoding = kind == AgentKind.coding;
+    if (kind == AgentKind.coding) {
+      await _handleNewCodingAgent();
+      return;
+    }
     final name = await showNewItemDialog(
       context,
-      title: isCoding ? 'New coding agent' : 'New assistant',
-      description: isCoding
-          ? 'Starts a coding session; tool execution is gated behind an '
-                'explicit grant.'
-          : 'Starts a conversational assistant in its own channel.',
+      title: 'New assistant',
+      description: 'Starts a conversational assistant in its own channel.',
       hint: 'e.g. release-helper',
     );
     if (name == null || !mounted) return;
+    await _createAgent(kind, name, null);
+  }
+
+  /// A coding agent must run in a launch environment (the user's desktop app, or
+  /// the online pool once deployed). Fetch what's available, let the user pick,
+  /// then create there — the backend blocks an unavailable choice.
+  Future<void> _handleNewCodingAgent() async {
+    List<LaunchEnv> envs;
     try {
-      final result = await widget.api.createAgent(kind: kind, name: name);
+      envs = await widget.api.getLaunchEnvironments();
+    } catch (error) {
+      _showError(error);
+      return;
+    }
+    if (!mounted) return;
+    final choice = await showCodingAgentDialog(context, environments: envs);
+    if (choice == null || !mounted) return;
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace);
+  }
+
+  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv, [String? workspace]) async {
+    try {
+      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv, workspace: workspace);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;
@@ -1315,6 +1406,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   showArchived: _showArchived,
                   onToggleShowArchived: () =>
                       setState(() => _showArchived = !_showArchived),
+                  sortByUnread: _sortByUnread,
+                  onToggleSort: () => setState(() => _sortByUnread = !_sortByUnread),
                 ),
                 Expanded(child: _buildMain()),
               ],
@@ -1385,8 +1478,11 @@ class _ChatScreenState extends State<ChatScreen> {
             // Keyed per channel so switching re-creates the composer, seeding its own channel's draft.
             key: ValueKey('composer-${selected.id}'),
             onSend: _handleSend,
-            // Attach files on chat channels; coding-agent channels are runner-driven (no attach).
-            onAttach: _codingSessionIdFor(selected.id) == null ? () => _attachFiles(selected) : null,
+            // Attach files on chat channels; coding-agent channels are a linear pi conversation (no attach).
+            // The attach BUTTON needs a file dialog, which only exists on web (native file picking is
+            // a stub — see file_transfer_stub); on desktop, drag-and-drop is the upload path instead.
+            onAttach: (_isCodingChannel(selected.id) || !kIsWeb) ? null : () => _attachFiles(selected),
+            onDropUpload: _isCodingChannel(selected.id) ? null : (files) => _uploadPickedFiles(selected, files),
             onTyping: () => _emitTyping(selected.id),
             initialText: _draftsByChannel[selected.id] ?? '',
             onDraftChanged: (text) => _draftsByChannel[selected.id] = text,
@@ -1428,9 +1524,9 @@ class _ChatScreenState extends State<ChatScreen> {
         topLevel.add(entry);
       }
     }
-    // Threads are a chat-channel affordance; coding-agent channels are
-    // runner-driven, so no threading there.
-    final canThread = _codingSessionIdFor(selected.id) == null;
+    // Threads are a chat-channel affordance; a coding-agent channel is a linear
+    // pi conversation, so no threading there.
+    final canThread = !_isCodingChannel(selected.id);
     return MessageList(
       entries: topLevel,
       typing: _typing,
@@ -1495,7 +1591,8 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         MessageComposer(
           onSend: (text, marking, attachmentIds) => _sendReply(channel, parent.id, text, marking, attachmentIds),
-          onAttach: () => _attachFiles(channel),
+          onAttach: kIsWeb ? () => _attachFiles(channel) : null, // web-only file dialog; desktop uses drop
+          onDropUpload: (files) => _uploadPickedFiles(channel, files),
           markingLevels: widget.principal.marking.levels,
           markingCategories: widget.principal.marking.categories,
           markingPolicy: widget.principal.marking,

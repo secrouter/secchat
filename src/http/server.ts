@@ -12,6 +12,9 @@ import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
+import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
+import { canGrantExecute } from "../agent/gate.ts";
+import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -220,6 +223,44 @@ async function triggerAssistants(
   }
 }
 
+/** The coding-agent counterpart to triggerAssistants: forward a human message posted in a coding
+ * channel to that agent's pi session, prefixed with a header naming who posted it. A coding channel
+ * can have several members, so pi needs to know whose turn each message is. Ensures a live session
+ * first — reusing the running one, or spawning a fresh one if the prior died (e.g. a restart) — so a
+ * message never silently fails to reach pi. pi's REPLY comes back through the control plane and is
+ * persisted as a normal channel message (see control.ts), so the whole exchange lives in chat
+ * history exactly like the assistant path. Fire-and-forget from the route (the POST already
+ * returned); errors are swallowed here — the control plane surfaces session failures on its own. */
+async function triggerCodingAgents(
+  store: Store,
+  control: AgentControl,
+  hasRemoteRunner: ((ownerSub: string) => boolean) | undefined,
+  channelId: string,
+  authorSub: string,
+  content: string,
+): Promise<void> {
+  if (content.trim() === "") return;
+  const agentMember = (await store.listMembers(channelId)).find((m) => m.memberType === "agent");
+  if (!agentMember) return;
+  const agent = await store.getAgent(agentMember.memberRef);
+  if (agent?.kind !== "coding") return;
+  // Reuse the live session, or (re)spawn one so a post always reaches pi — even the first message
+  // after a reload/restart, when no session is running yet.
+  let session = await control.liveSession(channelId);
+  if (!session) {
+    const hostType = hasRemoteRunner?.(agent.ownerSub) ? "local" : "server";
+    session = await control.spawn({ agent, channelId, hostType });
+  }
+  const user = await store.getUser(authorSub);
+  const who = user?.displayName?.trim() || authorSub;
+  // "authorized" = may this sender authorize edits? That's exactly the gate's owner-only rule, reused
+  // here (not re-derived) so the envelope can't disagree with what the gate will actually enforce.
+  const authorized = canGrantExecute(agent, authorSub).allow;
+  // Deliver as a JSON envelope naming the sender + their edit authority; pi was primed for this shape
+  // at spawn (AGENT_CHAT_PRIMER). Keeps multi-member channels legible to the agent.
+  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized));
+}
+
 function buildRouter(
   store: Store,
   marking: MarkingPolicy,
@@ -380,6 +421,9 @@ function buildRouter(
     await store.addMember({ channelId: channel.id, memberRef: other, memberType: "user", role: "member" });
     subscribe?.(principal.sub, channel.id);
     subscribe?.(other, channel.id);
+    // Tell the peer they're in a new DM so it appears in their sidebar live (same membership signal
+    // the invite path sends) — the creator adds it locally from this response.
+    notify?.(other, { type: "membership", channelId: channel.id, op: "add", memberRef: other, role: "member" });
     await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: other });
     sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });
@@ -688,6 +732,10 @@ function buildRouter(
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
     if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel);
+    // Same shape for a coding agent: forward the message to its pi session with a "who posted it"
+    // header; pi's reply comes back as a persisted message. Fire-and-forget — errors are the control
+    // plane's to surface.
+    if (control) void triggerCodingAgents(store, control, hasRemoteRunner, channelId, principal.sub, content).catch(() => {});
   });
 
   // ── Attachments: upload (unclaimed) then reference from a message post (attach-on-post). Bytes are
@@ -1166,9 +1214,36 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; launchEnv?: string; workspace?: string };
     const kind = body.kind ?? "assistant";
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model });
+    // A coding agent may mount a local directory (on its runner daemon's host) as pi's workspace —
+    // e.g. the user's repo. Only meaningful for a coding agent on the desktop; stored on the agent
+    // and passed to the runner at spawn (control.spawn → runner.start's workspace).
+    const workspace = kind === "coding" && typeof body.workspace === "string" && body.workspace.trim() !== ""
+      ? body.workspace.trim()
+      : undefined;
+    // A coding agent must run in a real launch environment (the user's desktop app, or the online
+    // pool once deployed). Validate the chosen environment BEFORE creating anything, so an
+    // unavailable choice doesn't strand an agent/channel — and never falls back to the demo stub.
+    if (kind === "coding") {
+      if (!control) {
+        sendJson(res, 503, { error: "coding_unavailable", detail: "This deployment has no coding-agent control plane." });
+        return;
+      }
+      const env = resolveLaunchEnv(body.launchEnv, {
+        desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
+        poolConfigured: false, // no online pool deployed yet — flip when it lands
+      });
+      if (!env) {
+        sendJson(res, 400, { error: "unknown_launch_env", detail: `No such launch environment: ${body.launchEnv}` });
+        return;
+      }
+      if (!env.available) {
+        sendJson(res, 409, { error: "launch_env_unavailable", env: env.id, reason: env.reason, detail: env.detail });
+        return;
+      }
+    }
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, workspace });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",
@@ -1202,6 +1277,18 @@ function buildRouter(
 
   router.add("GET", "/agents", async ({ res, principal }) => {
     sendJson(res, 200, await store.listAgentsByOwner(principal.sub));
+  });
+
+  // The launch environments the caller can host a coding agent in right now — the New-Coding-Agent
+  // picker reads this to show what's available (their desktop app connected? the online pool live?)
+  // and to disable what isn't.
+  router.add("GET", "/runner/environments", async ({ res, principal }) => {
+    sendJson(res, 200, {
+      environments: launchEnvironmentsFor({
+        desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
+        poolConfigured: false, // no online pool deployed yet — flip when it lands
+      }),
+    });
   });
 
   // (Re)attach a coding channel to a live runner session. A reloaded client — or one that opens a
@@ -1315,15 +1402,10 @@ function buildRouter(
     }
     const body = (await readJsonBody(req)) as { text?: string };
     const text = body.text ?? "";
-    // Persist the driver's prompt as a real message + broadcast it, so the coding-agent
-    // conversation (their prompts AND pi's replies — see control.ts's output persistence) survives
-    // a session restart / reload and shows for everyone in the channel, not just the sender.
-    if (text.trim() !== "") {
-      const message = await store.appendMessage({ channelId: session.channelId, authorRef: principal.sub, authorType: "user", content: text });
-      // Re-attach the plaintext — the stored row carries only the content HASH (see the POST message
-      // route), so broadcasting it raw would arrive as content == null and render as a redaction.
-      broadcast?.(session.channelId, { type: "message", message: { ...message, content: text } });
-    }
+    // Low-level passthrough: feed text straight to the runner session, WITHOUT persisting or adding
+    // an attribution header. The canonical, persisted path for a coding channel is POST
+    // /channels/:id/messages (triggerCodingAgents forwards it to pi with a "who posted it" header) —
+    // this route stays as a thin primitive for programmatic/test drivers.
     await control.sendInput(params.id!, text);
     sendJson(res, 202, { status: "accepted" });
   });

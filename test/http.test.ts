@@ -125,6 +125,10 @@ const store = {
   async upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }) {
     return { ...input, lastSeenAt: new Date().toISOString() };
   },
+  // Used by triggerCodingAgents to resolve a poster's display name for the "who posted it" header.
+  async getUser(sub: string) {
+    return sub === "user-1" ? { sub, displayName: "Alice One", groups: [] } : null;
+  },
   async isMember(channelId: string, ref: string) {
     return knownChannelIds.has(channelId) && (channelMembers.get(channelId)?.has(ref) ?? false);
   },
@@ -335,7 +339,9 @@ let controlServer: Server;
 let controlBaseUrl: string;
 
 before(async () => {
-  controlServer = createHttpServer({ verifyToken, store, control });
+  // hasRemoteRunner: () => true ⇒ the "desktop" launch environment is available, so POST /agents
+  // coding is allowed (a coding agent now requires a real launch environment, never the demo stub).
+  controlServer = createHttpServer({ verifyToken, store, control, hasRemoteRunner: () => true });
   await new Promise<void>((resolve) => controlServer.listen(0, resolve));
   const address = controlServer.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
@@ -796,36 +802,111 @@ test("POST /sessions/:id/input accepts input for a session", async () => {
   assert.ok(controlCalls.sendInput.some((c) => (c as { sessionId: string; text: string }).text === "hello agent"));
 });
 
-test("POST /sessions/:id/input broadcasts the prompt as a message WITH plaintext content (not a redaction tombstone)", async () => {
-  // Regression: the stored row carries only the content HASH, so broadcasting it raw arrives with
-  // content == null and the client renders it as "message redacted". The route must re-attach the
-  // plaintext, exactly like the POST message route does.
-  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
-  const server = createHttpServer({
-    verifyToken,
-    store,
-    control,
-    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+test("GET /runner/environments reports desktop connected (this server) and the pool as not-yet-deployed", async () => {
+  const res = await fetch(`${controlBaseUrl}/runner/environments`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { environments: Array<{ id: string; available: boolean; reason: string }> };
+  const byId = Object.fromEntries(body.environments.map((e) => [e.id, e]));
+  assert.equal(byId.desktop!.available, true); // controlServer wires hasRemoteRunner: () => true
+  assert.equal(byId.pool!.available, false);
+  assert.equal(byId.pool!.reason, "not_deployed");
+});
+
+test("POST /agents coding is 409 when the chosen launch environment isn't available", async () => {
+  // baseUrl's server has no control plane AND no hasRemoteRunner, so no environment is available.
+  const noEnv = await fetch(`${baseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "x" }),
   });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  try {
-    const address = server.address();
-    const port = typeof address === "object" && address !== null ? address.port : 0;
-    const res = await fetch(`http://127.0.0.1:${port}/sessions/sess-1/input`, {
-      method: "POST",
-      headers: { authorization: "Bearer good", "content-type": "application/json" },
-      body: JSON.stringify({ text: "run the build" }),
-    });
-    assert.equal(res.status, 202);
-    const messageBroadcasts = broadcasts.filter(
-      (b) => (b.payload as { type?: string }).type === "message",
-    );
-    assert.equal(messageBroadcasts.length, 1, "exactly one message broadcast for the prompt");
-    const message = (messageBroadcasts[0]!.payload as { message: { content?: string } }).message;
-    assert.equal(message.content, "run the build", "broadcast must carry the plaintext, not a null-content tombstone");
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+  // No control plane ⇒ 503; with a control plane but no runner it would be 409. Either way, never 201.
+  assert.ok(noEnv.status === 503 || noEnv.status === 409, `expected 503/409, got ${noEnv.status}`);
+  assert.notEqual(noEnv.status, 201);
+});
+
+test("POST /agents coding to the online pool is 409 (not deployed) even with a desktop connected", async () => {
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "pooled", launchEnv: "pool" }),
+  });
+  assert.equal(res.status, 409);
+  const body = (await res.json()) as { error: string; env: string };
+  assert.equal(body.error, "launch_env_unavailable");
+  assert.equal(body.env, "pool");
+});
+
+test("POST /agents coding stores a mounted workspace and passes it to the runner at spawn", async () => {
+  const before = controlCalls.spawn.length;
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "repo-bot", launchEnv: "desktop", workspace: "  /Users/me/proj  " }),
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { agent: { workspace?: string } };
+  assert.equal(body.agent.workspace, "/Users/me/proj"); // trimmed
+  const spawned = controlCalls.spawn.slice(before).map((c) => c as { agent: { workspace?: string } });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.agent.workspace, "/Users/me/proj");
+});
+
+test("POST /agents coding with no workspace leaves it unset (per-agent scratch workspace)", async () => {
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "scratch-bot", launchEnv: "desktop" }),
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { agent: { workspace?: string } };
+  assert.equal(body.agent.workspace, undefined);
+});
+
+test("posting a message in a coding channel forwards it to pi as a JSON envelope naming who posted it", async () => {
+  // The canonical path: a normal message post to a coding-agent channel is persisted like any
+  // message AND forwarded to the agent's pi session, prefixed with a header naming the poster.
+  // Make fakeSession's channel a coding-agent channel so triggerCodingAgents fires; the fake
+  // liveSession returns fakeSession for it, so the reuse (not spawn) path runs.
+  const coder = await store.createAgent({ ownerSub: "user-1", kind: "coding", name: "Builder" });
+  await store.addMember({ channelId: fakeSession.channelId, memberRef: coder.id, memberType: "agent", role: "member" });
+  const before = controlCalls.sendInput.length;
+  const res = await fetch(`${controlBaseUrl}/channels/${fakeSession.channelId}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ content: "run the build" }),
+  });
+  assert.equal(res.status, 201);
+  // triggerCodingAgents is fire-and-forget after the 201 — let the microtasks/timer drain.
+  await new Promise((r) => setTimeout(r, 30));
+  const forwarded = controlCalls.sendInput
+    .slice(before)
+    .map((c) => c as { sessionId: string; text: string });
+  assert.equal(forwarded.length, 1, "exactly one forward to pi");
+  assert.equal(forwarded[0]!.sessionId, fakeSession.id);
+  // Delivered as a JSON envelope naming the sender + their edit authority (pi is primed for this
+  // shape at spawn). user-1 owns the agent, so authorized is true.
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build", authorized: true });
+});
+
+test("the envelope's authorized flag is false for a non-owner sender (only the owner may trigger edits)", async () => {
+  // A coding agent owned by user-1, in a channel where user-2 is a plain member. user-2 can talk to
+  // the agent (plan mode) but can't authorize edits — the envelope must say so, matching the gate.
+  const coder = await store.createAgent({ ownerSub: "user-1", kind: "coding", name: "Builder2" });
+  const chId = "coding-ch-nonowner";
+  knownChannelIds.add(chId);
+  await store.addMember({ channelId: chId, memberRef: coder.id, memberType: "agent", role: "member" });
+  await store.addMember({ channelId: chId, memberRef: "user-2", memberType: "user", role: "member" });
+  const before = controlCalls.sendInput.length;
+  const res = await fetch(`${controlBaseUrl}/channels/${chId}/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer good2", "content-type": "application/json" },
+    body: JSON.stringify({ content: "please edit the config" }),
+  });
+  assert.equal(res.status, 201);
+  await new Promise((r) => setTimeout(r, 30));
+  const forwarded = controlCalls.sendInput.slice(before).map((c) => c as { sessionId: string; text: string });
+  assert.equal(forwarded.length, 1);
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "user-2", message: "please edit the config", authorized: false });
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {

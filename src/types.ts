@@ -95,6 +95,11 @@ export interface Agent {
   kind: AgentKind;
   name?: string;
   model?: string; // SecRouter model id used for the assistant path
+  /** For a coding agent: an absolute LOCAL directory (on the host running its runner daemon) that
+   * pi operates in — a "mounted" folder, e.g. the user's repo. Unset ⇒ a private per-agent scratch
+   * workspace. Only meaningful for the "desktop" launch environment (a local path on the pool would
+   * be invalid). */
+  workspace?: string;
   createdAt: string;
 }
 

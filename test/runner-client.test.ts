@@ -22,6 +22,26 @@ function fakeRunner() {
   return { runner, calls, emit: (sid: Id, ev: RunnerEvent) => emit?.(sid, ev) };
 }
 
+test("a client rebuilt on reconnect, sharing the live set, still heartbeats sessions from before the drop", async () => {
+  // The daemon shares one live-session set across every reconnect so a rebuilt client keeps renewing
+  // the leases of sessions whose pi processes survived the socket blip (else they'd be reaped).
+  const live = new Set<Id>();
+  const f1 = fakeRunner();
+  const sent1: RunnerMessage[] = [];
+  const c1 = makeRunnerClient({ runner: f1.runner, send: (m) => sent1.push(m), live });
+  await c1.handleCommand(JSON.stringify({ type: "start", sessionId: "s1", agentId: "a1", ownerSub: "alice" }));
+  assert.deepEqual(c1.sessions(), ["s1"]);
+
+  // Socket drops → a NEW client is built for the reconnect, sharing the same live set. It never
+  // re-receives `start`, but still knows s1 is live and heartbeats it.
+  const f2 = fakeRunner();
+  const sent2: RunnerMessage[] = [];
+  const c2 = makeRunnerClient({ runner: f2.runner, send: (m) => sent2.push(m), live });
+  assert.deepEqual(c2.sessions(), ["s1"]);
+  c2.beat();
+  assert.ok(sent2.some((m) => m.type === "heartbeat" && m.sessionIds?.includes("s1")));
+});
+
 test("daemon bridge: commands drive the runner, events go up, and the gate is NOT decided locally", async () => {
   const f = fakeRunner();
   const sent: RunnerMessage[] = [];
@@ -54,12 +74,14 @@ test("daemon bridge: commands drive the runner, events go up, and the gate is NO
   client.beat();
   assert.ok(sent.some((m) => m.type === "heartbeat" && m.sessionIds?.includes("s1")));
 
-  // Exit forgets the session — an idle daemon then sends no heartbeat.
+  // Exit forgets the session; an idle daemon still beats — a keepalive with no session ids, which
+  // renews nothing but keeps an idle proxy from closing the /runner socket.
   f.emit("s1", { type: "exit" });
   assert.deepEqual(client.sessions(), []);
   sent.length = 0;
   client.beat();
-  assert.equal(sent.length, 0);
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0]!.type === "heartbeat" && (sent[0] as { sessionIds?: string[] }).sessionIds?.length === 0);
 });
 
 test("daemon bridge: a malformed command frame is ignored, not thrown", async () => {

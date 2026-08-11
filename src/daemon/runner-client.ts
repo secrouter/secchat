@@ -23,8 +23,15 @@ export interface RunnerClient {
   sessions(): Id[];
 }
 
-export function makeRunnerClient(deps: { runner: Runner; send: (msg: RunnerMessage) => void }): RunnerClient {
-  const live = new Set<Id>();
+export function makeRunnerClient(deps: {
+  runner: Runner;
+  send: (msg: RunnerMessage) => void;
+  /** Live-session set shared across reconnects (created once for the daemon's lifetime), so a client
+   * rebuilt after a socket drop still knows which sessions to heartbeat — the pi processes survive
+   * the drop, so their leases must keep being renewed. Defaults to a private set for tests. */
+  live?: Set<Id>;
+}): RunnerClient {
+  const live = deps.live ?? new Set<Id>();
 
   // Forward every local runner event up to SecChat; forget a session once it exits.
   deps.runner.onEvent((sessionId, event) => {
@@ -58,7 +65,10 @@ export function makeRunnerClient(deps: { runner: Runner; send: (msg: RunnerMessa
       }
     },
     beat() {
-      if (live.size > 0) deps.send({ type: "heartbeat", sessionIds: [...live] });
+      // Always send a heartbeat, even with no live sessions: besides renewing session leases, it's
+      // the application-level keepalive that stops an idle proxy from closing the /runner socket
+      // (the churn that was killing sessions). An empty sessionIds list renews nothing, harmlessly.
+      deps.send({ type: "heartbeat", sessionIds: [...live] });
     },
     sessions() {
       return [...live];

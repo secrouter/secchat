@@ -453,9 +453,12 @@ class _MessageBubble extends StatelessWidget {
           children: [
             Flexible(
               child: Text(
-                // Resolve a user's sub to their display name; an agent's ref
-                // isn't in the user directory, so it shows as-is.
-                isAgent ? message.authorRef : labelForSub(message.authorRef),
+                // An agent's ref isn't in the user directory, so its byline uses the agent's own
+                // display name (carried on the message) and falls back to the ref only if unset;
+                // a human's sub resolves through the directory.
+                isAgent
+                    ? (message.displayName?.isNotEmpty == true ? message.displayName! : message.authorRef)
+                    : labelForSub(message.authorRef),
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 13.5,

@@ -48,9 +48,14 @@ export function makeControlPlane(deps: {
         if (deps.appendAgentMessage) {
           const message = await deps.appendAgentMessage(session.channelId, session.agentId, event.text);
           // The stored row carries only the content HASH (never the plaintext — see the POST message
-          // route). Re-attach the plaintext before broadcasting, or the client sees content == null
-          // and renders the message as a redaction tombstone.
-          deps.broadcast?.(session.channelId, { type: "message", message: { ...message, content: event.text } });
+          // route), and no display name. Re-attach the plaintext (else the client renders a redaction
+          // tombstone) and the agent's name + kind (else the byline shows the opaque agent id) —
+          // matching how GET /channels/:id/messages enriches history.
+          const agent = await deps.getAgent(session.agentId);
+          deps.broadcast?.(session.channelId, {
+            type: "message",
+            message: { ...message, content: event.text, displayName: agent?.name, agentKind: agent?.kind },
+          });
         } else {
           deps.broadcast?.(session.channelId, { type: "agent_output", sessionId, text: event.text });
         }
@@ -115,7 +120,14 @@ export function makeControlPlane(deps: {
       leaseExpiresAt: new Date(now() + leaseTtlMs).toISOString(),
     });
 
-    await deps.runner.start({ sessionId: session.id, agentId: input.agent.id, ownerSub: input.agent.ownerSub });
+    await deps.runner.start({
+      sessionId: session.id,
+      agentId: input.agent.id,
+      ownerSub: input.agent.ownerSub,
+      // A coding agent's mounted local directory (if any) becomes pi's cwd; omit the key entirely
+      // when unset so the runner falls back to its per-agent scratch workspace.
+      ...(input.agent.workspace ? { workspace: input.agent.workspace } : {}),
+    });
     await deps.sessions.setSessionStatus(session.id, "active");
 
     return { ...session, status: "active" };

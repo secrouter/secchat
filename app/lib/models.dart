@@ -341,6 +341,7 @@ class Message {
     this.dlpFlags = const [],
     this.reactions = const [],
     this.attachments = const [],
+    this.displayName,
   });
 
   final String id;
@@ -349,6 +350,12 @@ class Message {
   final AuthorType authorType;
   final String? content;
   final DateTime createdAt;
+
+  /// The author's display name, when the server enriches it — set for agent
+  /// messages (the agent's name) by both the history endpoint and the live
+  /// `message` broadcast, so the byline shows a name instead of the opaque
+  /// agent id. Null for ordinary user messages (resolved via the directory).
+  final String? displayName;
 
   /// The message's effective classification level (server-stamped, chain-bound).
   /// Shown as a per-message chip when the channel is unmarked; in a marked
@@ -396,6 +403,7 @@ class Message {
     dlpFlags: dlpFlags,
     reactions: reactions,
     attachments: const [], // redacted → files are purged server-side; drop them from the tombstone
+    displayName: displayName,
   );
 
   /// A copy with [reactions] replaced — used to apply live reaction events /
@@ -414,6 +422,7 @@ class Message {
     dlpFlags: dlpFlags,
     reactions: reactions,
     attachments: attachments,
+    displayName: displayName,
   );
 
   /// A copy with new [content] and an [editedAt] stamp — applies an edit (live
@@ -432,6 +441,7 @@ class Message {
     dlpFlags: dlpFlags,
     reactions: reactions,
     attachments: attachments,
+    displayName: displayName,
   );
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
@@ -440,6 +450,7 @@ class Message {
     authorRef: json['authorRef'] as String? ?? '',
     authorType: AuthorType.fromWire(json['authorType'] as String?),
     content: json['content'] as String?,
+    displayName: json['displayName'] as String?,
     createdAt:
         DateTime.tryParse(json['createdAt'] as String? ?? '') ??
         DateTime.now(),
@@ -562,6 +573,34 @@ class AgentSession {
 
   factory AgentSession.fromJson(Map<String, dynamic> json) =>
       AgentSession(id: json['id'] as String);
+}
+
+/// A launch environment for a coding agent (`GET /runner/environments`) — WHERE
+/// its pi session runs: the user's connected desktop app, or the (not-yet-
+/// deployed) online pool. The New-Coding-Agent picker shows these and disables
+/// the ones that aren't [available].
+class LaunchEnv {
+  const LaunchEnv({
+    required this.id,
+    required this.label,
+    required this.available,
+    required this.reason,
+    required this.detail,
+  });
+
+  final String id; // 'desktop' | 'pool'
+  final String label;
+  final bool available;
+  final String reason; // 'connected' | 'not_connected' | 'available' | 'not_deployed'
+  final String detail; // human sentence for the picker / block message
+
+  factory LaunchEnv.fromJson(Map<String, dynamic> json) => LaunchEnv(
+    id: json['id'] as String? ?? '',
+    label: json['label'] as String? ?? (json['id'] as String? ?? ''),
+    available: json['available'] as bool? ?? false,
+    reason: json['reason'] as String? ?? '',
+    detail: json['detail'] as String? ?? '',
+  );
 }
 
 /// `POST /agents` response: the new agent, its channel, and -- for coding
@@ -843,6 +882,22 @@ final class WsChannelMarkingEvent extends WsEvent {
   final String by;
 }
 
+/// A membership change on a channel — someone was added/removed or had their
+/// role changed. Delivered both to the channel and (for the affected user) to
+/// their per-user socket, so a client can pull a newly-joined channel into the
+/// sidebar live, or drop one it was removed from.
+final class WsMembershipEvent extends WsEvent {
+  const WsMembershipEvent({
+    required this.op,
+    required this.memberRef,
+    required this.role,
+    required super.channelId,
+  });
+  final String op; // 'add' | 'remove' | 'role'
+  final String memberRef;
+  final String role;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients. Every frame carries a top-level
@@ -927,6 +982,13 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsPinEvent(
         op: json['op'] as String? ?? 'pin',
         messageId: json['messageId'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'membership':
+      return WsMembershipEvent(
+        op: json['op'] as String? ?? 'add',
+        memberRef: json['memberRef'] as String? ?? '',
+        role: json['role'] as String? ?? 'member',
         channelId: channelId,
       );
     default:
