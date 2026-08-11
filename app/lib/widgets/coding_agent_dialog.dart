@@ -3,15 +3,17 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../theme.dart';
 
-/// The New-Coding-Agent prompt: a name plus a launch-environment choice (WHERE
-/// the agent's pi session runs — the user's desktop app, or the online pool once
-/// it's deployed). Unavailable environments are shown but disabled, with the
-/// reason. Returns the chosen name + environment id, or `null` if cancelled.
-Future<({String name, String launchEnv})?> showCodingAgentDialog(
+/// The New-Coding-Agent prompt: a name, a launch-environment choice (WHERE the
+/// agent's pi session runs — the user's desktop app, or the online pool once it's
+/// deployed), and — for the desktop — an optional local folder to mount as the
+/// agent's workspace (e.g. a repo). Unavailable environments are shown but
+/// disabled, with the reason. Returns the chosen name + environment id + optional
+/// workspace path, or `null` if cancelled.
+Future<({String name, String launchEnv, String? workspace})?> showCodingAgentDialog(
   BuildContext context, {
   required List<LaunchEnv> environments,
 }) {
-  return showDialog<({String name, String launchEnv})>(
+  return showDialog<({String name, String launchEnv, String? workspace})>(
     context: context,
     barrierColor: AppColors.overlay,
     builder: (dialogContext) => _CodingAgentDialog(environments: environments),
@@ -29,6 +31,7 @@ class _CodingAgentDialog extends StatefulWidget {
 
 class _CodingAgentDialogState extends State<_CodingAgentDialog> {
   final _controller = TextEditingController();
+  final _workspaceController = TextEditingController();
   String? _selectedEnv;
 
   @override
@@ -44,16 +47,25 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
   @override
   void dispose() {
     _controller.dispose();
+    _workspaceController.dispose();
     super.dispose();
   }
 
   bool get _canCreate =>
       _controller.text.trim().isNotEmpty && _selectedEnv != null;
 
+  // A mounted folder only makes sense on the desktop (a local path on the pool would be invalid).
+  bool get _showWorkspace => _selectedEnv == 'desktop';
+
   void _submit() {
     final name = _controller.text.trim();
     if (name.isEmpty || _selectedEnv == null) return;
-    Navigator.of(context).pop((name: name, launchEnv: _selectedEnv!));
+    final ws = _showWorkspace ? _workspaceController.text.trim() : '';
+    Navigator.of(context).pop((
+      name: name,
+      launchEnv: _selectedEnv!,
+      workspace: ws.isEmpty ? null : ws,
+    ));
   }
 
   @override
@@ -112,6 +124,29 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               selected: _selectedEnv == env.id,
               onSelect: env.available ? () => setState(() => _selectedEnv = env.id) : null,
             ),
+            if (_showWorkspace) ...[
+              const SizedBox(height: 14),
+              const Text(
+                'LOCAL FOLDER (OPTIONAL)',
+                style: TextStyle(
+                  color: AppColors.textFaint,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                ),
+              ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _workspaceController,
+                style: const TextStyle(color: AppColors.text, fontSize: 13),
+                decoration: const InputDecoration(hintText: '/Users/you/project — mount a repo for the agent'),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'The agent works in this folder (reads freely; edits still need your grant). Leave blank for a private scratch workspace.',
+                style: TextStyle(color: AppColors.textMuted, fontSize: 11.5, height: 1.35),
+              ),
+            ],
             if (!anyAvailable) ...[
               const SizedBox(height: 6),
               const Text(

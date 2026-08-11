@@ -423,17 +423,20 @@ class FakeApiClient implements ApiClient {
     return List.of(launchEnvironments);
   }
 
-  /// The `launchEnv` passed to the most recent [createAgent], if any.
+  /// The `launchEnv` / `workspace` passed to the most recent [createAgent], if any.
   String? lastCreateAgentLaunchEnv;
+  String? lastCreateAgentWorkspace;
 
   @override
   Future<CreateAgentResult> createAgent({
     required AgentKind kind,
     required String name,
     String? launchEnv,
+    String? workspace,
   }) async {
     _maybeThrow('createAgent');
     lastCreateAgentLaunchEnv = launchEnv;
+    lastCreateAgentWorkspace = workspace;
     createAgentCalls.add((kind: kind, name: name));
     final index = channels.length + 1;
     // The creator owns the agent, so the channel comes back owned (mirrors the real

@@ -1214,8 +1214,14 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; launchEnv?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; launchEnv?: string; workspace?: string };
     const kind = body.kind ?? "assistant";
+    // A coding agent may mount a local directory (on its runner daemon's host) as pi's workspace —
+    // e.g. the user's repo. Only meaningful for a coding agent on the desktop; stored on the agent
+    // and passed to the runner at spawn (control.spawn → runner.start's workspace).
+    const workspace = kind === "coding" && typeof body.workspace === "string" && body.workspace.trim() !== ""
+      ? body.workspace.trim()
+      : undefined;
     // A coding agent must run in a real launch environment (the user's desktop app, or the online
     // pool once deployed). Validate the chosen environment BEFORE creating anything, so an
     // unavailable choice doesn't strand an agent/channel — and never falls back to the demo stub.
@@ -1237,7 +1243,7 @@ function buildRouter(
         return;
       }
     }
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model });
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, workspace });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",

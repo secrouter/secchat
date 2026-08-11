@@ -1331,12 +1331,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     final choice = await showCodingAgentDialog(context, environments: envs);
     if (choice == null || !mounted) return;
-    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv);
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace);
   }
 
-  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv) async {
+  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv, [String? workspace]) async {
     try {
-      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv);
+      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv, workspace: workspace);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;

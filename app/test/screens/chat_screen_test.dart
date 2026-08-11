@@ -347,7 +347,7 @@ void main() {
       // `widgetWithText(ElevatedButton, ...)` doesn't match this button.
       await tester.tap(find.text('New coding agent'));
       await tester.pump();
-      await tester.enterText(find.byType(TextField), 'infra-fixer');
+      await tester.enterText(find.byType(TextField).first, 'infra-fixer');
       await tester.pump();
       await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
       await pumpSettled(tester, times: 10);
@@ -399,7 +399,7 @@ void main() {
 
       await tester.tap(find.text('New coding agent'));
       await tester.pump();
-      await tester.enterText(find.byType(TextField), 'infra-fixer');
+      await tester.enterText(find.byType(TextField).first, 'infra-fixer');
       await tester.pump();
       await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
       await pumpSettled(tester, times: 10);
@@ -503,7 +503,7 @@ void main() {
     expect(find.text('Online pool'), findsOneWidget);
     expect(find.text('Coming soon'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextField), 'infra-fixer');
+    await tester.enterText(find.byType(TextField).first, 'infra-fixer');
     await tester.pump();
     await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
     await pumpSettled(tester, times: 10);
@@ -533,12 +533,39 @@ void main() {
     await tester.tap(find.text('New coding agent'));
     await pumpSettled(tester);
 
-    await tester.enterText(find.byType(TextField), 'infra-fixer');
+    await tester.enterText(find.byType(TextField).first, 'infra-fixer');
     await tester.pump();
     // Create is disabled (no environment available), so tapping it does nothing.
     await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
     await pumpSettled(tester);
     expect(fake.createAgentCalls, isEmpty);
+  });
+
+  testWidgets('New coding agent mounts a local folder as its workspace', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final fake = FakeApiClient(me: _principal, channels: const []);
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    await tester.tap(find.text('New coding agent'));
+    await pumpSettled(tester);
+
+    // Desktop is the default (only available) environment, so the local-folder field shows.
+    expect(find.text('LOCAL FOLDER (OPTIONAL)'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).first, 'repo-bot'); // name
+    await tester.enterText(find.byType(TextField).last, '/Users/me/project'); // workspace
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Create'));
+    await pumpSettled(tester, times: 10);
+
+    expect(fake.createAgentCalls, hasLength(1));
+    expect(fake.lastCreateAgentWorkspace, '/Users/me/project');
   });
 
   testWidgets(

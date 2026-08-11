@@ -836,6 +836,32 @@ test("POST /agents coding to the online pool is 409 (not deployed) even with a d
   assert.equal(body.env, "pool");
 });
 
+test("POST /agents coding stores a mounted workspace and passes it to the runner at spawn", async () => {
+  const before = controlCalls.spawn.length;
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "repo-bot", launchEnv: "desktop", workspace: "  /Users/me/proj  " }),
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { agent: { workspace?: string } };
+  assert.equal(body.agent.workspace, "/Users/me/proj"); // trimmed
+  const spawned = controlCalls.spawn.slice(before).map((c) => c as { agent: { workspace?: string } });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.agent.workspace, "/Users/me/proj");
+});
+
+test("POST /agents coding with no workspace leaves it unset (per-agent scratch workspace)", async () => {
+  const res = await fetch(`${controlBaseUrl}/agents`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ kind: "coding", name: "scratch-bot", launchEnv: "desktop" }),
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { agent: { workspace?: string } };
+  assert.equal(body.agent.workspace, undefined);
+});
+
 test("posting a message in a coding channel forwards it to pi as a JSON envelope naming who posted it", async () => {
   // The canonical path: a normal message post to a coding-agent channel is persisted like any
   // message AND forwarded to the agent's pi session, prefixed with a header naming the poster.

@@ -120,7 +120,14 @@ export function makeControlPlane(deps: {
       leaseExpiresAt: new Date(now() + leaseTtlMs).toISOString(),
     });
 
-    await deps.runner.start({ sessionId: session.id, agentId: input.agent.id, ownerSub: input.agent.ownerSub });
+    await deps.runner.start({
+      sessionId: session.id,
+      agentId: input.agent.id,
+      ownerSub: input.agent.ownerSub,
+      // A coding agent's mounted local directory (if any) becomes pi's cwd; omit the key entirely
+      // when unset so the runner falls back to its per-agent scratch workspace.
+      ...(input.agent.workspace ? { workspace: input.agent.workspace } : {}),
+    });
     await deps.sessions.setSessionStatus(session.id, "active");
 
     return { ...session, status: "active" };
