@@ -15,6 +15,8 @@
 // import it), so it's fully testable offline with fakes — see test/control.test.ts.
 
 import { canGrantExecute, classifyTool, evaluateTool } from "./gate.ts";
+// canGrantExecute is used both for the owner-only grant check AND, now, to decide whether the author
+// of the current turn may cause a mutation at all (the enforced side of "behavior control").
 import type { Agent, AgentControl, AgentSession, Id, Message, Runner, RunnerEvent, SessionStore } from "../types.ts";
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
@@ -32,6 +34,12 @@ export function makeControlPlane(deps: {
 }): AgentControl {
   const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   const now = deps.now ?? (() => Date.now());
+
+  /** Who prompted the CURRENT turn per session (set on every sendInput). The tool-request gate uses
+   * it to enforce that only the owner's prompt can drive a mutation — a secondary participant's turn
+   * is plan-mode-only regardless of any active grant. Best-effort per-session (last writer wins);
+   * cleared on exit. */
+  const turnAuthorBySession = new Map<Id, string>();
 
   /** Routes one runner event for one session. Unknown/ended sessions are ignored outright — no
    * gate evaluation, no broadcast, nothing. A session can't un-end, so a stray late event after
@@ -62,14 +70,27 @@ export function makeControlPlane(deps: {
         return;
 
       case "tool_request": {
-        // Loaded per the control-plane contract; evaluateTool() itself is agent-agnostic (its
-        // decision turns only on the tool + grant + turn — see gate.ts), so the lookup result
-        // isn't consumed below. Kept for parity with that contract; flagged in the task report
-        // as apparently-vestigial today, in case per-agent policy is meant to land here later.
-        await deps.getAgent(session.agentId);
-
+        const agent = await deps.getAgent(session.agentId);
         const grant = await deps.sessions.activeGrant(sessionId);
-        const decision = evaluateTool({ tool: event.tool, grant, turnId: event.turnId });
+        let decision = evaluateTool({ tool: event.tool, grant, turnId: event.turnId });
+
+        // Hard behavior boundary: a MUTATING tool is only allowed when the CURRENT turn was
+        // initiated by a user who may authorize edits — i.e. the agent's owner. A secondary
+        // participant can prompt the agent in plan mode all day but can NEVER cause a mutation, even
+        // while an owner's grant is still active. evaluateTool + the owner-only grant already gate
+        // WHETHER edits are on; this gates WHOSE prompt may use them (the envelope's `authorized`
+        // flag is only pi's soft cue — this is the enforced boundary).
+        if (decision.allow && agent && classifyTool(event.tool) === "mutate") {
+          const author = turnAuthorBySession.get(sessionId);
+          // Deny when the turn's author is KNOWN and isn't allowed to authorize edits (a secondary
+          // participant). Production always records the author (triggerCodingAgents / the input
+          // route), so this always applies there; an author-less programmatic driver falls back to
+          // the grant-only rule above.
+          if (author && !canGrantExecute(agent, author).allow) {
+            decision = { allow: false, reason: "only the agent's owner can trigger edits — others are in plan mode" };
+          }
+        }
+
         await deps.runner.answerTool(sessionId, event.requestId, decision);
 
         // Consume a "once" grant only when it actually authorized THIS call. A read tool is
@@ -97,6 +118,7 @@ export function makeControlPlane(deps: {
         return;
 
       case "exit":
+        turnAuthorBySession.delete(sessionId);
         await deps.sessions.setSessionStatus(sessionId, "ended");
         deps.broadcast?.(session.channelId, { type: "session_ended", sessionId });
         return;
@@ -160,7 +182,10 @@ export function makeControlPlane(deps: {
     return { allow: true, reason: "granted" };
   }
 
-  async function sendInput(sessionId: Id, text: string): Promise<void> {
+  async function sendInput(sessionId: Id, text: string, authorSub?: string): Promise<void> {
+    // Record who is driving this turn so the tool-request gate can enforce that only the owner's
+    // prompt may cause a mutation (see the "hard behavior boundary" note above).
+    if (authorSub) turnAuthorBySession.set(sessionId, authorSub);
     await deps.runner.sendInput(sessionId, text);
   }
 

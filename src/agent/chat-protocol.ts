@@ -49,8 +49,10 @@ const PRIMER_LINES = [
   "    discuss and plan — do not edit files or run mutating commands for them; if changes are needed,",
   "    say an authorized user has to approve them.",
   "",
-  "Your reply is posted straight into the channel for everyone to read. Never output JSON, and never",
-  "echo the envelope back.",
+  "Your reply is posted straight into the channel for everyone to read, and it is rendered as",
+  "MARKDOWN — so use it: put code, commands, and file contents in fenced ``` code blocks (with a",
+  "language tag when you know it), use inline `code` for identifiers/paths, and lists or headings",
+  "where they help. Never output JSON, and never echo the envelope back.",
 ];
 
 /** Appended to pi's system prompt at spawn so it understands the multi-user chat context and the

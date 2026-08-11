@@ -257,8 +257,9 @@ async function triggerCodingAgents(
   // here (not re-derived) so the envelope can't disagree with what the gate will actually enforce.
   const authorized = canGrantExecute(agent, authorSub).allow;
   // Deliver as a JSON envelope naming the sender + their edit authority; pi was primed for this shape
-  // at spawn (AGENT_CHAT_PRIMER). Keeps multi-member channels legible to the agent.
-  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized));
+  // at spawn (AGENT_CHAT_PRIMER). Pass the author so the gate enforces owner-only mutations for THIS
+  // turn (not just pi's soft `authorized` cue). Keeps multi-member channels legible to the agent.
+  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized), authorSub);
 }
 
 function buildRouter(
@@ -1406,7 +1407,7 @@ function buildRouter(
     // an attribution header. The canonical, persisted path for a coding channel is POST
     // /channels/:id/messages (triggerCodingAgents forwards it to pi with a "who posted it" header) —
     // this route stays as a thin primitive for programmatic/test drivers.
-    await control.sendInput(params.id!, text);
+    await control.sendInput(params.id!, text, principal.sub);
     sendJson(res, 202, { status: "accepted" });
   });
 
