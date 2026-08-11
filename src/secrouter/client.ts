@@ -50,6 +50,15 @@ async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteReq
     // policy/budget/audit to the agent's owner (LlmCompleteRequest.actingUser), never to SecChat.
     "X-Sec-Acting-User": req.actingUser,
   };
+  if (req.classification) {
+    // The content's classification LEVEL (see LlmCompleteRequest.classification). SecRouter's
+    // clearance check + data-residency egress gate key on this trusted header; without it a CUI
+    // channel's turn would be evaluated at the gateway's DEFAULT classification — the in-app
+    // marking would be invisible at the one hop where content leaves toward a model. SecRouter
+    // only honors level names present in its own security.classification.levels, so the two
+    // ladders must use the same names (they do by default); an unknown name is ignored there.
+    headers["x-data-classification"] = req.classification;
+  }
   if (cfg.secrouterToken) {
     headers["Authorization"] = `Bearer ${cfg.secrouterToken}`;
   }

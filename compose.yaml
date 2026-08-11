@@ -38,6 +38,10 @@ services:
       # thing that actually terminates TLS for these hostnames; the suite CA below lets Node
       # verify that cert instead of failing with UNABLE_TO_VERIFY_LEAF_SIGNATURE.
       NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-/etc/ssl/certs/suite-ca.pem}
+      # Attachment BYTES (content-addressed blobs) — on the named volume below, NOT the
+      # container's writable layer, so they survive rebuilds/`down` and ride the backup flow
+      # (bootstrap/secchat.sh backup copies this dir alongside the pg_dump).
+      SECCHAT_UPLOADS_DIR: /var/lib/secchat/uploads
     extra_hosts:
       - "secsso.sec.internal:host-gateway"
       - "secrouter.sec.internal:host-gateway"
@@ -48,6 +52,7 @@ services:
       - "${SECCHAT_HTTP_PORT:-47010}:47010"
     volumes:
       - ${SUITE_CA_PATH:-../../out/seccert-root.pem}:/etc/ssl/certs/suite-ca.pem:ro
+      - uploads:/var/lib/secchat/uploads
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:47010/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -57,3 +62,6 @@ services:
 
 volumes:
   pgdata: {}
+  # Attachment blobs (content-addressed by sha256). A separate volume from pgdata: rows/chains
+  # live in Postgres, bytes live here — backup/restore handles BOTH (see bootstrap/secchat.sh).
+  uploads: {}

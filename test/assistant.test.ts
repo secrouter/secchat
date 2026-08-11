@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Agent, LlmClient, LlmCompleteRequest, Message, Store } from "../src/types.ts";
 import { handleAssistantTurn } from "../src/assistant/service.ts";
+import { makeMarkingPolicy } from "../src/marking/policy.ts";
 
 const GENESIS = "0".repeat(64);
 
@@ -22,16 +23,20 @@ const AGENT: Agent = {
 
 type HistoryRow = Message & { content?: string };
 
-/** MINIMAL fake Store — implements only listMessages/appendMessage, the two methods
- * handleAssistantTurn calls. Cast through `unknown` rather than structurally satisfying the
- * full Store contract (matches the pattern in test/http.test.ts). */
-function makeFakeStore(history: HistoryRow[]) {
+/** MINIMAL fake Store — implements only listMessages/appendMessage/getChannel, the methods
+ * handleAssistantTurn calls (getChannel only when a markingPolicy is wired). Cast through
+ * `unknown` rather than structurally satisfying the full Store contract (matches the pattern in
+ * test/http.test.ts). */
+function makeFakeStore(history: HistoryRow[], channelMarking?: string) {
   const appended: Array<{ channelId: string; authorRef: string; authorType: string; content: string; promptedBy?: string }> = [];
   let nextId = 1;
 
   const store = {
     async listMessages() {
       return history;
+    },
+    async getChannel(id: string) {
+      return { id, kind: "channel", name: "chan", createdBy: "user-owner", createdAt: "2026-08-08T00:00:00.000Z", cuiMarking: channelMarking };
     },
     async appendMessage(input: { channelId: string; authorRef: string; authorType: "user" | "agent"; content: string; promptedBy?: string }) {
       appended.push(input);
@@ -215,4 +220,63 @@ test("an empty stream (no deltas) rejects and does NOT persist a message", async
 
   assert.equal(appended.length, 0);
   assert.equal(events.length, 0); // no deltas were emitted, and no final "message" broadcast either
+});
+
+// ── F1: the classification forwarded to the gateway (LlmCompleteRequest.classification) ──────
+// The level sent must dominate EVERYTHING in the model context — the channel's marking plus every
+// included history row — and must be a bare ladder LEVEL (never a category-bearing banner string).
+
+const LADDER = makeMarkingPolicy(["UNCLASSIFIED", "CUI", "SECRET"], "UNCLASSIFIED", [
+  { kind: "category", level: "CUI", code: "SP-PRVCY", name: "Privacy" },
+]);
+
+test("classification: a marked channel's level is forwarded even when every row is baseline", async () => {
+  const { store } = makeFakeStore(
+    [historyRow({ seq: 1, authorType: "user", authorRef: "user-a", content: "hello" })],
+    "CUI",
+  );
+  const { llm, getCaptured } = makeFakeLlm(["ok"]);
+
+  await handleAssistantTurn({ store, llm, markingPolicy: LADDER }, { channelId: "chan-1", agent: AGENT, promptedBy: "user-human", userText: "hi" });
+
+  assert.equal(getCaptured()!.classification, "CUI");
+});
+
+test("classification: the highest INCLUDED history row raises it in an unmarked channel, and categories are stripped to the level", async () => {
+  const { store } = makeFakeStore([
+    historyRow({ seq: 1, authorType: "user", authorRef: "user-a", content: "plain" }),
+    historyRow({ seq: 2, authorType: "user", authorRef: "user-a", content: "sensitive", marking: "CUI//SP-PRVCY" }),
+  ]);
+  const { llm, getCaptured } = makeFakeLlm(["ok"]);
+
+  await handleAssistantTurn({ store, llm, markingPolicy: LADDER }, { channelId: "chan-1", agent: AGENT, promptedBy: "user-human", userText: "hi" });
+
+  // "CUI//SP-PRVCY" contributes its LEVEL — the header carries "CUI", never the banner string.
+  assert.equal(getCaptured()!.classification, "CUI");
+});
+
+test("classification: rows sliced out of the history window do NOT raise it", async () => {
+  // Row 1 is SECRET but falls outside the 20-row window once rows 2..26 exist; nothing the model
+  // actually sees is above baseline, so the call must NOT be escalated to SECRET.
+  const rows: HistoryRow[] = [
+    historyRow({ seq: 1, authorType: "user", authorRef: "user-a", content: "old secret", marking: "SECRET" }),
+  ];
+  for (let seq = 2; seq <= 26; seq++) {
+    rows.push(historyRow({ seq, authorType: "user", authorRef: "user-a", content: `row-${seq}` }));
+  }
+  const { store } = makeFakeStore(rows);
+  const { llm, getCaptured } = makeFakeLlm(["ok"]);
+
+  await handleAssistantTurn({ store, llm, markingPolicy: LADDER }, { channelId: "chan-1", agent: AGENT, promptedBy: "user-human", userText: "hi" });
+
+  assert.equal(getCaptured()!.classification, "UNCLASSIFIED");
+});
+
+test("classification: absent entirely when no markingPolicy is wired (back-compat)", async () => {
+  const { store } = makeFakeStore([historyRow({ seq: 1, authorType: "user", authorRef: "user-a", content: "hello" })], "CUI");
+  const { llm, getCaptured } = makeFakeLlm(["ok"]);
+
+  await handleAssistantTurn({ store, llm }, { channelId: "chan-1", agent: AGENT, promptedBy: "user-human", userText: "hi" });
+
+  assert.equal(getCaptured()!.classification, undefined);
 });

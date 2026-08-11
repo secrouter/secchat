@@ -90,10 +90,12 @@ cp .env.example .env
 ./bootstrap/secchat.sh down [-v]      stop (-v also wipes volumes/state)
 ```
 
-**All state lives in Postgres** — channels, messages, agents, the audit log, everything (see
-`db/migrations/`); migrations are applied automatically on boot. There is no separate uploads
-volume, so `backup` (a `pg_dump` plus the `.env` needed to reconstruct `DATABASE_URL`) captures
-the stack's complete state, and `restore` reinstates it from a clean volume.
+**State lives in two places** — rows, chains, and the audit log in **Postgres** (see
+`db/migrations/`; migrations are applied automatically on boot), and attachment **bytes** on the
+`uploads` volume (content-addressed blobs under `SECCHAT_UPLOADS_DIR`). `backup` captures both —
+the `pg_dump`, the `.env` needed to reconstruct `DATABASE_URL`, and the blobs — and `restore`
+reinstates both from clean volumes. A backup without the blobs would restore chain-bound
+attachment manifests attesting to files that no longer exist.
 
 **Web client**: the image serves `clients/web-minimal` (dependency-free, always present in the
 repo). It does **not** build the Flutter client (`app/`) — that toolchain doesn't belong in

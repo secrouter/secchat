@@ -44,6 +44,12 @@ COPY tsconfig.json ./
 # index.html exists, so no server code change is needed to switch between them.
 COPY --from=flutter-web /src/app/build/web ./app/build/web
 
+# Attachment bytes live here (SECCHAT_UPLOADS_DIR — compose mounts a named volume at this path so
+# they survive rebuilds and are captured by `bootstrap/secchat.sh backup`). Created + chowned
+# BEFORE dropping to the non-root user: a named volume initializes from the image's directory
+# ownership, so without this the mount would be root-owned and every upload would EACCES.
+RUN mkdir -p /var/lib/secchat/uploads && chown node:node /var/lib/secchat/uploads
+
 # Run as the image's built-in non-root user rather than root.
 USER node
 

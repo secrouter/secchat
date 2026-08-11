@@ -351,6 +351,11 @@ export interface Store {
   claimAttachments(messageId: Id, attachmentIds: Id[]): Promise<Attachment[]>;
   /** A message's attachments in upload order (claimed only). */
   listAttachmentsForMessage(messageId: Id): Promise<Attachment[]>;
+  /** Whether `sha256`'s bytes are still referenced OUTSIDE `excludingMessageId`: by an UNCLAIMED
+   * upload (messageId null — it may yet be claimed), or by an attachment of any other message that
+   * is not redacted. The redaction purge refcounts with this so a content-addressed (deduped) blob
+   * shared with live content is never deleted (see BlobStore.delete). */
+  hasLiveAttachmentReference(sha256: Sha256Hex, excludingMessageId: Id): Promise<boolean>;
   /** All CLAIMED attachments in a channel — lets the history route attach files to each message in
    * one read (like listReactionsForChannel). */
   listAttachmentsForChannel(channelId: Id): Promise<Attachment[]>;
@@ -424,6 +429,12 @@ export interface LlmCompleteRequest {
   messages: LlmMessage[];
   /** The owner sub — forwarded as X-Sec-Acting-User so SecRouter governs this call as them. */
   actingUser: string;
+  /** The classification LEVEL of the content in `messages` (the highest rung, per the deployment's
+   * marking ladder, across everything included in the model context). Forwarded as
+   * `x-data-classification` so SecRouter's clearance + data-residency egress gate evaluates the
+   * call at the RIGHT level instead of its deployment default. Unset ⇒ header omitted (SecRouter
+   * falls back to its configured default — the pre-existing behavior). */
+  classification?: string;
 }
 
 /** A model the gateway offers, for the client's model picker (GET /models → SecRouter /v1/models). */
