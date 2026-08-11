@@ -85,6 +85,21 @@ export interface User {
   lastSeenAt: string; // ISO-8601 UTC — most recent time this principal was observed
 }
 
+/** A user's git SSH identity — an ed25519 keypair minted server-side (src/ssh/keys.ts) so it can be
+ * INJECTED into the agentic runtimes (the Kubernetes pool pod, the desktop runner daemon) for git
+ * authentication without the user ever handling the private key. One per user; regenerating replaces
+ * it (keyed on `sub`). The private half lives ONLY as `privateKeyEnc` — an AES-256-GCM envelope under
+ * the deployment master key (config.secretKey) — and is decrypted solely to inject it into a runner
+ * the owner owns. It is NEVER returned by any API: routes project to `publicKey` + `fingerprint`. */
+export interface UserSshKey {
+  sub: string; // owner (Principal.sub) — the directory key
+  keyType: string; // "ssh-ed25519"
+  publicKey: string; // authorized_keys line — safe to display
+  fingerprint: string; // "SHA256:..." — safe to display
+  privateKeyEnc: string; // AES-256-GCM envelope (opaque); server-only, never serialized to a client
+  createdAt: string; // ISO-8601 UTC
+}
+
 /** A spawned agent, owned by — and acting as — exactly one user (decision #2/#7). Sprint 2
  * implements `assistant` (server-side model chat, NO runner); `coding` (runner + tools +
  * owner-gated execution) lands in Sprint 4. Its model calls are always attributed to
@@ -309,6 +324,16 @@ export interface Store {
   upsertUser(input: { sub: string; email?: string; displayName?: string; groups: string[] }): Promise<User>;
   listUsers(): Promise<User[]>;
   getUser(sub: string): Promise<User | null>;
+
+  // Per-user git SSH identity (db/migrations/0011_user_ssh_keys.sql; src/ssh/keys.ts) — injected into
+  // agentic runtimes for git auth. The private key is persisted ONLY as an encrypted envelope.
+  /** Create or REPLACE a user's SSH key (regenerating overwrites the prior one). */
+  setUserSshKey(key: UserSshKey): Promise<void>;
+  /** The user's SSH key row, INCLUDING the encrypted private envelope, or null. Callers that return
+   * it to a client MUST project away `privateKeyEnc` first (see the /me/ssh-key route). */
+  getUserSshKey(sub: string): Promise<UserSshKey | null>;
+  /** Remove a user's SSH key. Returns whether a row was removed. */
+  deleteUserSshKey(sub: string): Promise<boolean>;
   /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
    * or null. Used to keep POST /dm idempotent (one DM per pair, never a duplicate). */
   findDmChannel(subA: string, subB: string): Promise<Channel | null>;
@@ -494,10 +519,25 @@ export type RunnerEvent =
   | { type: "status"; status: SessionStatus }
   | { type: "exit"; code?: number };
 
+/** The decrypted git SSH material handed to a runner so `git` inside a coding session authenticates
+ * as the agent's OWNER. Assembled by the control plane from the owner's UserSshKey (private key
+ * decrypted with config.secretKey) plus the deployment's optional pinned known_hosts, threaded
+ * through Runner.start — and, for a remote daemon, the runner-protocol — to pi-runner, which writes
+ * it to an ephemeral per-session key file and points GIT_SSH_COMMAND at it. Injected only into a
+ * runtime the owner owns (their pool pod / their desktop daemon), never a shared one. */
+export interface GitSshMaterial {
+  privateKey: string; // OpenSSH-format ed25519 private key (written to the session's id_ed25519, 0600)
+  publicKey: string; // the matching authorized_keys line (written alongside as id_ed25519.pub)
+  knownHosts?: string; // optional pinned known_hosts; absent ⇒ StrictHostKeyChecking=accept-new (TOFU)
+}
+
 /** Hosts a pi process for a session. Abstract so the control plane is testable against a fake;
  * a real server runner + the local `secagent daemon` (Sprint 5) implement it later. */
 export interface Runner {
-  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string }): Promise<void>;
+  /** `gitSsh`, when present, is the owner's decrypted git identity to inject for this session (see
+   * GitSshMaterial). Optional — a runner with no key configured, or an impl that doesn't support
+   * injection, simply omits/ignores it. */
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial }): Promise<void>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   /** Deliver the gate's verdict for a pending tool_request back to the runner. */
   answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;
