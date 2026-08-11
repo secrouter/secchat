@@ -592,6 +592,12 @@ if (!DATABASE_URL) {
 
     const all = await store.listAllAgents();
     assert.ok(all.some((a) => a.id === agent.id));
+
+    // launch_env (0012) round-trips for a coding agent pinned to the pool; absent for one without.
+    const pooled = await store.createAgent({ ownerSub: owner, kind: "coding", name: "pool bot", launchEnv: "pool" });
+    assert.equal(pooled.launchEnv, "pool");
+    assert.equal((await store.getAgent(pooled.id))!.launchEnv, "pool");
+    assert.equal(agent.launchEnv, undefined); // the assistant above set none
   });
 
   // ── SessionStore ───────────────────────────────────────────────────────────────────────────

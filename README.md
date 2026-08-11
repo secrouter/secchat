@@ -54,7 +54,7 @@ src/
   auth/           SecSSO (Authentik) JWKS token verification
   http/           bare-Node HTTP server + routes
   ws/             stdlib WebSocket hub (realtime) + runner-daemon attach hub
-  agent/          coding-agent control plane + execute-gate + runner ports (server / remote)
+  agent/          coding-agent control plane + execute-gate + runner ports (server / remote / K8s pool)
   ssh/            per-user git SSH identities (ed25519 + AES-256-GCM at rest; see docs/git-ssh-keys.md)
   daemon/         the runner daemon: attaches to SecChat, runs pi (see docs/runner-daemon.md)
 test/             node:test suites, one per module
@@ -70,6 +70,11 @@ server — see [docs/runner-daemon.md](docs/runner-daemon.md). Package it with `
 injects into their coding-agent runtimes so `git` authenticates as them — the private key is held
 AES-256-GCM-encrypted at rest and never leaves the server. Set `SECCHAT_SECRET_KEY` to enable it;
 see [docs/git-ssh-keys.md](docs/git-ssh-keys.md).
+
+**Kubernetes agent pool** (optional) runs a coding agent in a server-launched, ephemeral pod (the
+runnerd image) instead of the user's desktop — the pod attaches back over `/runner` and the
+execute-gate is unchanged. Set `SECCHAT_POOL_IMAGE` to enable it; see
+[docs/agent-pool.md](docs/agent-pool.md).
 
 ## Deploy (Docker Compose stack)
 

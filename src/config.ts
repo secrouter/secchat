@@ -108,6 +108,33 @@ export interface Config {
    * host(s), injected into runners so git verifies the host key strictly. Unset ⇒ runners use
    * StrictHostKeyChecking=accept-new (trust-on-first-use), which still pins after the first connect. */
   gitKnownHosts?: string;
+
+  /** Optional Kubernetes agent pool: coding agents whose launch env is `"pool"` run in a
+   * server-launched pod (running the runnerd image) that dials back into `/runner`. Present only when
+   * `SECCHAT_POOL_IMAGE` is set — otherwise the pool is OFF and the client's "Online pool" option
+   * stays unavailable. Requires a runner-token minter (`runnerToken`) so the pod can attach as the
+   * owner. See src/agent/pool-runner.ts + src/agent/k8s.ts. */
+  pool?: PoolConfig;
+}
+
+/** Deployment settings for the Kubernetes agent pool (see Config.pool). */
+export interface PoolConfig {
+  /** Kubernetes API server base (`SECCHAT_POOL_APISERVER`, default the in-cluster endpoint). */
+  apiServer: string;
+  /** Namespace the pool pods are created in (`SECCHAT_POOL_NAMESPACE`, default `secchat-pool`). */
+  namespace: string;
+  /** The runnerd container image the pool pods run (`SECCHAT_POOL_IMAGE`) — REQUIRED to enable. */
+  image: string;
+  /** The cluster-internal URL a pool pod dials back to reach THIS SecChat's `/runner`
+   * (`SECCHAT_POOL_SECCHAT_URL`, e.g. `http://secchat.secchat.svc:47010`). The pod appends
+   * `?pool=<sessionId>` to reach the pool hub. */
+  secchatUrl: string;
+  /** Per-pod CPU/memory limits (`SECCHAT_POOL_CPU`/`_MEMORY`, K8s quantity strings). */
+  cpuLimit: string;
+  memoryLimit: string;
+  /** Hard pod TTL in seconds (`SECCHAT_POOL_TTL`) set as the pod's `activeDeadlineSeconds` — a
+   * backstop so K8s always reaps an orphaned pod even if SecChat misses the delete. */
+  activeDeadlineSeconds: number;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -187,6 +214,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const sshSecret = env.SECCHAT_SECRET_KEY?.trim() || undefined;
   const secretKey = sshSecret ? deriveSecretKey(sshSecret) : undefined;
   const gitKnownHosts = env.SECCHAT_GIT_KNOWN_HOSTS?.trim() || undefined;
+  // Kubernetes agent pool: present only when a pool image is configured (the pod's runnerd image).
+  // Everything else has a sensible in-cluster default. The pool ALSO needs a runner-token minter to
+  // be usable (checked at wire-up in index.ts) — a pod attaches as the owner with a minted token.
+  const poolImage = env.SECCHAT_POOL_IMAGE?.trim() || undefined;
+  const pool: PoolConfig | undefined = poolImage
+    ? {
+        apiServer: opt(env, "SECCHAT_POOL_APISERVER", "https://kubernetes.default.svc"),
+        namespace: opt(env, "SECCHAT_POOL_NAMESPACE", "secchat-pool"),
+        image: poolImage,
+        secchatUrl: opt(env, "SECCHAT_POOL_SECCHAT_URL", `http://secchat:${Number(opt(env, "SECCHAT_PORT", "47010"))}`),
+        cpuLimit: opt(env, "SECCHAT_POOL_CPU", "1"),
+        memoryLimit: opt(env, "SECCHAT_POOL_MEMORY", "1Gi"),
+        activeDeadlineSeconds: Number(opt(env, "SECCHAT_POOL_TTL", "3600")),
+      }
+    : undefined;
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -218,5 +260,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secretKey,
     sshEnabled: Boolean(secretKey),
     gitKnownHosts,
+    pool,
   };
 }

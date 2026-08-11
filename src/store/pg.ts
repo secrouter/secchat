@@ -154,6 +154,7 @@ interface AgentRow {
   name: string | null;
   model: string | null;
   workspace: string | null;
+  launch_env: string | null;
   created_at: Date;
 }
 
@@ -319,6 +320,7 @@ function rowToAgent(row: AgentRow): Agent {
     name: row.name ?? undefined,
     model: row.model ?? undefined,
     workspace: row.workspace ?? undefined,
+    launchEnv: (row.launch_env as Agent["launchEnv"]) ?? undefined,
     createdAt: iso(row.created_at),
   });
 }
@@ -649,15 +651,15 @@ export class PgStore implements Store, SessionStore {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     await this.#pool.query(
-      `INSERT INTO agents (id, owner_sub, kind, name, model, workspace, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.workspace ?? null, createdAt],
+      `INSERT INTO agents (id, owner_sub, kind, name, model, workspace, launch_env, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.workspace ?? null, input.launchEnv ?? null, createdAt],
     );
-    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, workspace: input.workspace, createdAt });
+    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, workspace: input.workspace, launchEnv: input.launchEnv, createdAt });
   }
 
   async getAgent(id: Id): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents WHERE id = $1`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE id = $1`,
       [id],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
@@ -666,7 +668,7 @@ export class PgStore implements Store, SessionStore {
   async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
       `UPDATE agents SET model = $2 WHERE id = $1
-       RETURNING id, owner_sub, kind, name, model, workspace, created_at`,
+       RETURNING id, owner_sub, kind, name, model, workspace, launch_env, created_at`,
       [id, model],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
@@ -675,7 +677,7 @@ export class PgStore implements Store, SessionStore {
   /** Owner's agents, creation order (ins_seq). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
       [ownerSub],
     );
     return rows.map(rowToAgent);
@@ -684,7 +686,7 @@ export class PgStore implements Store, SessionStore {
   /** Every agent, creation order, regardless of owner — for the admin / audit-review console. */
   async listAllAgents(): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, created_at FROM agents ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents ORDER BY ins_seq`,
     );
     return rows.map(rowToAgent);
   }
