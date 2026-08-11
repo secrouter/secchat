@@ -7,7 +7,7 @@
 // decides authorization itself (the "only the owner authorizes execution" invariant, decision #2,
 // holds across the network seam).
 
-import type { Id, RunnerEvent } from "../types.ts";
+import type { GitSshMaterial, Id, RunnerEvent } from "../types.ts";
 
 /** A tool-execution verdict — the same shape the gate produces and `Runner.answerTool` consumes. */
 export interface ToolDecision {
@@ -17,7 +17,7 @@ export interface ToolDecision {
 
 /** Frames SecChat sends DOWN to a connected daemon (the Runner-port methods, serialized). */
 export type RunnerCommand =
-  | { type: "start"; sessionId: Id; agentId: Id; ownerSub: string; workspace?: string }
+  | { type: "start"; sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial }
   | { type: "input"; sessionId: Id; text: string }
   | { type: "tool_answer"; sessionId: Id; requestId: string; decision: ToolDecision }
   | { type: "stop"; sessionId: Id };
@@ -29,6 +29,20 @@ export type RunnerMessage =
   | { type: "register"; runnerId?: string; capabilities?: Record<string, unknown> }
   | { type: "event"; sessionId: Id; event: RunnerEvent }
   | { type: "heartbeat"; sessionIds?: Id[] };
+
+/** Parse the optional `gitSsh` payload on a `start` command — the owner's decrypted git identity to
+ * inject (see GitSshMaterial). Absent/malformed ⇒ undefined (the session just runs without git auth,
+ * never a half-formed key). `privateKey`+`publicKey` are required together; `knownHosts` is optional. */
+function parseGitSsh(raw: unknown): GitSshMaterial | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as Record<string, unknown>;
+  if (typeof g.privateKey !== "string" || typeof g.publicKey !== "string") return undefined;
+  return {
+    privateKey: g.privateKey,
+    publicKey: g.publicKey,
+    ...(typeof g.knownHosts === "string" ? { knownHosts: g.knownHosts } : {}),
+  };
+}
 
 /** Parse a JSON frame SecChat sent DOWN into a RunnerCommand, or null if it isn't a shape we accept
  * (the daemon side of the wire — SecChat is trusted, but a garbled/￼partial frame is still ignored
@@ -45,9 +59,17 @@ export function parseRunnerCommand(raw: string): RunnerCommand | null {
   const sid = c.sessionId;
   if (typeof sid !== "string") return null;
   switch (c.type) {
-    case "start":
+    case "start": {
       if (typeof c.agentId !== "string" || typeof c.ownerSub !== "string") return null;
-      return { type: "start", sessionId: sid, agentId: c.agentId, ownerSub: c.ownerSub, workspace: typeof c.workspace === "string" ? c.workspace : undefined };
+      return {
+        type: "start",
+        sessionId: sid,
+        agentId: c.agentId,
+        ownerSub: c.ownerSub,
+        workspace: typeof c.workspace === "string" ? c.workspace : undefined,
+        gitSsh: parseGitSsh(c.gitSsh),
+      };
+    }
     case "input":
       if (typeof c.text !== "string") return null;
       return { type: "input", sessionId: sid, text: c.text };

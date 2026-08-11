@@ -18,13 +18,19 @@ const TOKEN = (process.env.SECCHAT_RUNNER_TOKEN ?? process.env.SECCHAT_TOKEN ?? 
 const HEARTBEAT_MS = Number(process.env.SECCHAT_RUNNER_HEARTBEAT_MS ?? 20_000);
 const RECONNECT_MS = Number(process.env.SECCHAT_RUNNER_RECONNECT_MS ?? 2_000);
 
-/** The SecChat `/runner` WebSocket URL, carrying the daemon's token. */
+/** When set (only inside a Kubernetes agent-pool pod), the session id this pod hosts — appended as
+ * `?pool=<id>` so SecChat routes this attach to the PoolRunner by session (not the per-owner
+ * registry). Empty for a normal desktop/standalone daemon. */
+const POOL_SESSION = process.env.SECCHAT_POOL_SESSION?.trim() || "";
+
+/** The SecChat `/runner` WebSocket URL, carrying the daemon's token (and, in a pool pod, its session). */
 function runnerWsUrl(): string {
   const u = new URL(SECCHAT_URL);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
   u.pathname = "/runner";
   u.search = "";
   if (TOKEN) u.searchParams.set("token", TOKEN);
+  if (POOL_SESSION) u.searchParams.set("pool", POOL_SESSION);
   return u.toString();
 }
 

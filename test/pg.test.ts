@@ -273,6 +273,41 @@ if (!DATABASE_URL) {
     assert.equal((await store.findDmChannel(a, b))?.id, dm.id);
   });
 
+  test("user ssh keys: set (upsert-replaces on sub), get (incl. encrypted private), delete (0011)", async () => {
+    const sub = `u-${randomUUID()}`;
+    assert.equal(await store.getUserSshKey(sub), null);
+    assert.equal(await store.deleteUserSshKey(sub), false); // nothing to delete yet
+
+    await store.setUserSshKey({
+      sub,
+      keyType: "ssh-ed25519",
+      publicKey: "ssh-ed25519 AAAAC3Nza... a@x.mil",
+      fingerprint: "SHA256:aaaa",
+      privateKeyEnc: "v1.iv.tag.ct",
+      createdAt: new Date().toISOString(),
+    });
+    const got = await store.getUserSshKey(sub);
+    assert.ok(got);
+    assert.equal(got!.fingerprint, "SHA256:aaaa");
+    assert.equal(got!.privateKeyEnc, "v1.iv.tag.ct"); // the encrypted envelope round-trips through pg
+
+    // Regenerate: same sub, new material REPLACES the row (ON CONFLICT upsert — one key per user).
+    await store.setUserSshKey({
+      sub,
+      keyType: "ssh-ed25519",
+      publicKey: "ssh-ed25519 BBBB... a@x.mil",
+      fingerprint: "SHA256:bbbb",
+      privateKeyEnc: "v1.iv2.tag2.ct2",
+      createdAt: new Date().toISOString(),
+    });
+    const replaced = await store.getUserSshKey(sub);
+    assert.equal(replaced!.fingerprint, "SHA256:bbbb");
+    assert.equal(replaced!.privateKeyEnc, "v1.iv2.tag2.ct2");
+
+    assert.equal(await store.deleteUserSshKey(sub), true);
+    assert.equal(await store.getUserSshKey(sub), null);
+  });
+
   test("redaction: content is omitted (key absent) from listMessages, but the chain stays intact, and exactly one audit event is appended", async () => {
     const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
     const m1 = await store.appendMessage({ channelId: channel.id, authorRef: "user-alice", authorType: "user", content: "public" });
@@ -557,6 +592,12 @@ if (!DATABASE_URL) {
 
     const all = await store.listAllAgents();
     assert.ok(all.some((a) => a.id === agent.id));
+
+    // launch_env (0012) round-trips for a coding agent pinned to the pool; absent for one without.
+    const pooled = await store.createAgent({ ownerSub: owner, kind: "coding", name: "pool bot", launchEnv: "pool" });
+    assert.equal(pooled.launchEnv, "pool");
+    assert.equal((await store.getAgent(pooled.id))!.launchEnv, "pool");
+    assert.equal(agent.launchEnv, undefined); // the assistant above set none
   });
 
   // ── SessionStore ───────────────────────────────────────────────────────────────────────────
