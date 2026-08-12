@@ -245,7 +245,7 @@ test("end-to-end coding agent: bash denied in plan mode, allowed ONCE after the 
     const session = ((await spawned.json()) as { session: { id: string } }).session;
     assert.ok(session.id);
 
-    // 1. a mutating tool in plan mode is DENIED
+    // 1. a mutating tool in no-execution mode (the default) is DENIED
     assert.equal(await bash(session.id, "r1"), false);
 
     // 2. a NON-owner cannot authorize execution (C1)
@@ -263,9 +263,16 @@ test("end-to-end coding agent: bash denied in plan mode, allowed ONCE after the 
     assert.equal(await bash(session.id, "r3"), true);
     assert.equal(await bash(session.id, "r4"), false);
 
-    // 5. a read tool is always fine in plan mode (and never consumed the grant above)
+    // 5. after the once grant is consumed the session is back to no-execution — even a read is gated
     scripted.emit(session.id, { type: "tool_request", tool: "grep", requestId: "r5" });
-    assert.equal((await waitFor(() => scripted.answers.find((a) => a.requestId === "r5"))).allow, true);
+    assert.equal((await waitFor(() => scripted.answers.find((a) => a.requestId === "r5"))).allow, false);
+
+    // 6. plan mode enables read-only tools (reads never consume it, and mutations stay gated)
+    const planned = await fetch(`${base}/sessions/${session.id}/grant-execute`, { method: "POST", headers: owner, body: JSON.stringify({ scope: "plan" }) });
+    assert.equal(planned.status, 200);
+    scripted.emit(session.id, { type: "tool_request", tool: "grep", requestId: "r6" });
+    assert.equal((await waitFor(() => scripted.answers.find((a) => a.requestId === "r6"))).allow, true);
+    assert.equal(await bash(session.id, "r7"), false); // still no mutations in plan mode
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
   }

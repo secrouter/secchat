@@ -1,11 +1,15 @@
 // The execute-gate — SecChat's agent-safety core (decision #2; review finding C1).
 //
-// A coding agent runs in PLAN MODE by default: it may use read-only tools and converse with
-// anyone in the channel, but a MUTATING tool (bash / write / edit — anything with side effects)
-// is DENIED unless the agent's OWNER has issued an execute grant. Invited participants can prompt
-// the agent all day (plan mode) but can NEVER authorize execution — that is the whole point of
-// tying an agent to one owner. Unknown tools fail CLOSED (treated as mutating), so a tool we
-// don't recognize can never slip through as "read".
+// A coding agent runs in NO-EXECUTION MODE by default: it may converse and plan in TEXT, but runs
+// NO tools at all — not even read-only ones — until the OWNER raises the mode. The owner escalates
+// via the coding strip's mode dropdown, each level a grant scope:
+//   • no-execution (no active grant) — no tools; text-only planning. The safe default.
+//   • plan   — read-only tools (ls/read/grep/…); still no side effects.
+//   • once   — read-only PLUS one mutating call, then back to no-execution.
+//   • always — read-only PLUS every mutating call, until the owner revokes it (continual).
+// Only the OWNER may raise the mode; invited participants can prompt the agent but never change it
+// — the whole point of tying an agent to one owner. Unknown tools fail CLOSED (treated as mutating),
+// so a tool we don't recognize can never slip through as "read".
 //
 // Pure functions over the session's current grant (held by the SessionStore). The control plane
 // calls evaluateTool() on every runner tool_request and consumes a "once" grant on use.
@@ -43,24 +47,41 @@ export function canGrantExecute(agent: Agent, byUser: string): GateDecision {
   return { allow: true, reason: "owner" };
 }
 
-/** Is this grant currently usable to authorize ONE mutating tool call in the given turn? */
-function grantUsable(grant: ExecuteGrant | undefined, turnId: string | undefined): boolean {
-  if (!grant || grant.consumed) return false;
-  if (grant.scope === "once") return true; // one mutation, until it is consumed
-  if (grant.scope === "turn") return grant.turnId !== undefined && grant.turnId === turnId; // this turn only
-  return false;
+/** An active (present, not-consumed) grant, or undefined = no-execution mode. */
+function activeGrant(grant: ExecuteGrant | undefined): ExecuteGrant | undefined {
+  return grant && !grant.consumed ? grant : undefined;
 }
 
-/** The decision point, called on every runner tool_request. Read tools are always allowed (plan
- * mode); a mutating tool is allowed ONLY when the session carries an active owner grant valid for
- * this turn. A caller that gets `{allow:true}` for a `once` grant must then consume it. */
+/** Is this grant currently usable to authorize ONE MUTATING tool call in the given turn? `plan`
+ * never authorizes a mutation (it's read-only); once/turn/always do. */
+function mutateUsable(grant: ExecuteGrant | undefined, turnId: string | undefined): boolean {
+  const g = activeGrant(grant);
+  if (!g) return false;
+  if (g.scope === "always") return true; // continual execution — every mutation, until revoked
+  if (g.scope === "once") return true; // one mutation, until it is consumed
+  if (g.scope === "turn") return g.turnId !== undefined && g.turnId === turnId; // this turn only
+  return false; // "plan" — read-only, never a mutation
+}
+
+/** The decision point, called on every runner tool_request. In no-execution mode (the default —
+ * no active grant) NOTHING runs, not even a read. Plan mode allows read-only tools; a mutating tool
+ * additionally needs an execute grant (once/turn/always). A caller that gets `{allow:true}` for a
+ * `once` grant must then consume it. */
 export function evaluateTool(args: { tool: string; grant?: ExecuteGrant; turnId?: string }): GateDecision {
-  if (classifyTool(args.tool) === "read") {
-    return { allow: true, reason: "read-only tool (plan mode)" };
+  const g = activeGrant(args.grant);
+  if (!g) {
+    return { allow: false, reason: "no-execution mode — the owner must enable plan or execute mode" };
   }
-  if (grantUsable(args.grant, args.turnId)) {
-    const how = args.grant!.scope === "once" ? "owner grant (once)" : "owner grant (this turn)";
+  if (classifyTool(args.tool) === "read") {
+    return { allow: true, reason: `read-only tool (${g.scope === "plan" ? "plan" : "execute"} mode)` };
+  }
+  if (mutateUsable(args.grant, args.turnId)) {
+    const how = g.scope === "once"
+      ? "owner grant (once)"
+      : g.scope === "always"
+        ? "owner grant (continual)"
+        : "owner grant (this turn)";
     return { allow: true, reason: `mutating tool authorized by ${how}` };
   }
-  return { allow: false, reason: "mutating tool requires the owner to authorize execution (plan mode)" };
+  return { allow: false, reason: "mutating tool requires execute mode — plan mode is read-only" };
 }

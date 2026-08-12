@@ -150,19 +150,28 @@ test("spawn defaults leaseTtlMs to 60_000 when not supplied", async () => {
   assert.equal(session.leaseExpiresAt, new Date(60_000).toISOString());
 });
 
-test("tool_request for a READ tool is allowed without any grant", async () => {
+test("a READ tool is denied in no-execution mode (default), allowed in plan mode", async () => {
   const { store } = makeFakeSessionStore();
   const { runner, calls, emit } = makeFakeRunner();
   const getAgent = makeFakeGetAgent([AGENT]);
   const control = makeControlPlane({ sessions: store, runner, getAgent });
 
   const session = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
-  await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" });
 
-  assert.equal(calls.answerTool.length, 1);
+  // Default is no-execution: even a read tool is gated.
+  await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" });
   assert.deepEqual(calls.answerTool[0], {
     sessionId: session.id,
     requestId: "req-1",
+    decision: { allow: false, reason: "no-execution mode — the owner must enable plan or execute mode" },
+  });
+
+  // Plan mode enables read-only tools.
+  await control.grantExecute({ sessionId: session.id, byUser: AGENT.ownerSub, scope: "plan" });
+  await emit(session.id, { type: "tool_request", tool: "read", requestId: "req-2" });
+  assert.deepEqual(calls.answerTool[1], {
+    sessionId: session.id,
+    requestId: "req-2",
     decision: { allow: true, reason: "read-only tool (plan mode)" },
   });
 });
@@ -291,6 +300,8 @@ test("an output event broadcasts agent_output, and every tool_request also broad
     payload: { type: "agent_output", sessionId: session.id, text: "hello from the agent" },
   });
 
+  // Read tools need at least plan mode now (default is no-execution), so grant it so grep is allowed.
+  await control.grantExecute({ sessionId: session.id, byUser: AGENT.ownerSub, scope: "plan" });
   await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" });
   assert.deepEqual(events[1], {
     channelId: "chan-1",

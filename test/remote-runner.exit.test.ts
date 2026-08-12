@@ -95,12 +95,13 @@ test("only the OWNER can authorize a remote session's execution — an invited p
   assert.ok(ans?.type === "tool_answer" && ans.decision.allow === false);
 });
 
-test("a read-only tool needs no grant; input + stop route to the owning daemon", async () => {
+test("a read-only tool is allowed in plan mode; input + stop route to the owning daemon", async () => {
   const h = await harness();
   const { conn, commands } = attachDaemon(h.registry, "alice");
   const session = await h.control.spawn({ agent: h.agent, channelId: h.channel.id, hostType: "local" });
 
-  // A read tool (ls) is allowed with no grant (plan mode).
+  // A read tool (ls) is allowed once the owner enables plan mode (default is no-execution).
+  await h.control.grantExecute({ sessionId: session.id, byUser: h.agent.ownerSub, scope: "plan" });
   h.remote.handleDaemonMessage(conn, { type: "event", sessionId: session.id, event: { type: "tool_request", tool: "ls", requestId: "r1" } });
     await flush();
   const ans = commands.find((c) => c.type === "tool_answer" && c.requestId === "r1");

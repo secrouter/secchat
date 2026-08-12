@@ -1484,7 +1484,7 @@ function buildRouter(
     // Empowering an agent to run a mutating tool is the same `agent.manage` capability as spawning
     // one — it composes with the owner-only check inside control.grantExecute below.
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { scope?: "once" | "turn"; turnId?: string };
+    const body = (await readJsonBody(req)) as { scope?: "plan" | "once" | "turn" | "always"; turnId?: string };
     const decision = await control.grantExecute({
       sessionId: params.id!,
       byUser: principal.sub,
@@ -1493,6 +1493,17 @@ function buildRouter(
     });
     // A denied grant is not a server error — it's a policy verdict (only the agent's owner may
     // grant execute; see src/agent/gate.ts) — so the body always carries the decision + reason.
+    sendJson(res, decision.allow ? 200 : 403, decision);
+  });
+
+  // Leave continual ("always") execution → plan mode. Same owner-only capability as granting.
+  router.add("POST", "/sessions/:id/revoke-execute", async ({ req, res, params, principal }) => {
+    if (!control) {
+      sendJson(res, 404, { error: "sessions_unavailable" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
+    const decision = await control.revokeExecute({ sessionId: params.id!, byUser: principal.sub });
     sendJson(res, decision.allow ? 200 : 403, decision);
   });
 

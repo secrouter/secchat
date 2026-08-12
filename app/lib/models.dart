@@ -628,6 +628,12 @@ class CreateAgentResult {
 
 /// `POST /sessions/:id/grant-execute` response (200 case; a 403 is thrown
 /// as an [ApiException] by the client instead).
+/// The coding agent's execute-gate mode, chosen from the coding strip's dropdown.
+/// `none` (default) = no tools run at all — the agent plans in text only. `plan` = read-only tools
+/// (ls/read/grep) but no side effects. `once` = read-only plus one mutating call, then back to
+/// `none`. `continual` = read-only plus every mutation until revoked (an `always` grant).
+enum ExecuteMode { none, plan, once, continual }
+
 class GrantExecuteResult {
   const GrantExecuteResult({required this.allow, required this.reason});
 

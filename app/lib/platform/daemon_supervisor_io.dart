@@ -6,12 +6,16 @@ import 'package:flutter/foundation.dart';
 
 import 'daemon_supervisor_api.dart';
 
-/// Where the runner daemon's pi points its model calls, wired at build time. Empty (the default)
-/// leaves pi unconfigured — set these when the deployment's gateway (SecRouter) is reachable:
+/// Where the runner daemon's pi points its model calls, wired at build time. SECROUTER_ORIGIN is
+/// empty by default — set it when the deployment's gateway (SecRouter) is reachable, or pi has no
+/// endpoint and a coding session just sits idle. The model defaults to `secllm/balanced` (the
+/// tool-capable Gemma 4 26B — `secllm/fast`, a 3B, does NOT reliably emit tool calls); override at
+/// build to pin a different model or `auto` (router-chosen):
 ///   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal
-///   --dart-define=SECCHAT_PI_MODEL=secllm/fast
+///   --dart-define=SECCHAT_PI_MODEL=secllm/balanced
 const String _secrouterOrigin = String.fromEnvironment('SECROUTER_ORIGIN');
-const String _piModel = String.fromEnvironment('SECCHAT_PI_MODEL');
+const String _piModel =
+    String.fromEnvironment('SECCHAT_PI_MODEL', defaultValue: 'secllm/balanced');
 
 /// A spawned daemon process — just the bits the supervisor needs, so a test can inject a fake.
 abstract class DaemonProcess {
