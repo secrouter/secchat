@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'api.dart';
 import 'models.dart';
 import 'platform/native_sso.dart';
+import 'platform/session_store.dart';
 import 'screens/chat.dart';
 import 'screens/login.dart';
 import 'theme.dart';
@@ -79,7 +80,13 @@ class _SecChatAppState extends State<SecChatApp> {
   /// [LoginScreen] instead of hanging or crashing.
   Future<void> _boot() async {
     final ssoError = Uri.base.queryParameters['auth_error'];
-    final probe = HttpApiClient(origin: backendOrigin); // session mode: no token, cookie only.
+    // Restore a persisted desktop session first (secure storage), so a relaunch skips the SSO
+    // login. On web there's no stored token — the browser's same-origin cookie carries the session
+    // instead, so the cookie-mode probe below still works.
+    final storedToken = await SessionStore.load();
+    final probe = storedToken != null
+        ? HttpApiClient(sessionToken: storedToken, origin: backendOrigin)
+        : HttpApiClient(origin: backendOrigin); // session mode: no token, cookie only.
 
     var ssoAvailable = false;
     try {
@@ -95,6 +102,12 @@ class _SecChatAppState extends State<SecChatApp> {
     } catch (_) {
       // Not signed in via cookie -- expected outside the post-SSO-redirect
       // case, so this is not an error worth surfacing.
+    }
+
+    // A stored token that no longer authenticates (expired / revoked server-side) is stale — drop
+    // it so we don't keep retrying it on every boot and land back here.
+    if (principal == null && storedToken != null) {
+      unawaited(SessionStore.clear());
     }
 
     // Discard the probe client unless it just became the live session
@@ -147,6 +160,8 @@ class _SecChatAppState extends State<SecChatApp> {
     final api = HttpApiClient(sessionToken: token, origin: backendOrigin);
     try {
       final principal = await api.getMe();
+      // Persist the just-validated session so the next launch restores it (see _boot).
+      await SessionStore.save(token);
       if (!mounted) return null;
       setState(() {
         _api = api;
@@ -171,6 +186,9 @@ class _SecChatAppState extends State<SecChatApp> {
   /// (dropping the client, returning to [LoginScreen]) always proceeds
   /// regardless of whether the network call succeeds.
   Future<void> _performSignOut() async {
+    // Drop the persisted session so a relaunch after sign-out returns to the login screen rather
+    // than silently restoring the (now server-invalidated) session.
+    await SessionStore.clear();
     final api = _api;
     if (api is HttpApiClient) {
       try {
