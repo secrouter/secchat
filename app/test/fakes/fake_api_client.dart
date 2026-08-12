@@ -524,6 +524,16 @@ class FakeApiClient implements ApiClient {
     return const GrantExecuteResult(allow: true, reason: 'granted for test');
   }
 
+  /// Every `revokeExecute` call, in order.
+  final List<String> revokeExecuteCalls = [];
+
+  @override
+  Future<GrantExecuteResult> revokeExecute(String sessionId) async {
+    _maybeThrow('revokeExecute');
+    revokeExecuteCalls.add(sessionId);
+    return const GrantExecuteResult(allow: true, reason: 'revoked for test');
+  }
+
   @override
   Stream<WsEvent> subscribeChannel(String channelId) => const Stream.empty();
 

@@ -231,6 +231,9 @@ abstract class ApiClient {
     String scope = 'once',
   });
 
+  /// Revoke a session's active execute grant (leave continual execution → plan mode). Owner-only.
+  Future<GrantExecuteResult> revokeExecute(String sessionId);
+
   /// Opens a fresh WebSocket connection scoped to one channel: connects,
   /// sends `{"type":"subscribe","channelId":channelId}`, and yields parsed
   /// [WsEvent]s from then on. Cancelling the returned subscription closes
@@ -705,6 +708,13 @@ class HttpApiClient implements ApiClient {
     await _post('/sessions/$sessionId/grant-execute', {'scope': scope})
         as Map<String, dynamic>,
   );
+
+  @override
+  Future<GrantExecuteResult> revokeExecute(String sessionId) async =>
+      GrantExecuteResult.fromJson(
+        await _post('/sessions/$sessionId/revoke-execute', const {})
+            as Map<String, dynamic>,
+      );
 
   @override
   Stream<WsEvent> subscribeChannel(String channelId) =>

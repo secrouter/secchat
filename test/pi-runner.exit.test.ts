@@ -198,9 +198,9 @@ test(
       const beforeDeny = events.length;
       await control.sendInput(session.id, "please run ls");
       const denied = await waitFor(() => events.find((e, i) => i >= beforeDeny && e.type === "tool_decision" && e.tool === "bash" && e.allow === false));
-      assert.equal(denied.reason, "mutating tool requires the owner to authorize execution (plan mode)");
+      assert.equal(denied.reason, "no-execution mode — the owner must enable plan or execute mode");
       const deniedOutput = await waitFor(() => events.find((e, i) => i >= beforeDeny && e.type === "agent_output" && /blocked/i.test(e.text ?? "")));
-      assert.match(deniedOutput.text ?? "", /plan mode/);
+      assert.match(deniedOutput.text ?? "", /no-execution mode/);
       // The point of the gate: pi must never have actually run the command while denied.
       assert.equal(
         events.some((e, i) => i >= beforeDeny && e.type === "agent_output" && /secchat-marker\.txt/.test(e.text ?? "")),

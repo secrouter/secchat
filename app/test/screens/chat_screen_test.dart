@@ -355,9 +355,10 @@ void main() {
       expect(fake.createAgentCalls, hasLength(1));
       expect(fake.createAgentCalls.single.kind, AgentKind.coding);
 
-      // The execute-gate strip is up for the new session, proving the
-      // coding-agent surface (grant-execute control) is live.
-      expect(find.text('Grant execute (once)'), findsOneWidget);
+      // The execute-gate strip is up for the new session, proving the coding-agent surface (the
+      // execution-mode control) is live: its header + the default "No execution" badge.
+      expect(find.text('Coding agent session'), findsOneWidget);
+      expect(find.text('No execution'), findsWidgets);
 
       final composerField = find.descendant(
         of: find.byType(MessageComposer),
