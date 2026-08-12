@@ -20,6 +20,10 @@ dependencies:
   # Desktop drag-and-drop file upload (macOS/Windows/Linux). No-op on web/mobile,
   # where file picking is the browser dialog instead. Brings cross_file (XFile).
   desktop_drop: ^0.5.0
+  # Sign-in persistence: the desktop SSO session token is kept in the OS keychain (macOS/Linux
+  # secret service / web WebCrypto) so a relaunch restores the session instead of re-running SSO.
+  # See lib/platform/session_store.dart.
+  flutter_secure_storage: ^9.2.2
 dev_dependencies:
   flutter_test:
     sdk: flutter
