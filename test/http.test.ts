@@ -307,6 +307,7 @@ const fakeSession: AgentSession = {
 const controlCalls = {
   spawn: [] as unknown[],
   grantExecute: [] as unknown[],
+  revokeExecute: [] as unknown[],
   sendInput: [] as unknown[],
   getSession: [] as unknown[],
 };
@@ -320,6 +321,13 @@ const control: AgentControl = {
     controlCalls.grantExecute.push(input);
     if (input.byUser === "user-1") {
       return { allow: true, reason: "granted" };
+    }
+    return { allow: false, reason: "only the agent's owner can authorize code execution" };
+  },
+  async revokeExecute(input) {
+    controlCalls.revokeExecute.push(input);
+    if (input.byUser === "user-1") {
+      return { allow: true, reason: "revoked" };
     }
     return { allow: false, reason: "only the agent's owner can authorize code execution" };
   },

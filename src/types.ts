@@ -516,7 +516,7 @@ export type ToolClass = "read" | "mutate";
 export interface ExecuteGrant {
   sessionId: Id;
   grantedBy: string; // must equal the agent's ownerSub
-  scope: "once" | "turn"; // one mutating call, or all mutations within one turn
+  scope: "plan" | "once" | "turn" | "always"; // one mutating call / all mutations this turn / continual until revoked
   turnId?: string;
   grantedAt: string;
   consumed?: boolean;
@@ -578,7 +578,9 @@ export interface SessionStore {
 export interface AgentControl {
   spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession>;
   /** Owner-only (enforced via the gate). Returns the gate decision — deny is not an error. */
-  grantExecute(input: { sessionId: Id; byUser: string; scope: "once" | "turn"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
+  grantExecute(input: { sessionId: Id; byUser: string; scope: "plan" | "once" | "turn" | "always"; turnId?: string }): Promise<{ allow: boolean; reason: string }>;
+  /** Revoke a session's active execute grant (leave continual execution → plan mode). Owner-only. */
+  revokeExecute(input: { sessionId: Id; byUser: string }): Promise<{ allow: boolean; reason: string }>;
   /** `authorSub` is who prompted this turn; the control plane uses it to enforce that only the
    * owner's prompt can drive a mutation (a secondary participant is plan-mode-only). */
   sendInput(sessionId: Id, text: string, authorSub?: string): Promise<void>;

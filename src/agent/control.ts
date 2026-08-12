@@ -182,7 +182,7 @@ export function makeControlPlane(deps: {
   async function grantExecute(input: {
     sessionId: Id;
     byUser: string;
-    scope: "once" | "turn";
+    scope: "plan" | "once" | "turn" | "always";
     turnId?: string;
   }): Promise<{ allow: boolean; reason: string }> {
     const session = await deps.sessions.getSession(input.sessionId);
@@ -204,6 +204,23 @@ export function makeControlPlane(deps: {
       grantedAt: new Date(now()).toISOString(),
     });
     return { allow: true, reason: "granted" };
+  }
+
+  /** Revoke the session's active execute grant — used to leave continual ("always") execution and
+   * return to plan mode. Owner-only, same gate as granting. Consuming the current grant makes the
+   * next mutating tool require a fresh authorization. A no-op-shaped success when nothing's active. */
+  async function revokeExecute(input: {
+    sessionId: Id;
+    byUser: string;
+  }): Promise<{ allow: boolean; reason: string }> {
+    const session = await deps.sessions.getSession(input.sessionId);
+    if (!session) return { allow: false, reason: "unknown session" };
+    const agent = await deps.getAgent(session.agentId);
+    if (!agent) return { allow: false, reason: "unknown agent" };
+    const decision = canGrantExecute(agent, input.byUser);
+    if (!decision.allow) return decision;
+    await deps.sessions.consumeGrant(input.sessionId);
+    return { allow: true, reason: "revoked" };
   }
 
   async function sendInput(sessionId: Id, text: string, authorSub?: string): Promise<void> {
@@ -229,5 +246,5 @@ export function makeControlPlane(deps: {
     return live[live.length - 1]!;
   }
 
-  return { spawn, grantExecute, sendInput, getSession, liveSession };
+  return { spawn, grantExecute, revokeExecute, sendInput, getSession, liveSession };
 }

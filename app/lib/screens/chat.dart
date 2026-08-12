@@ -102,6 +102,19 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showArchived = false;
   bool _sortByUnread = false;
   final Set<String> _endedSessionIds = {};
+  // Per-session execute mode, tracked live so the coding strip shows whether the agent may make
+  // changes: set when the owner picks a mode; a `once` grant reverts to no-execution on the first
+  // mutating allow (tool_decision), `plan`/`continual` stay until changed, session end resets.
+  final Map<String, ExecuteMode> _executeModeBySession = {};
+
+  // Mirrors the backend gate's read-only tool allowlist (src/agent/gate.ts READONLY_TOOLS) so the
+  // client disarms a `once` badge only when a MUTATING tool was allowed — a read doesn't consume a
+  // once grant. The server is the source of truth; this just keeps the badge honest.
+  static const Set<String> _readOnlyTools = {
+    'read', 'view', 'cat', 'open', 'ls', 'list', 'grep', 'search',
+    'find', 'glob', 'tree', 'stat', 'diff', 'show',
+  };
+  bool _isReadOnlyTool(String tool) => _readOnlyTools.contains(tool.trim().toLowerCase());
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
@@ -698,10 +711,22 @@ class _ChatScreenState extends State<ChatScreen> {
           if (isOpen) _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
         case WsToolDecisionEvent(:final tool, :final allow, :final reason):
           if (isOpen) _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
+          // A `once` grant authorizes exactly one MUTATING call — the first mutate allow consumes
+          // it, dropping back to no-execution. `continual`/`plan` stay until the owner changes them.
+          // (Reads under a `once` grant don't consume it — the backend only consumes on a mutation —
+          // so keep the badge as `once` on a read allow.)
+          if (allow &&
+              _executeModeBySession[_sessionIdByChannel[channelId]] == ExecuteMode.once &&
+              !_isReadOnlyTool(tool)) {
+            _executeModeBySession[_sessionIdByChannel[channelId]!] = ExecuteMode.none;
+          }
         case WsSessionEndedEvent():
           if (isOpen) {
             final sessionId = _sessionIdByChannel[channelId];
-            if (sessionId != null) _endedSessionIds.add(sessionId);
+            if (sessionId != null) {
+              _endedSessionIds.add(sessionId);
+              _executeModeBySession.remove(sessionId);
+            }
             _append(channelId, const SystemEntry('Session ended'));
           }
         case WsAssistantErrorEvent(:final error):
@@ -1440,7 +1465,21 @@ class _ChatScreenState extends State<ChatScreen> {
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
         canGrant: selected.owned,
-        onGrantExecute: () => widget.api.grantExecute(sessionId),
+        executeMode: _executeModeBySession[sessionId] ?? ExecuteMode.none,
+        onSetMode: (mode) async {
+          // Map each mode to a grant scope, or revoke for no-execution; reflect it on an allowed
+          // verdict. plan/once/always are grants; none clears the grant (back to no tools).
+          final result = switch (mode) {
+            ExecuteMode.none => await widget.api.revokeExecute(sessionId),
+            ExecuteMode.plan => await widget.api.grantExecute(sessionId, scope: 'plan'),
+            ExecuteMode.once => await widget.api.grantExecute(sessionId, scope: 'once'),
+            ExecuteMode.continual => await widget.api.grantExecute(sessionId, scope: 'always'),
+          };
+          if (result.allow && mounted) {
+            setState(() => _executeModeBySession[sessionId] = mode);
+          }
+          return result;
+        },
       );
     }
 

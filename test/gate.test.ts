@@ -21,15 +21,26 @@ test("only the owner can authorize execution (C1)", () => {
   assert.match(other.reason, /only the agent's owner/);
 });
 
-test("plan mode: a read tool is always allowed, with or without a grant", () => {
-  assert.equal(evaluateTool({ tool: "grep" }).allow, true);
-  assert.equal(evaluateTool({ tool: "read", grant: undefined }).allow, true);
+test("no-execution (default): even a read tool is denied without any grant", () => {
+  const g = evaluateTool({ tool: "grep" });
+  assert.equal(g.allow, false);
+  assert.match(g.reason, /no-execution mode/);
+  assert.equal(evaluateTool({ tool: "read", grant: undefined }).allow, false);
 });
 
-test("plan mode: a mutating tool with no grant is denied", () => {
+test("plan mode: read tools are allowed, mutating tools are not", () => {
+  const plan: ExecuteGrant = { sessionId: "s1", grantedBy: "owner-1", scope: "plan", grantedAt: "t" };
+  assert.equal(evaluateTool({ tool: "grep", grant: plan }).allow, true); // read allowed
+  assert.equal(evaluateTool({ tool: "read", grant: plan }).allow, true);
+  const m = evaluateTool({ tool: "bash", grant: plan });
+  assert.equal(m.allow, false); // mutation still gated
+  assert.match(m.reason, /plan mode is read-only/);
+});
+
+test("a mutating tool with no grant is denied (no-execution)", () => {
   const d = evaluateTool({ tool: "bash" });
   assert.equal(d.allow, false);
-  assert.match(d.reason, /requires the owner to authorize/);
+  assert.match(d.reason, /no-execution mode/);
 });
 
 test("a 'once' owner grant authorizes a mutation, and is refused once consumed", () => {
