@@ -13,6 +13,9 @@ export interface OidcEndpoints {
   authorization_endpoint: string;
   token_endpoint: string;
   jwks_uri: string;
+  // OIDC RP-initiated logout (optional in the spec; Authentik publishes it). Used by the BFF's
+  // /auth/logout to terminate the IdP session, not just SecChat's own cookie.
+  end_session_endpoint?: string;
   [key: string]: unknown;
 }
 

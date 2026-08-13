@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'platform/browser_redirect.dart';
 import 'platform/native_sso.dart';
 import 'platform/session_store.dart';
 import 'screens/chat.dart';
@@ -190,15 +191,25 @@ class _SecChatAppState extends State<SecChatApp> {
     // than silently restoring the (now server-invalidated) session.
     await SessionStore.clear();
     final api = _api;
+    String? logoutUrl;
     if (api is HttpApiClient) {
       try {
-        await api.logout().timeout(const Duration(seconds: 5));
+        logoutUrl = await api.logout().timeout(const Duration(seconds: 5));
       } catch (_) {
         // Sign out locally regardless -- SSO unconfigured, backend
         // unreachable, already logged out, etc. are all fine to ignore.
       }
     }
     api?.dispose();
+    // Web: complete an OIDC RP-initiated logout by navigating the top-level browser to the IdP
+    // end_session URL the BFF returned, so Authentik's SSO session is terminated too -- otherwise
+    // "Sign out" only drops SecChat's cookie and the next login silently re-authenticates. No-op on
+    // desktop (redirectBrowserTo's stub): no shared browser session there, so the local sign-out
+    // below is sufficient.
+    if (logoutUrl != null && logoutUrl.isNotEmpty) {
+      redirectBrowserTo(logoutUrl);
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _api = null;

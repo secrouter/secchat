@@ -312,10 +312,42 @@ async function handleCallback(req: IncomingMessage, res: ServerResponse, cfg: Au
   }
 }
 
-async function handleLogout(_req: IncomingMessage, res: ServerResponse, cfg: AuthGatewayConfig): Promise<void> {
+async function handleLogout(req: IncomingMessage, res: ServerResponse, cfg: AuthGatewayConfig): Promise<void> {
+  // Always clear SecChat's own httpOnly session cookie first.
   appendSetCookie(res, serializeCookie(SESSION_COOKIE, "", { ...cookieOpts(cfg), maxAge: 0 }));
-  res.writeHead(204);
-  res.end();
+  const isGet = (req.method ?? "GET").toUpperCase() === "GET";
+  // RP-initiated logout (OIDC end_session): clearing our cookie alone leaves the IdP (Authentik)
+  // SSO session alive, so the very next /auth/login silently re-authenticates — an incomplete
+  // logout on a shared workstation (CMMC AC-12 "terminate the session"). If the IdP publishes an
+  // end_session_endpoint, send the browser there to terminate the IdP session too. No
+  // `id_token_hint`: this BFF deliberately stores no OIDC tokens (see the module header), and
+  // `client_id` + `post_logout_redirect_uri` are enough for Authentik to end the browser's own
+  // session (it carries Authentik's cookie) and redirect back. A GET (top-level browser
+  // navigation) 302-redirects there; a POST (the XHR client) gets the URL as JSON and navigates.
+  try {
+    const ready = requireReady(cfg);
+    const endpoints = await discover(ready.oidcIssuer);
+    const endSession = endpoints.end_session_endpoint;
+    if (typeof endSession === "string" && endSession) {
+      const url = new URL(endSession);
+      url.searchParams.set("client_id", ready.oidcClientId);
+      url.searchParams.set("post_logout_redirect_uri", ready.publicUrl);
+      const logoutUrl = url.toString();
+      if (isGet) redirect(res, logoutUrl);
+      else sendJson(res, 200, { logoutUrl });
+      return;
+    }
+  } catch (err) {
+    // SSO not configured, IdP unreachable, or no end_session_endpoint published — fall back to the
+    // legacy local-only logout (our cookie is already cleared above, so sign-out still succeeds).
+    console.error("[bff logout] RP-initiated logout unavailable:", err instanceof Error ? err.message : err);
+  }
+  if (isGet) {
+    redirect(res, "/");
+  } else {
+    res.writeHead(204);
+    res.end();
+  }
 }
 
 /** Builds the SSO login gateway from config. Always returns a fully-formed AuthGateway — when
@@ -334,7 +366,7 @@ export function makeAuthGateway(cfg: AuthGatewayConfig): AuthGateway {
     }
 
     const isAuthRoute =
-      (method === "GET" && (pathname === "/auth/login" || pathname === "/auth/callback" || pathname === "/auth/stepup/start")) ||
+      (method === "GET" && (pathname === "/auth/login" || pathname === "/auth/callback" || pathname === "/auth/stepup/start" || pathname === "/auth/logout")) ||
       (method === "POST" && pathname === "/auth/logout");
     if (!isAuthRoute) return false;
 
