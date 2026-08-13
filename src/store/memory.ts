@@ -75,6 +75,8 @@ import type {
   User,
   UserSshKey,
   Webhook,
+  OutboundWebhook,
+  OutboundEvent,
 } from "../types.ts";
 
 export class MemoryStore implements Store, SessionStore {
@@ -616,6 +618,58 @@ export class MemoryStore implements Store, SessionStore {
     this.#webhooksById.delete(webhookId);
     this.#webhooksByToken.delete(webhook.token);
     return true;
+  }
+
+  // ── Outbound webhooks ──────────────────────────────────────────────────────────────────────
+
+  #outboundById = new Map<Id, OutboundWebhook>();
+
+  async createOutboundWebhook(input: {
+    channelId: Id;
+    url: string;
+    events: OutboundEvent[];
+    includeContent: boolean;
+    createdBy: string;
+  }): Promise<OutboundWebhook> {
+    const hook: OutboundWebhook = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      url: input.url,
+      secret: randomBytes(24).toString("base64url"), // HMAC signing secret — treat like a secret
+      events: [...input.events],
+      includeContent: input.includeContent,
+      active: true,
+      createdBy: input.createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    this.#outboundById.set(hook.id, hook);
+    return hook;
+  }
+
+  async listOutboundWebhooks(channelId: Id): Promise<OutboundWebhook[]> {
+    return [...this.#outboundById.values()]
+      .filter((w) => w.channelId === channelId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null> {
+    const hook = this.#outboundById.get(id);
+    return hook && hook.channelId === channelId ? hook : null;
+  }
+
+  async deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean> {
+    const hook = this.#outboundById.get(id);
+    if (!hook || hook.channelId !== channelId) return false;
+    this.#outboundById.delete(id);
+    return true;
+  }
+
+  async recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void> {
+    const hook = this.#outboundById.get(id);
+    if (!hook) return; // a delivery racing a revoke is a no-op, not an error
+    hook.lastStatus = status;
+    hook.lastError = error ?? undefined;
+    hook.lastDeliveryAt = new Date().toISOString();
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a

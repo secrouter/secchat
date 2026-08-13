@@ -85,6 +85,8 @@ import type {
   User,
   UserSshKey,
   Webhook,
+  OutboundWebhook,
+  OutboundEvent,
 } from "../types.ts";
 
 // ── small shared helpers ───────────────────────────────────────────────────────────────────────
@@ -231,6 +233,21 @@ interface WebhookRow {
   token: string;
   created_by: string;
   created_at: Date;
+}
+
+interface OutboundWebhookRow {
+  id: string;
+  channel_id: string;
+  url: string;
+  secret: string;
+  events: string[];
+  include_content: boolean;
+  active: boolean;
+  created_by: string;
+  created_at: Date;
+  last_status: number | null;
+  last_error: string | null;
+  last_delivery_at: Date | null;
 }
 
 interface AuditRow {
@@ -388,6 +405,23 @@ function rowToReaction(row: ReactionRow): Reaction {
 
 function rowToWebhook(row: WebhookRow): Webhook {
   return { id: row.id, channelId: row.channel_id, token: row.token, createdBy: row.created_by, createdAt: iso(row.created_at) };
+}
+
+function rowToOutboundWebhook(row: OutboundWebhookRow): OutboundWebhook {
+  return compact({
+    id: row.id,
+    channelId: row.channel_id,
+    url: row.url,
+    secret: row.secret,
+    events: row.events as OutboundEvent[],
+    includeContent: row.include_content,
+    active: row.active,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    lastStatus: row.last_status ?? undefined,
+    lastError: row.last_error ?? undefined,
+    lastDeliveryAt: row.last_delivery_at ? iso(row.last_delivery_at) : undefined,
+  }) as OutboundWebhook;
 }
 
 function rowToAuditEvent(row: AuditRow): AuditEvent {
@@ -1233,6 +1267,70 @@ export class PgStore implements Store, SessionStore {
       [webhookId, channelId],
     );
     return (rowCount ?? 0) > 0;
+  }
+
+  // ── Outbound webhooks ──────────────────────────────────────────────────────────────────────
+
+  async createOutboundWebhook(input: {
+    channelId: Id;
+    url: string;
+    events: OutboundEvent[];
+    includeContent: boolean;
+    createdBy: string;
+  }): Promise<OutboundWebhook> {
+    const hook: OutboundWebhook = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      url: input.url,
+      secret: randomBytes(24).toString("base64url"),
+      events: [...input.events],
+      includeContent: input.includeContent,
+      active: true,
+      createdBy: input.createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    await this.#pool.query(
+      `INSERT INTO outbound_webhooks
+         (id, channel_id, url, secret, events, include_content, active, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [hook.id, hook.channelId, hook.url, hook.secret, hook.events, hook.includeContent, hook.active, hook.createdBy, hook.createdAt],
+    );
+    return hook;
+  }
+
+  async listOutboundWebhooks(channelId: Id): Promise<OutboundWebhook[]> {
+    const { rows } = await this.#pool.query<OutboundWebhookRow>(
+      `SELECT id, channel_id, url, secret, events, include_content, active, created_by, created_at,
+              last_status, last_error, last_delivery_at
+         FROM outbound_webhooks WHERE channel_id = $1 ORDER BY created_at DESC`,
+      [channelId],
+    );
+    return rows.map(rowToOutboundWebhook);
+  }
+
+  async getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null> {
+    const { rows } = await this.#pool.query<OutboundWebhookRow>(
+      `SELECT id, channel_id, url, secret, events, include_content, active, created_by, created_at,
+              last_status, last_error, last_delivery_at
+         FROM outbound_webhooks WHERE id = $1 AND channel_id = $2`,
+      [id, channelId],
+    );
+    return rows[0] ? rowToOutboundWebhook(rows[0]) : null;
+  }
+
+  async deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean> {
+    const { rowCount } = await this.#pool.query(
+      `DELETE FROM outbound_webhooks WHERE id = $1 AND channel_id = $2`,
+      [id, channelId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  async recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void> {
+    await this.#pool.query(
+      `UPDATE outbound_webhooks SET last_status = $2, last_error = $3, last_delivery_at = $4 WHERE id = $1`,
+      [id, status, error, new Date().toISOString()],
+    );
   }
 
   /** Purges plaintext, stamps the tombstone, and appends the audit event — all in ONE transaction

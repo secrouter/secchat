@@ -1092,6 +1092,77 @@ class Webhook {
   Uri postUrl(Uri origin) => origin.replace(path: '/hooks/$token');
 }
 
+// ── Outbound webhooks ──────────────────────────────────────────────────────────────────────
+
+/// The events an outbound webhook can subscribe to — mirrors the backend's `OutboundEvent` union.
+const List<String> kOutboundEvents = ['message.created', 'message.redacted', 'channel.marked'];
+
+/// One outbound webhook subscription (`GET/POST /channels/:id/outbound-webhooks`). SecChat POSTs a
+/// signed JSON payload to [url] when a subscribed event fires. [secret] signs deliveries; [events]
+/// is which it wants; [includeContent] gates whether message content (not just metadata) is sent.
+/// The `last*` fields report the most recent delivery for observability.
+class OutboundWebhook {
+  const OutboundWebhook({
+    required this.id,
+    required this.channelId,
+    required this.url,
+    required this.secret,
+    required this.events,
+    required this.includeContent,
+    required this.active,
+    required this.createdBy,
+    required this.createdAt,
+    this.lastStatus,
+    this.lastError,
+    this.lastDeliveryAt,
+    this.channelName,
+  });
+
+  final String id;
+  final String channelId;
+  final String url;
+  final String secret;
+  final List<String> events;
+  final bool includeContent;
+  final bool active;
+  final String createdBy;
+  final String createdAt;
+  final int? lastStatus;
+  final String? lastError;
+  final String? lastDeliveryAt;
+
+  /// The owning channel's display name — only set by the global `GET /outbound-webhooks` view.
+  final String? channelName;
+
+  factory OutboundWebhook.fromJson(Map<String, dynamic> json) => OutboundWebhook(
+    id: json['id'] as String,
+    channelId: json['channelId'] as String,
+    url: (json['url'] as String?) ?? '',
+    secret: (json['secret'] as String?) ?? '',
+    events: ((json['events'] as List<dynamic>?) ?? const []).map((e) => e.toString()).toList(),
+    includeContent: (json['includeContent'] as bool?) ?? false,
+    active: (json['active'] as bool?) ?? true,
+    createdBy: (json['createdBy'] as String?) ?? '',
+    createdAt: (json['createdAt'] as String?) ?? '',
+    lastStatus: (json['lastStatus'] as num?)?.toInt(),
+    lastError: json['lastError'] as String?,
+    lastDeliveryAt: json['lastDeliveryAt'] as String?,
+    channelName: json['channelName'] as String?,
+  );
+}
+
+/// The result of a test delivery (`POST …/outbound-webhooks/:id/test`).
+class OutboundTestResult {
+  const OutboundTestResult({required this.status, this.error});
+  final int status;
+  final String? error;
+  bool get ok => status >= 200 && status < 400;
+  factory OutboundTestResult.fromJson(Map<String, dynamic> json) => OutboundTestResult(
+    status: (json['status'] as num?)?.toInt() ?? 0,
+    error: json['error'] as String?,
+  );
+}
+
 // ── Admin / audit-review console (GET /admin/api/overview) ─────────────────────────────────
 
 /// A read-only snapshot for the native admin console — the JSON the server-rendered `/admin` page

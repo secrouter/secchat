@@ -22,6 +22,7 @@ import { createHttpServer } from "./http/server.ts";
 import { makeLlmClient } from "./secrouter/client.ts";
 import { MemoryStore } from "./store/memory.ts";
 import { PgStore } from "./store/pg.ts";
+import { makeOutboundDispatcher } from "./webhooks/outbound.ts";
 import { migrate } from "./db/migrate.ts";
 import { attachWsHub } from "./ws/hub.ts";
 import { attachRunnerHub } from "./ws/runner-hub.ts";
@@ -262,6 +263,10 @@ const server = createHttpServer({
   ssh: config.secretKey ? { secretKey: config.secretKey, knownHosts: config.gitKnownHosts } : undefined,
   // Whether the Kubernetes agent pool is available — drives the "Online pool" launch-env option.
   poolConfigured: Boolean(poolRunner),
+  // Outbound-webhook delivery (SecChat → external URLs on events), plus the destination allowlist
+  // enforced when a subscription is created.
+  outbound: makeOutboundDispatcher(store),
+  outboundAllowedHosts: config.outboundAllowedHosts,
 });
 hub = attachWsHub(server, {
   verifyToken,

@@ -193,4 +193,76 @@ void main() {
       expect(find.text('Admin console'), findsNothing);
     });
   });
+
+  group('outbound webhooks (Outgoing tab)', () {
+    const channel = Channel(id: 'c1', kind: ChannelKind.human, name: 'eng');
+
+    Future<FakeApiClient> openOutgoing(WidgetTester tester, {FakeApiClient? withApi}) async {
+      final api = withApi ?? FakeApiClient();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showWebhooksDialog(context, api: api, channel: channel),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Outgoing')); // switch to the outbound tab
+      await tester.pumpAndSettle();
+      return api;
+    }
+
+    testWidgets('empty state, then creating an outbound webhook mints a subscription', (tester) async {
+      final api = await openOutgoing(tester);
+      expect(find.text('No outbound webhooks yet.'), findsOneWidget);
+
+      await tester.tap(find.text('New outbound webhook'));
+      await tester.pumpAndSettle();
+      // The create form: enter a URL and submit (message.created is checked by default).
+      await tester.enterText(find.byType(TextField), 'https://receiver.test/hook');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+
+      final creates = api.outboundCalls.where((c) => c.op == 'create').toList();
+      expect(creates.length, 1);
+      expect(api.outboundByChannel['c1']!.single.events, ['message.created']);
+      expect(find.textContaining('https://receiver.test/hook'), findsOneWidget);
+    });
+
+    testWidgets('a test delivery calls the API and a revoke deletes it', (tester) async {
+      final api = FakeApiClient();
+      api.outboundByChannel['c1'] = [
+        const OutboundWebhook(
+          id: 'owh-1',
+          channelId: 'c1',
+          url: 'https://receiver.test/hook',
+          secret: 'shhh',
+          events: ['message.created'],
+          includeContent: false,
+          active: true,
+          createdBy: 'alice',
+          createdAt: '',
+        ),
+      ];
+      await openOutgoing(tester, withApi: api);
+      expect(find.textContaining('https://receiver.test/hook'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Send test delivery'));
+      await tester.pumpAndSettle();
+      expect(api.outboundCalls.where((c) => c.op == 'test').length, 1);
+
+      await tester.tap(find.byTooltip('Revoke'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Revoke').last); // confirm
+      await tester.pumpAndSettle();
+      expect(api.outboundCalls.where((c) => c.op == 'delete').length, 1);
+      expect(find.text('No outbound webhooks yet.'), findsOneWidget);
+    });
+  });
 }

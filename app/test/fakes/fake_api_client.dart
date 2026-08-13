@@ -427,6 +427,82 @@ class FakeApiClient implements ApiClient {
     webhooksByChannel[channelId]?.removeWhere((w) => w.id == webhookId);
   }
 
+  /// Outbound webhooks per channel; the outbound calls mutate these.
+  final Map<String, List<OutboundWebhook>> outboundByChannel = {};
+
+  /// Every outbound mutation, in order.
+  final List<({String op, String channelId, String? id})> outboundCalls = [];
+  int _nextOutboundId = 1;
+
+  /// Status the fake test-delivery returns.
+  int outboundTestStatus = 200;
+
+  @override
+  Future<List<OutboundWebhook>> listOutboundWebhooks(String channelId) async {
+    _maybeThrow('listOutboundWebhooks');
+    return List.of(outboundByChannel[channelId] ?? const []);
+  }
+
+  @override
+  Future<List<OutboundWebhook>> listAllOutboundWebhooks() async {
+    _maybeThrow('listAllOutboundWebhooks');
+    return [
+      for (final entry in outboundByChannel.entries)
+        for (final w in entry.value)
+          OutboundWebhook(
+            id: w.id,
+            channelId: w.channelId,
+            url: w.url,
+            secret: w.secret,
+            events: w.events,
+            includeContent: w.includeContent,
+            active: w.active,
+            createdBy: w.createdBy,
+            createdAt: w.createdAt,
+            lastStatus: w.lastStatus,
+            channelName: channelNamesById[entry.key] ?? entry.key,
+          ),
+    ];
+  }
+
+  @override
+  Future<OutboundWebhook> createOutboundWebhook(
+    String channelId, {
+    required String url,
+    required List<String> events,
+    bool includeContent = false,
+  }) async {
+    _maybeThrow('createOutboundWebhook');
+    final wh = OutboundWebhook(
+      id: 'owh-${_nextOutboundId++}',
+      channelId: channelId,
+      url: url,
+      secret: 'sec-${DateTime.now().microsecondsSinceEpoch}',
+      events: events,
+      includeContent: includeContent,
+      active: true,
+      createdBy: me.sub,
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    );
+    outboundByChannel.putIfAbsent(channelId, () => []).insert(0, wh);
+    outboundCalls.add((op: 'create', channelId: channelId, id: wh.id));
+    return wh;
+  }
+
+  @override
+  Future<void> deleteOutboundWebhook(String channelId, String id) async {
+    _maybeThrow('deleteOutboundWebhook');
+    outboundCalls.add((op: 'delete', channelId: channelId, id: id));
+    outboundByChannel[channelId]?.removeWhere((w) => w.id == id);
+  }
+
+  @override
+  Future<OutboundTestResult> testOutboundWebhook(String channelId, String id) async {
+    _maybeThrow('testOutboundWebhook');
+    outboundCalls.add((op: 'test', channelId: channelId, id: id));
+    return OutboundTestResult(status: outboundTestStatus);
+  }
+
   @override
   Future<void> pinMessage(String messageId) async {
     _maybeThrow('pinMessage');

@@ -363,6 +363,41 @@ test("listWebhooks is per-channel; deleteWebhook is channel-scoped and idempoten
   assert.equal(await store.deleteWebhook(chanA.id, a1.id), false);
 });
 
+test("outbound webhooks: create/list/get/delete are channel-scoped; recordOutboundDelivery stamps last*", async () => {
+  const store = new MemoryStore();
+  const chanA = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+  const chanB = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+  const hook = await store.createOutboundWebhook({
+    channelId: chanA.id,
+    url: "https://receiver.test/hook",
+    events: ["message.created", "channel.marked"],
+    includeContent: true,
+    createdBy: "user-alice",
+  });
+  assert.ok(hook.id && hook.secret.length > 10); // a real signing secret, minted server-side
+  assert.equal(hook.active, true);
+  assert.deepEqual(hook.events, ["message.created", "channel.marked"]);
+
+  // Per-channel listing + channel-scoped get.
+  assert.deepEqual((await store.listOutboundWebhooks(chanA.id)).map((w) => w.id), [hook.id]);
+  assert.equal((await store.listOutboundWebhooks(chanB.id)).length, 0);
+  assert.equal((await store.getOutboundWebhook(chanB.id, hook.id)), null); // wrong channel
+  assert.equal((await store.getOutboundWebhook(chanA.id, hook.id))?.id, hook.id);
+
+  // Delivery status is recorded on the row.
+  await store.recordOutboundDelivery(hook.id, 502, "bad gateway");
+  const after = await store.getOutboundWebhook(chanA.id, hook.id);
+  assert.equal(after?.lastStatus, 502);
+  assert.equal(after?.lastError, "bad gateway");
+  assert.ok(after?.lastDeliveryAt);
+
+  // Channel-scoped, idempotent delete.
+  assert.equal(await store.deleteOutboundWebhook(chanB.id, hook.id), false);
+  assert.equal(await store.deleteOutboundWebhook(chanA.id, hook.id), true);
+  assert.equal(await store.deleteOutboundWebhook(chanA.id, hook.id), false);
+});
+
 // ── SessionStore ─────────────────────────────────────────────────────────────────────────────
 
 test("createSession -> getSession round-trip; unknown id returns null", async () => {

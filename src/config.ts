@@ -97,6 +97,12 @@ export interface Config {
   /** Max attachment upload size in bytes (`SECCHAT_MAX_UPLOAD_BYTES`, default 25 MiB). */
   maxUploadBytes: number;
 
+  /** Destination-host allowlist for OUTBOUND webhooks (`SECCHAT_OUTBOUND_ALLOWED_HOSTS`, a
+   * comma-separated hostname list). Empty (the default) ⇒ any http(s) host is permitted; set it to
+   * pin outbound egress to known receivers in a locked-down deployment. Enforced when a webhook is
+   * created (see webhooks/outbound.ts's isAllowedOutboundUrl). */
+  outboundAllowedHosts: string[];
+
   /** Deployment master key (32 bytes, derived from `SECCHAT_SECRET_KEY`) used to AES-256-GCM-encrypt
    * per-user SSH private keys at rest (src/ssh/keys.ts). Unset ⇒ the git-SSH-identity feature is
    * OFF: `/me/ssh-key` 503s and no key is injected into runners. Never falls back to a guessable key.
@@ -257,6 +263,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runnerToken,
     uploadsDir: opt(env, "SECCHAT_UPLOADS_DIR", "./uploads"),
     maxUploadBytes: Number(opt(env, "SECCHAT_MAX_UPLOAD_BYTES", "26214400")), // 25 MiB
+    outboundAllowedHosts: (env.SECCHAT_OUTBOUND_ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0),
     secretKey,
     sshEnabled: Boolean(secretKey),
     gitKnownHosts,

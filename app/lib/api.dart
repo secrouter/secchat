@@ -205,6 +205,29 @@ abstract class ApiClient {
   /// immediately. Throws [ApiException] 404 if it's already gone.
   Future<void> deleteWebhook(String channelId, String webhookId);
 
+  /// A channel's outbound webhooks (`GET /channels/:id/outbound-webhooks`). Secrets are included.
+  Future<List<OutboundWebhook>> listOutboundWebhooks(String channelId);
+
+  /// Every outbound webhook across the caller's channels (`GET /outbound-webhooks`), each carrying
+  /// its [OutboundWebhook.channelName] — powers the global outbound manager.
+  Future<List<OutboundWebhook>> listAllOutboundWebhooks();
+
+  /// Create an outbound webhook (`POST /channels/:id/outbound-webhooks`) — SecChat will POST a signed
+  /// payload to [url] when one of [events] fires. [includeContent] opts into message-content egress.
+  Future<OutboundWebhook> createOutboundWebhook(
+    String channelId, {
+    required String url,
+    required List<String> events,
+    bool includeContent = false,
+  });
+
+  /// Revoke an outbound webhook (`DELETE /channels/:id/outbound-webhooks/:id`).
+  Future<void> deleteOutboundWebhook(String channelId, String id);
+
+  /// Fire a one-off test delivery (`POST /channels/:id/outbound-webhooks/:id/test`) and return the
+  /// receiver's response status.
+  Future<OutboundTestResult> testOutboundWebhook(String channelId, String id);
+
   /// Pin / unpin a message (any member). Reflected live via a `pin` WS event.
   Future<void> pinMessage(String messageId);
   Future<void> unpinMessage(String messageId);
@@ -677,6 +700,43 @@ class HttpApiClient implements ApiClient {
   Future<void> deleteWebhook(String channelId, String webhookId) async {
     await _delete('/channels/$channelId/webhooks/$webhookId');
   }
+
+  @override
+  Future<List<OutboundWebhook>> listOutboundWebhooks(String channelId) async {
+    final data = await _get('/channels/$channelId/outbound-webhooks') as List<dynamic>;
+    return data.map((e) => OutboundWebhook.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<List<OutboundWebhook>> listAllOutboundWebhooks() async {
+    final data = await _get('/outbound-webhooks') as List<dynamic>;
+    return data.map((e) => OutboundWebhook.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<OutboundWebhook> createOutboundWebhook(
+    String channelId, {
+    required String url,
+    required List<String> events,
+    bool includeContent = false,
+  }) async => OutboundWebhook.fromJson(
+    await _post('/channels/$channelId/outbound-webhooks', {
+      'url': url,
+      'events': events,
+      'includeContent': includeContent,
+    }) as Map<String, dynamic>,
+  );
+
+  @override
+  Future<void> deleteOutboundWebhook(String channelId, String id) async {
+    await _delete('/channels/$channelId/outbound-webhooks/$id');
+  }
+
+  @override
+  Future<OutboundTestResult> testOutboundWebhook(String channelId, String id) async =>
+      OutboundTestResult.fromJson(
+        await _post('/channels/$channelId/outbound-webhooks/$id/test') as Map<String, dynamic>,
+      );
 
   @override
   Future<void> pinMessage(String messageId) async {
