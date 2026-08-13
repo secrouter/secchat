@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Profile dialog for a user's git SSH identity (`/me/ssh-key`). SecChat generates
@@ -145,7 +146,7 @@ class _SshKeyDialogState extends State<_SshKeyDialog> {
           Text('Git SSH key', style: TextStyle(color: AppColors.text, fontSize: 16)),
         ],
       ),
-      content: SizedBox(width: 460, child: _body()),
+      content: SizedBox(width: dialogWidth(context, 460), child: _body()),
       actions: _actions(),
     );
   }

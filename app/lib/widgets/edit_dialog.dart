@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Dialog for editing a message. Pre-filled with [initialContent]; resolves to
@@ -71,7 +72,7 @@ class _EditDialogState extends State<_EditDialog> {
         ],
       ),
       content: SizedBox(
-        width: 460,
+        width: dialogWidth(context, 460),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,

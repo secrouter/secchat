@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// The New-Coding-Agent prompt: a name, a launch-environment choice (WHERE the
@@ -76,7 +77,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
       elevation: 0,
       insetPadding: const EdgeInsets.all(24),
       child: Container(
-        width: 400,
+        width: dialogWidth(context, 400),
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
           color: AppColors.surface,

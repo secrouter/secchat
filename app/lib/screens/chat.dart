@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../api.dart';
 import '../commands.dart';
@@ -11,8 +12,10 @@ import '../marking.dart';
 import '../platform/file_transfer.dart';
 import '../mentions.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import '../widgets/app_topbar.dart';
+import '../widgets/brand_mark.dart';
 import '../widgets/badges.dart';
 import '../widgets/coding_agent_dialog.dart';
 import '../widgets/coding_strip.dart';
@@ -1394,8 +1397,168 @@ class _ChatScreenState extends State<ChatScreen> {
   String _describe(Object error) =>
       error is ApiException ? error.message : error.toString();
 
+  /// The rail, built once and shared by BOTH layouts: the desktop column and
+  /// the compact drawer render the identical widget with the identical
+  /// callbacks — only [ChatSidebar.compact] and the pinned header/footer differ.
+  Widget _sidebar({bool compact = false}) {
+    return ChatSidebar(
+      compact: compact,
+      header: compact ? _drawerHeader() : null,
+      footer: compact ? _drawerFooter() : null,
+      channels: _channels,
+      selectedChannelId: _selected?.id,
+      loading: _loadingChannels,
+      errorText: _channelsError,
+      agentKindByChannel: _agentKindByChannel,
+      currentUserSub: widget.principal.sub,
+      usersBySub: _usersBySub,
+      unreadByChannel: _unreadByChannel,
+      onlineSubs: _onlineSubs,
+      onSelect: (ch) {
+        _selectChannel(ch);
+        // Compact: picking a channel dismisses the drawer so the transcript is
+        // visible immediately (the drawer covers it while open).
+        if (compact && Navigator.of(context).canPop()) Navigator.of(context).pop();
+      },
+      onNewChannel: _handleNewChannel,
+      onNewDm: _handleNewDm,
+      onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
+      onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
+      onArchive: _archiveChannel,
+      showArchived: _showArchived,
+      onToggleShowArchived: () => setState(() => _showArchived = !_showArchived),
+      sortByUnread: _sortByUnread,
+      onToggleSort: () => setState(() => _sortByUnread = !_sortByUnread),
+    );
+  }
+
+  /// Compact drawer header: the top bar's search, mentions and connection
+  /// indicator, which have nowhere to live once the top bar is gone.
+  Widget _drawerHeader() {
+    return SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const BrandMark(small: true),
+            const SizedBox(height: 12),
+            _DrawerTile(
+              icon: Icons.search,
+              label: 'Search messages',
+              onTap: () {
+                Navigator.of(context).pop();
+                _openSearch();
+              },
+            ),
+            const SizedBox(height: 6),
+            _DrawerTile(
+              icon: Icons.alternate_email,
+              label: 'Mentions',
+              badge: _unseenMentions > 0 ? '$_unseenMentions' : null,
+              onTap: () {
+                Navigator.of(context).pop();
+                _openMentions();
+              },
+            ),
+            const SizedBox(height: 8),
+            _ConnRow(status: _connStatus),
+            const SizedBox(height: 4),
+            const Divider(color: AppColors.borderSoft, height: 17),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Compact drawer footer: who you are, plus the two account actions the top
+  /// bar owns on desktop. Pinned to the bottom — thumb-reachable, and far from
+  /// anything destructive being hit by accident.
+  Widget _drawerFooter() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.surfaceAlt,
+        border: Border(top: BorderSide(color: AppColors.border)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  _Initials(principal: widget.principal),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          widget.principal.label,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.text,
+                          ),
+                        ),
+                        if (widget.principal.groups.isNotEmpty)
+                          Text(
+                            widget.principal.groups.first,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: AppColors.textFaint,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _DrawerTile(
+                icon: Icons.vpn_key,
+                label: 'Git SSH key',
+                onTap: () {
+                  Navigator.of(context).pop();
+                  showSshKeyDialog(context, api: widget.api);
+                },
+              ),
+              const SizedBox(height: 6),
+              _DrawerTile(
+                icon: Icons.logout,
+                label: 'Sign out',
+                onTap: widget.onSignOut,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Compact (phone): single pane, rail behind a drawer. The transcript owns
+    // the screen; everything the top bar carried moves into the drawer.
+    if (MediaQuery.sizeOf(context).width < kCompactWidth) {
+      return Scaffold(
+        backgroundColor: AppColors.bg,
+        drawer: Drawer(
+          backgroundColor: AppColors.surface,
+          width: MediaQuery.sizeOf(context).width * 0.86,
+          shape: const RoundedRectangleBorder(),
+          child: _sidebar(compact: true),
+        ),
+        body: SafeArea(child: _buildMain(compact: true)),
+      );
+    }
+
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: Column(
@@ -1414,28 +1577,7 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                ChatSidebar(
-                  channels: _channels,
-                  selectedChannelId: _selected?.id,
-                  loading: _loadingChannels,
-                  errorText: _channelsError,
-                  agentKindByChannel: _agentKindByChannel,
-                  currentUserSub: widget.principal.sub,
-                  usersBySub: _usersBySub,
-                  unreadByChannel: _unreadByChannel,
-                  onlineSubs: _onlineSubs,
-                  onSelect: _selectChannel,
-                  onNewChannel: _handleNewChannel,
-                  onNewDm: _handleNewDm,
-                  onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
-                  onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
-                  onArchive: _archiveChannel,
-                  showArchived: _showArchived,
-                  onToggleShowArchived: () =>
-                      setState(() => _showArchived = !_showArchived),
-                  sortByUnread: _sortByUnread,
-                  onToggleSort: () => setState(() => _sortByUnread = !_sortByUnread),
-                ),
+                _sidebar(),
                 Expanded(child: _buildMain()),
               ],
             ),
@@ -1445,15 +1587,111 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildMain() {
+  /// Compact app-bar subtitle: the type badge and member count that the wide
+  /// header shows as separate chips, folded into one line of secondary text.
+  String _compactSubtitle(Channel ch) {
+    final kind = switch (ch.kind) {
+      ChannelKind.dm => 'Direct message',
+      ChannelKind.agent => 'Agent',
+      _ => 'Channel',
+    };
+    final n = ch.members.length;
+    if (n == 0) return kind;
+    return '$kind · $n ${n == 1 ? 'member' : 'members'}';
+  }
+
+  /// The wide header's right-hand controls — pins, members, channel marking and
+  /// the short id — as a bottom sheet. Nothing is dropped; it is reached with
+  /// one tap instead of occupying a second permanent row on a 390pt screen.
+  Future<void> _openChannelSheet(Channel ch) async {
+    final isDm = ch.kind == ChannelKind.dm;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      showDragHandle: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _SheetRow(
+              icon: Icons.push_pin_outlined,
+              label: 'Pinned messages',
+              onTap: () {
+                Navigator.of(sheetCtx).pop();
+                _openPins(ch);
+              },
+            ),
+            if (!isDm)
+              _SheetRow(
+                icon: Icons.group_outlined,
+                label: 'Members',
+                trailing: ch.members.isEmpty ? null : '${ch.members.length}',
+                onTap: () {
+                  Navigator.of(sheetCtx).pop();
+                  _openMembers(ch);
+                },
+              ),
+            _SheetRow(
+              icon: Icons.shield_outlined,
+              label: 'Channel marking',
+              trailing: ch.isMarked ? ch.cuiMarking : 'UNMARKED',
+              onTap: () {
+                Navigator.of(sheetCtx).pop();
+                _markChannel(ch);
+              },
+            ),
+            _SheetRow(
+              icon: Icons.copy_all_outlined,
+              label: 'Copy channel id',
+              trailing: shortId(ch.id),
+              onTap: () async {
+                await Clipboard.setData(ClipboardData(text: ch.id));
+                if (sheetCtx.mounted) Navigator.of(sheetCtx).pop();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Channel id copied')),
+                  );
+                }
+              },
+            ),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMain({bool compact = false}) {
     final selected = _selected;
     if (selected == null) {
-      return const EmptyState(
+      // Compact: no rail is visible, so the empty state carries the app bar
+      // (the only way back to the drawer) and points at it rather than a
+      // sidebar the reader cannot see.
+      final empty = EmptyState(
         icon: Icons.forum_outlined,
         title: 'Select a channel to start chatting',
-        subtitle:
-            'Or create a new channel, assistant, or coding agent from the '
-            'sidebar.',
+        subtitle: compact
+            ? 'Open the menu to pick a channel, or create a new channel, '
+                'assistant, or coding agent.'
+            : 'Or create a new channel, assistant, or coding agent from the '
+                'sidebar.',
+      );
+      if (!compact) return empty;
+      return Column(
+        children: [
+          _CompactBar(
+            title: 'SecChat',
+            subtitle: null,
+            status: _connStatus,
+            mentionCount: _unseenMentions,
+          ),
+          Expanded(child: empty),
+        ],
       );
     }
 
@@ -1495,18 +1733,27 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Column(
       children: [
-        _ChannelHeader(
-          channel: selected,
-          title: _channelTitle(selected),
-          agentKind: _agentKindByChannel[selected.id],
-          models: _models,
-          currentModel: selected.agentModel,
-          onModelChanged: (model) => _setAgentModel(selected, model),
-          onMarkChannel: () => _markChannel(selected),
-          // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
-          onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
-          onPins: () => _openPins(selected),
-        ),
+        if (compact)
+          _CompactBar(
+            title: _channelTitle(selected),
+            subtitle: _compactSubtitle(selected),
+            status: _connStatus,
+            mentionCount: _unseenMentions,
+            onOverflow: () => _openChannelSheet(selected),
+          )
+        else
+          _ChannelHeader(
+            channel: selected,
+            title: _channelTitle(selected),
+            agentKind: _agentKindByChannel[selected.id],
+            models: _models,
+            currentModel: selected.agentModel,
+            onModelChanged: (model) => _setAgentModel(selected, model),
+            onMarkChannel: () => _markChannel(selected),
+            // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
+            onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
+            onPins: () => _openPins(selected),
+          ),
         // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
         if (codingStrip != null && threadParent == null) codingStrip,
@@ -1952,6 +2199,308 @@ class _InlineError extends StatelessWidget {
               style: AppButtonStyles.ghost,
               child: const Text('Retry'),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The compact (phone) app bar: menu, channel identity, overflow.
+///
+/// Replaces BOTH desktop chrome rows — [AppTopBar] and [_ChannelHeader] — on a
+/// narrow screen. The menu button carries the connection state and the unseen
+/// mention count, so neither is lost when the drawer is closed.
+class _CompactBar extends StatelessWidget {
+  const _CompactBar({
+    required this.title,
+    required this.subtitle,
+    required this.status,
+    this.mentionCount = 0,
+    this.onOverflow,
+  });
+
+  final String title;
+  final String? subtitle;
+  final ConnStatus status;
+  final int mentionCount;
+  final VoidCallback? onOverflow;
+
+  Color get _statusColor => switch (status) {
+        ConnStatus.connected => AppColors.ok,
+        ConnStatus.connecting => AppColors.warn,
+        ConnStatus.down => AppColors.bad,
+        ConnStatus.idle => AppColors.textFaint,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      child: Row(
+        children: [
+          // 48pt tap target (Material minimum) even though the glyph is 20.
+          Builder(
+            builder: (ctx) => Stack(
+              clipBehavior: Clip.none,
+              children: [
+                IconButton(
+                  onPressed: () => Scaffold.of(ctx).openDrawer(),
+                  icon: const Icon(Icons.menu, size: 22),
+                  tooltip: 'Channels and account',
+                  color: AppColors.text,
+                ),
+                // Connection state rides the menu button: a degraded socket has
+                // to be visible without opening anything.
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: _statusColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppColors.surface, width: 1.5),
+                    ),
+                  ),
+                ),
+                if (mentionCount > 0)
+                  Positioned(
+                    right: 2,
+                    top: 4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      constraints: const BoxConstraints(minWidth: 15),
+                      decoration: BoxDecoration(
+                        color: AppColors.bad,
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: AppColors.surface, width: 1.5),
+                      ),
+                      child: Text(
+                        mentionCount > 99 ? '99+' : '$mentionCount',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 9,
+                          height: 1.2,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.text,
+                  ),
+                ),
+                if (subtitle != null)
+                  Text(
+                    subtitle!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11, color: AppColors.textFaint),
+                  ),
+              ],
+            ),
+          ),
+          if (onOverflow != null)
+            IconButton(
+              onPressed: onOverflow,
+              icon: const Icon(Icons.more_horiz, size: 22),
+              tooltip: 'Channel actions',
+              color: AppColors.textMuted,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A full-width row in the compact drawer — same visual language as the
+/// existing sidebar action buttons, with an optional count badge.
+class _DrawerTile extends StatelessWidget {
+  const _DrawerTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.badge,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final String? badge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surfaceAlt,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          height: 44, // touch target
+          padding: const EdgeInsets.symmetric(horizontal: 11),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.borderSoft),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 17, color: AppColors.textMuted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13.5, color: AppColors.text),
+                ),
+              ),
+              if (badge != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: AppColors.accent,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    badge!,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.onAccent,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Connection state as a labelled row — the drawer's copy of the top bar's
+/// indicator, where there is room for the word as well as the dot.
+class _ConnRow extends StatelessWidget {
+  const _ConnRow({required this.status});
+
+  final ConnStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (status) {
+      ConnStatus.connected => ('Connected', AppColors.ok),
+      ConnStatus.connecting => ('Connecting…', AppColors.warn),
+      ConnStatus.down => ('Disconnected', AppColors.bad),
+      ConnStatus.idle => ('Idle', AppColors.textFaint),
+    };
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Text(label, style: TextStyle(fontSize: 12, color: color)),
+      ],
+    );
+  }
+}
+
+/// The signed-in user's initials, matching the top bar's avatar treatment.
+class _Initials extends StatelessWidget {
+  const _Initials({required this.principal});
+
+  final Principal principal;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = principal.label.trim();
+    final parts = label.split(RegExp(r'[\s._-]+')).where((p) => p.isNotEmpty).toList();
+    final initials = parts.isEmpty
+        ? '?'
+        : parts.length == 1
+            ? parts.first.substring(0, parts.first.length >= 2 ? 2 : 1).toUpperCase()
+            : (parts.first.substring(0, 1) + parts[1].substring(0, 1)).toUpperCase();
+    return Container(
+      width: 34,
+      height: 34,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.accentSoft,
+        shape: BoxShape.circle,
+        border: Border.all(color: AppColors.accentBorder),
+      ),
+      child: Text(
+        initials,
+        style: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: AppColors.accent,
+        ),
+      ),
+    );
+  }
+}
+
+/// One action inside the compact channel sheet.
+class _SheetRow extends StatelessWidget {
+  const _SheetRow({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.trailing,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final String? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        height: 50, // touch target
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        child: Row(
+          children: [
+            Icon(icon, size: 19, color: AppColors.textMuted),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(fontSize: 14, color: AppColors.text),
+              ),
+            ),
+            if (trailing != null)
+              Text(
+                trailing!,
+                style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint),
+              ),
           ],
         ),
       ),

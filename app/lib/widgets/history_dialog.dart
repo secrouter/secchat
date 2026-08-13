@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../formatting.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'brand_icon.dart';
 import 'markdown_text.dart';
@@ -49,7 +50,7 @@ class _HistoryDialog extends StatelessWidget {
         ],
       ),
       content: SizedBox(
-        width: 480,
+        width: dialogWidth(context, 480),
         child: revisions.isEmpty
             ? const Text(
                 'No history available.',

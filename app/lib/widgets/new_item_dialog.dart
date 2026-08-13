@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Shows the small "name this thing" prompt shared by New channel / New
@@ -63,7 +64,7 @@ class _NewItemDialogState extends State<_NewItemDialog> {
       elevation: 0,
       insetPadding: const EdgeInsets.all(24),
       child: Container(
-        width: 360,
+        width: dialogWidth(context, 360),
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
           color: AppColors.surface,
