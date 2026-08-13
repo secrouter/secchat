@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../responsive.dart';
 import '../theme.dart';
 import 'brand_icon.dart';
 
@@ -27,7 +28,7 @@ Future<bool?> showStepUpDialog(BuildContext context, {String? action}) {
         ],
       ),
       content: SizedBox(
-        width: 400,
+        width: dialogWidth(context, 400),
         child: Text(
           'This is a privileged action${action == null ? '' : ' ($action)'} and needs a fresh '
           'confirmation of your identity. Re-authenticate to continue.',

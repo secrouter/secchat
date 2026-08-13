@@ -10,6 +10,7 @@ import '../marking.dart';
 import '../mentions.dart';
 import '../models.dart';
 import '../platform/file_transfer.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'markdown_text.dart';
@@ -116,6 +117,11 @@ class _MessageComposerState extends State<MessageComposer> {
   bool _sending = false;
   bool _editMode = false;
   bool _showPreview = false;
+
+  /// Compact only: whether the markdown formatting row is expanded. Collapsed
+  /// by default so the transcript keeps its height on a phone — the controls
+  /// are one tap away behind "Aa", never removed.
+  bool _showFormat = false;
 
   /// The chosen per-message level (used only when the channel is unmarked).
   late String _marking = widget.initialMarking;
@@ -634,6 +640,12 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   Widget _toolbar() {
+    // Compact (phone): the formatting glyphs collapse behind "Aa"; marking and
+    // preview stay on the visible strip. You cannot ask someone to classify a
+    // message using a control they have to go looking for, so the marking
+    // selector is never the thing that gets hidden.
+    if (isCompact(context)) return _compactToolbar();
+
     return Row(
       children: [
         Expanded(
@@ -676,6 +688,70 @@ class _MessageComposerState extends State<MessageComposer> {
         ),
         const SizedBox(width: 6),
         _keyboardHint(),
+      ],
+    );
+  }
+
+  /// Phone toolbar: a persistent strip (marking + preview + the Aa toggle) and,
+  /// when expanded, the same formatting buttons the desktop toolbar shows.
+  Widget _compactToolbar() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            // Aa — expands the formatting row. Highlighted while open.
+            _toggleButton(
+              Icons.text_fields,
+              _showFormat ? 'Hide formatting' : 'Formatting',
+              _showFormat,
+              () => setState(() => _showFormat = !_showFormat),
+            ),
+            if (widget.onAttach != null) _attachButton(),
+            const Spacer(),
+            if (widget.markingLevels.isNotEmpty) ...[
+              _markingSelector(),
+              const SizedBox(width: 6),
+            ],
+            _toggleButton(
+              Icons.visibility_outlined,
+              'Toggle preview',
+              _showPreview,
+              () => setState(() => _showPreview = !_showPreview),
+            ),
+          ],
+        ),
+        // The full formatting set — identical actions to the wide toolbar.
+        if (_showFormat)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Wrap(
+              spacing: 1,
+              runSpacing: 1,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _toolButton(Icons.format_bold, 'Bold',
+                    () => _wrap('**', '**', placeholder: 'bold')),
+                _toolButton(Icons.format_italic, 'Italic',
+                    () => _wrap('*', '*', placeholder: 'italic')),
+                _toolButton(Icons.format_strikethrough, 'Strikethrough',
+                    () => _wrap('~~', '~~', placeholder: 'strikethrough')),
+                _toolButton(Icons.code, 'Inline code',
+                    () => _wrap('`', '`', placeholder: 'code')),
+                _toolButton(Icons.data_object, 'Code block',
+                    () => _wrap('\n```\n', '\n```\n', placeholder: 'code')),
+                _toolButton(Icons.link, 'Link',
+                    () => _wrap('[', '](url)', placeholder: 'text')),
+                _toolButton(Icons.format_list_bulleted, 'Bulleted list',
+                    () => _linePrefix('- ')),
+                _toolButton(Icons.format_quote, 'Quote',
+                    () => _linePrefix('> ')),
+                if (widget.markingLevels.isNotEmpty) _portionButton(),
+                _emojiButton(),
+              ],
+            ),
+          ),
       ],
     );
   }

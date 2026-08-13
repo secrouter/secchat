@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../formatting.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Opens a message-search dialog. Resolves to the chosen [SearchHit] (whose
@@ -90,7 +91,7 @@ class _SearchDialogState extends State<_SearchDialog> {
         ),
       ),
       content: SizedBox(
-        width: 460,
+        width: dialogWidth(context, 460),
         height: 460,
         child: Column(
           children: [

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../marking.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'brand_icon.dart';
 
@@ -93,7 +94,7 @@ class _MarkingPickerDialogState extends State<_MarkingPickerDialog> {
         ],
       ),
       content: SizedBox(
-        width: 360,
+        width: dialogWidth(context, 360),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,

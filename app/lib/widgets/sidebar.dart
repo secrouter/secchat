@@ -29,7 +29,23 @@ class ChatSidebar extends StatelessWidget {
     this.sortByUnread = false,
     this.onToggleSort,
     this.errorText,
+    this.compact = false,
+    this.header,
+    this.footer,
   });
+
+  /// Compact (phone) layout: the rail is presented as a drawer, so it fills the
+  /// width it is given instead of the fixed desktop 258 and drops its right
+  /// border (the drawer edge already provides one).
+  final bool compact;
+
+  /// Compact only: content pinned ABOVE the create actions — search, mentions
+  /// and connection status, which live in the top bar on desktop.
+  final Widget? header;
+
+  /// Compact only: content pinned to the BOTTOM — the signed-in user, SSH keys
+  /// and sign out, which live in the top bar on desktop.
+  final Widget? footer;
 
   final List<Channel> channels;
   final String? selectedChannelId;
@@ -82,13 +98,17 @@ class ChatSidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 258,
-      decoration: const BoxDecoration(
+      // Compact: fill the drawer. Wide: the desktop rail, unchanged.
+      width: compact ? null : 258,
+      decoration: BoxDecoration(
         color: AppColors.surface,
-        border: Border(right: BorderSide(color: AppColors.border)),
+        border: compact
+            ? null
+            : const Border(right: BorderSide(color: AppColors.border)),
       ),
       child: Column(
         children: [
+          if (header != null) header!,
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
             child: Column(
@@ -120,6 +140,7 @@ class ChatSidebar extends StatelessWidget {
             ),
           ),
           Expanded(child: _buildList()),
+          if (footer != null) footer!,
         ],
       ),
     );
