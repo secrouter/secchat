@@ -415,13 +415,17 @@ class HttpApiClient implements ApiClient {
     return data['sso'] as bool? ?? false;
   }
 
-  /// `POST /auth/logout` -- clears the `secchat_session` cookie server-side;
-  /// 204 on success. Harmless to call in bearer/dev mode too (there's no
-  /// session cookie to clear there, so it's just a round trip); callers
-  /// should treat failures as non-fatal and sign out of the client locally
-  /// regardless.
-  Future<void> logout() async {
-    await _post('/auth/logout');
+  /// `POST /auth/logout` -- clears the `secchat_session` cookie server-side. When SSO is
+  /// configured and the IdP publishes an `end_session_endpoint`, the response also carries
+  /// `{logoutUrl}` (the OIDC RP-initiated-logout URL): the caller should navigate the top-level
+  /// browser there to terminate the IdP (Authentik) session too, so a subsequent login doesn't
+  /// silently re-authenticate. Returns that URL, or null in dev/bearer mode / when the IdP
+  /// publishes no end_session_endpoint. Callers should treat failures as non-fatal and sign out
+  /// of the client locally regardless.
+  Future<String?> logout() async {
+    final data = await _post('/auth/logout');
+    if (data is Map && data['logoutUrl'] is String) return data['logoutUrl'] as String;
+    return null;
   }
 
   @override
