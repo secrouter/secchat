@@ -7,7 +7,10 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken } from "../types.ts";
+import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, OutboundEvent, OutboundWebhook, Principal, Reaction, Store, User, UserSshKey, VerifyToken, Webhook } from "../types.ts";
+import { OUTBOUND_EVENTS } from "../types.ts";
+import type { OutboundDispatcher } from "../webhooks/outbound.ts";
+import { isAllowedOutboundUrl } from "../webhooks/outbound.ts";
 import { encryptSecret, generateEd25519 } from "../ssh/keys.ts";
 import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
@@ -313,6 +316,8 @@ function buildRouter(
   /** Whether the Kubernetes agent pool is configured — drives the "Online pool" launch environment's
    * availability (POST /agents + GET /runner/environments). Unset/false ⇒ pool shown as "coming soon". */
   poolConfigured?: boolean,
+  outbound?: OutboundDispatcher,
+  outboundAllowedHosts: readonly string[] = [],
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -361,6 +366,10 @@ function buildRouter(
     // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
     sendJson(res, 200, {
       ...principal,
+      // Server-authoritative admin flag: whether this principal is in the deployment's configured
+      // admin group (SECCHAT_ADMIN_GROUP). The client uses THIS instead of guessing the group name,
+      // so the admin console surfaces correctly whatever a deployment names its admin group.
+      isAdmin: isAdmin(principal, admin?.adminGroup ?? "secchat-admins"),
       marking: {
         levels: marking.levels,
         default: marking.default,
@@ -599,6 +608,7 @@ function buildRouter(
     if (isDowngrade && !(await enforceCapability(req, res, principal, "marking.downgrade"))) return;
     const updated = await store.setChannelMarking(channelId, next, principal.sub);
     broadcast?.(channelId, { type: "channel_marking", channelId, marking: next, by: principal.sub });
+    void outbound?.dispatch(channelId, "channel.marked", { marking: next, by: principal.sub });
     sendJson(res, 200, updated);
   });
 
@@ -820,6 +830,17 @@ function buildRouter(
       ...(attachments.length ? { attachments } : {}),
     };
     broadcast?.(channelId, { type: "message", message: enriched });
+    // Fire the outbound webhook (metadata always; `content` is stripped for subscriptions that
+    // didn't opt into content egress). Not awaited — a slow receiver must never delay the post.
+    void outbound?.dispatch(channelId, "message.created", {
+      messageId: enriched.id,
+      seq: enriched.seq,
+      authorRef: enriched.authorRef,
+      authorType: enriched.authorType,
+      createdAt: enriched.createdAt,
+      marking: enriched.marking ?? null,
+      content: enriched.content,
+    });
     sendJson(res, 201, enriched);
     // Kick any assistant members of this channel (after responding — the reply arrives over WS).
     if (llm) void triggerAssistants(store, llm, broadcast, channelId, principal.sub, content, assistantModel, marking, dlp);
@@ -1080,6 +1101,8 @@ function buildRouter(
       }
     }
     broadcast?.(message.channelId, { type: "redaction", channelId: message.channelId, messageId, by: principal.sub });
+    // A redaction carries no content — metadata only, always.
+    void outbound?.dispatch(message.channelId, "message.redacted", { messageId, by: principal.sub });
     sendJson(res, 200, { ok: true });
   });
 
@@ -1303,6 +1326,146 @@ function buildRouter(
     const wh = await store.createWebhook(channelId, principal.sub);
     await store.appendAudit({ actor: principal.sub, action: "webhook.create", target: wh.id });
     sendJson(res, 201, wh);
+  });
+
+  // List a channel's inbound webhooks (management UI). Returns the tokens too — they ARE the
+  // credential the app renders as a copyable post URL — so this is gated the SAME as minting one
+  // (`webhook.create`): a viewer of the standing credentials must hold the same capability as their
+  // creator. Membership is still required first.
+  router.add("GET", "/channels/:id/webhooks", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    sendJson(res, 200, await store.listWebhooks(channelId));
+  });
+
+  // Revoke an inbound webhook — same capability + membership as minting one. Scoped to the channel
+  // in the path so a member can't revoke another channel's webhook by id (the store enforces it
+  // too). 404 when there's no such webhook in this channel.
+  router.add("DELETE", "/channels/:id/webhooks/:whid", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const removed = await store.deleteWebhook(channelId, params.whid!);
+    if (!removed) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    await store.appendAudit({ actor: principal.sub, action: "webhook.revoke", target: params.whid! });
+    sendJson(res, 200, { ok: true });
+  });
+
+  // Global inbound-webhook view for the management menu: every webhook across the channels the
+  // caller is a MEMBER of, each annotated with its channel's name — so an operator sees all their
+  // webhooks in one place instead of opening each channel. Same `webhook.create` capability as the
+  // per-channel routes (it returns tokens); membership scoping means it never leaks another
+  // channel's webhooks even if a deployment ungates the capability.
+  router.add("GET", "/webhooks", async ({ req, res, principal }) => {
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const out: Array<Webhook & { channelName: string }> = [];
+    for (const c of await store.listChannels()) {
+      if (!(await store.isMember(c.id, principal.sub))) continue;
+      for (const wh of await store.listWebhooks(c.id)) out.push({ ...wh, channelName: c.name ?? c.id });
+    }
+    sendJson(res, 200, out);
+  });
+
+  // ── Outbound webhooks (SecChat → external URL on events) ─────────────────────────────────────
+  // Same membership + `webhook.create` capability as inbound. Create validates the destination
+  // against the host allowlist (a data-egress guard) and the requested event set.
+  router.add("POST", "/channels/:id/outbound-webhooks", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const body = (await readJsonBody(req)) as { url?: string; events?: string[]; includeContent?: boolean };
+    const url = (body.url ?? "").trim();
+    if (!isAllowedOutboundUrl(url, outboundAllowedHosts)) {
+      sendJson(res, 400, { error: "invalid_url" });
+      return;
+    }
+    const requested = Array.isArray(body.events) ? body.events : ["message.created"];
+    const events = requested.filter((e): e is OutboundEvent => (OUTBOUND_EVENTS as readonly string[]).includes(e));
+    if (events.length === 0) {
+      sendJson(res, 400, { error: "no_valid_events" });
+      return;
+    }
+    const hook = await store.createOutboundWebhook({
+      channelId,
+      url,
+      events,
+      includeContent: body.includeContent === true,
+      createdBy: principal.sub,
+    });
+    await store.appendAudit({ actor: principal.sub, action: "outbound_webhook.create", target: hook.id });
+    sendJson(res, 201, hook);
+  });
+
+  router.add("GET", "/channels/:id/outbound-webhooks", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    sendJson(res, 200, await store.listOutboundWebhooks(channelId));
+  });
+
+  router.add("DELETE", "/channels/:id/outbound-webhooks/:oid", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const removed = await store.deleteOutboundWebhook(channelId, params.oid!);
+    if (!removed) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    await store.appendAudit({ actor: principal.sub, action: "outbound_webhook.revoke", target: params.oid! });
+    sendJson(res, 200, { ok: true });
+  });
+
+  // Fire a one-off test delivery so an operator can confirm the receiver + signature before relying
+  // on the webhook. Needs the dispatcher wired (503 otherwise).
+  router.add("POST", "/channels/:id/outbound-webhooks/:oid/test", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    if (!outbound) {
+      sendJson(res, 503, { error: "outbound_unavailable" });
+      return;
+    }
+    const hook = await store.getOutboundWebhook(channelId, params.oid!);
+    if (!hook) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    sendJson(res, 200, await outbound.deliverTest(hook));
+  });
+
+  // Global outbound view for the management menu — every outbound webhook across the caller's member
+  // channels, annotated with channel name. Same capability + membership scoping as GET /webhooks.
+  router.add("GET", "/outbound-webhooks", async ({ req, res, principal }) => {
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const out: Array<OutboundWebhook & { channelName: string }> = [];
+    for (const c of await store.listChannels()) {
+      if (!(await store.isMember(c.id, principal.sub))) continue;
+      for (const wh of await store.listOutboundWebhooks(c.id)) out.push({ ...wh, channelName: c.name ?? c.id });
+    }
+    sendJson(res, 200, out);
   });
 
   // ── Full-text search. `search` is the injected port (see SearchFn above); a deployment/test
@@ -1646,11 +1809,17 @@ export function createHttpServer(deps: {
   /** Whether the Kubernetes agent pool is configured (config.pool + a runner-token minter). Drives
    * the "Online pool" launch-environment availability. Unset ⇒ pool unavailable ("coming soon"). */
   poolConfigured?: boolean;
+  /** Outbound-webhook dispatcher (webhooks/outbound.ts). Unset ⇒ outbound events aren't delivered
+   * and the outbound-webhook routes still manage subscriptions but the test-ping route 503s. */
+  outbound?: OutboundDispatcher;
+  /** Destination-host allowlist for creating outbound webhooks (config.outboundAllowedHosts). Empty
+   * ⇒ any http(s) host is permitted. */
+  outboundAllowedHosts?: readonly string[];
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.outbound, deps.outboundAllowedHosts);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

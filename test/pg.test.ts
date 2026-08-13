@@ -571,6 +571,53 @@ if (!DATABASE_URL) {
     assert.equal((await store.getWebhookByToken(hook2.token))?.id, hook2.id);
   });
 
+  test("listWebhooks is per-channel; deleteWebhook is channel-scoped and idempotent", async () => {
+    const chanA = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    const chanB = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+    const a1 = await store.createWebhook(chanA.id, "user-alice");
+    const a2 = await store.createWebhook(chanA.id, "user-bob");
+    await store.createWebhook(chanB.id, "user-alice");
+
+    assert.deepEqual(new Set((await store.listWebhooks(chanA.id)).map((w) => w.id)), new Set([a1.id, a2.id]));
+    assert.equal((await store.listWebhooks(chanB.id)).length, 1);
+
+    assert.equal(await store.deleteWebhook(chanB.id, a1.id), false); // wrong channel
+    assert.equal(await store.deleteWebhook(chanA.id, a1.id), true);
+    assert.equal(await store.getWebhookByToken(a1.token), null);
+    assert.deepEqual((await store.listWebhooks(chanA.id)).map((w) => w.id), [a2.id]);
+    assert.equal(await store.deleteWebhook(chanA.id, a1.id), false); // idempotent
+  });
+
+  test("outbound webhooks: create/list/get/delete channel-scoped; recordOutboundDelivery stamps last*", async () => {
+    const chanA = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+    const chanB = await store.createChannel({ workspaceId: WORKSPACE, kind: "human", createdBy: "user-alice" });
+
+    const hook = await store.createOutboundWebhook({
+      channelId: chanA.id,
+      url: "https://receiver.test/hook",
+      events: ["message.created", "channel.marked"],
+      includeContent: true,
+      createdBy: "user-alice",
+    });
+    assert.ok(hook.id && hook.secret.length > 10);
+    assert.deepEqual(hook.events, ["message.created", "channel.marked"]);
+
+    assert.deepEqual((await store.listOutboundWebhooks(chanA.id)).map((w) => w.id), [hook.id]);
+    assert.equal((await store.getOutboundWebhook(chanB.id, hook.id)), null);
+    assert.equal((await store.getOutboundWebhook(chanA.id, hook.id))?.includeContent, true);
+
+    await store.recordOutboundDelivery(hook.id, 502, "bad gateway");
+    const after = await store.getOutboundWebhook(chanA.id, hook.id);
+    assert.equal(after?.lastStatus, 502);
+    assert.equal(after?.lastError, "bad gateway");
+    assert.ok(after?.lastDeliveryAt);
+
+    assert.equal(await store.deleteOutboundWebhook(chanB.id, hook.id), false);
+    assert.equal(await store.deleteOutboundWebhook(chanA.id, hook.id), true);
+    assert.equal(await store.deleteOutboundWebhook(chanA.id, hook.id), false);
+  });
+
   // ── Agents ─────────────────────────────────────────────────────────────────────────────────
 
   test("createAgent -> getAgent round-trip; unknown id returns null; listAgentsByOwner/listAllAgents reflect it", async () => {

@@ -298,6 +298,36 @@ export interface Webhook {
   createdAt: string;
 }
 
+/** The events an OUTBOUND webhook can subscribe to. Deliberately small + explicit — a subscription
+ * lists the ones it wants and the dispatcher delivers only matching events. */
+export type OutboundEvent = "message.created" | "message.redacted" | "channel.marked";
+export const OUTBOUND_EVENTS: readonly OutboundEvent[] = [
+  "message.created",
+  "message.redacted",
+  "channel.marked",
+];
+
+/** An OUTBOUND webhook: SecChat POSTs a signed JSON payload to `url` when a subscribed event fires
+ * in the channel — the opposite direction of {@link Webhook}. `secret` signs each delivery
+ * (HMAC-SHA256 → the `X-Sec-Webhook-Signature` header); treat it like a shared secret.
+ * `includeContent` gates whether message CONTENT (not just metadata) is egressed — OFF by default,
+ * because this is a data-egress path out of a CUI system. The `last*` fields record the most recent
+ * delivery attempt for observability (status 0 ⇒ a network/timeout error). */
+export interface OutboundWebhook {
+  id: Id;
+  channelId: Id;
+  url: string;
+  secret: string;
+  events: OutboundEvent[];
+  includeContent: boolean;
+  active: boolean;
+  createdBy: string;
+  createdAt: string;
+  lastStatus?: number;
+  lastError?: string;
+  lastDeliveryAt?: string;
+}
+
 export interface AppendAuditInput {
   actor: string;
   action: string;
@@ -425,6 +455,21 @@ export interface Store {
   // Inbound webhooks.
   createWebhook(channelId: Id, createdBy: string): Promise<Webhook>; // mints a random token
   getWebhookByToken(token: string): Promise<Webhook | null>;
+  listWebhooks(channelId: Id): Promise<Webhook[]>; // a channel's inbound webhooks, newest first
+  deleteWebhook(channelId: Id, webhookId: Id): Promise<boolean>; // revoke; false if not in this channel
+
+  // Outbound webhooks (SecChat → external URL when an event fires).
+  createOutboundWebhook(input: {
+    channelId: Id;
+    url: string;
+    events: OutboundEvent[];
+    includeContent: boolean;
+    createdBy: string;
+  }): Promise<OutboundWebhook>;
+  listOutboundWebhooks(channelId: Id): Promise<OutboundWebhook[]>; // newest first
+  getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null>;
+  deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean>; // revoke; false if not in this channel
+  recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void>; // stamp last*
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

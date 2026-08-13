@@ -92,6 +92,22 @@ interface FakeWebhook {
 }
 const webhooksByToken = new Map<string, FakeWebhook>();
 
+interface FakeOutbound {
+  id: string;
+  channelId: string;
+  url: string;
+  secret: string;
+  events: string[];
+  includeContent: boolean;
+  active: boolean;
+  createdBy: string;
+  createdAt: string;
+  lastStatus?: number;
+  lastError?: string;
+  lastDeliveryAt?: string;
+}
+const outboundById = new Map<string, FakeOutbound>();
+
 const store = {
   async createChannel(input: { workspaceId: string; kind: string; name?: string; createdBy: string }) {
     const id = `chan-${nextChannelId++}`;
@@ -229,6 +245,50 @@ const store = {
   },
   async getWebhookByToken(token: string) {
     return webhooksByToken.get(token) ?? null;
+  },
+  async listWebhooks(channelId: string) {
+    return [...webhooksByToken.values()].filter((w) => w.channelId === channelId);
+  },
+  async deleteWebhook(channelId: string, webhookId: string) {
+    for (const [token, w] of webhooksByToken) {
+      if (w.id === webhookId && w.channelId === channelId) {
+        webhooksByToken.delete(token);
+        return true;
+      }
+    }
+    return false;
+  },
+  async createOutboundWebhook(input: { channelId: string; url: string; events: string[]; includeContent: boolean; createdBy: string }) {
+    const hook = {
+      id: `owh-${nextWebhookId++}`,
+      channelId: input.channelId,
+      url: input.url,
+      secret: `sec-${randomUUID()}`,
+      events: [...input.events],
+      includeContent: input.includeContent,
+      active: true,
+      createdBy: input.createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    outboundById.set(hook.id, hook);
+    return hook;
+  },
+  async listOutboundWebhooks(channelId: string) {
+    return [...outboundById.values()].filter((w) => w.channelId === channelId);
+  },
+  async getOutboundWebhook(channelId: string, id: string) {
+    const w = outboundById.get(id);
+    return w && w.channelId === channelId ? w : null;
+  },
+  async deleteOutboundWebhook(channelId: string, id: string) {
+    const w = outboundById.get(id);
+    if (!w || w.channelId !== channelId) return false;
+    outboundById.delete(id);
+    return true;
+  },
+  async recordOutboundDelivery(id: string, status: number, error: string | null) {
+    const w = outboundById.get(id);
+    if (w) { w.lastStatus = status; w.lastError = error ?? undefined; w.lastDeliveryAt = new Date().toISOString(); }
   },
   async createAgent(input: { ownerSub: string; kind: string; name?: string; model?: string }) {
     const agent = { id: `agent-${nextAgentId++}`, ...input, createdAt: new Date().toISOString() };
@@ -523,6 +583,16 @@ test("GET /me with a valid bearer token returns the principal + the marking poli
   // The default built-in ladder is attached (no `marking` dep wired in this server).
   assert.equal(body.marking.default, "UNCLASSIFIED");
   assert.ok(body.marking.levels.includes("CUI"));
+  // Server-authoritative admin flag: user-1 (group "eng") is not in the default admin group.
+  assert.equal((body as unknown as { isAdmin: boolean }).isAdmin, false);
+});
+
+test("GET /me reports isAdmin=true for a member of the admin group", async () => {
+  const res = await fetch(`${baseUrl}/me`, { headers: { authorization: "Bearer admingood" } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { sub: string; isAdmin: boolean };
+  assert.equal(body.sub, "admin-1");
+  assert.equal(body.isAdmin, true);
 });
 
 test("GET /me with a bad token is 401", async () => {
@@ -1196,16 +1266,17 @@ test("GET /channels/:id/unread is forbidden for a non-member", async () => {
 });
 
 test("POST /channels/:id/webhooks creates a webhook, and POST /hooks/:token posts a message with it", async () => {
+  // `admingood` is in secchat-admins — webhook.create now defaults to the admin group.
   const created = await fetch(`${baseUrl}/channels`, {
     method: "POST",
-    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
     body: JSON.stringify({ name: "general" }),
   });
   const channel = await created.json() as { id: string };
 
   const whRes = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
     method: "POST",
-    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
   });
   assert.equal(whRes.status, 201);
   const wh = await whRes.json() as { id: string; channelId: string; token: string };
@@ -1225,10 +1296,25 @@ test("POST /channels/:id/webhooks creates a webhook, and POST /hooks/:token post
 
   // Confirm it was actually recorded, via the normal (authenticated) channel-messages route.
   const messagesRes = await fetch(`${baseUrl}/channels/${channel.id}/messages`, {
-    headers: { authorization: "Bearer good" },
+    headers: { authorization: "Bearer admingood" },
   });
   const messages = await messagesRes.json() as Array<{ id: string; authorRef: string }>;
   assert.ok(messages.some((m) => m.id === hookBody.id && m.authorRef === `webhook:${wh.id}`));
+});
+
+test("minting a webhook is forbidden for a non-admin (webhook.create defaults to the admin group)", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "non-admin-hooks" }),
+  });
+  const channel = await created.json() as { id: string };
+  // `good` (user-1, group "eng") is a member but not an admin → 403 on mint.
+  const whRes = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+  });
+  assert.equal(whRes.status, 403);
 });
 
 test("POST /hooks/:token with an unknown token is 401 and requires no auth header to reach that verdict", async () => {
@@ -1239,6 +1325,154 @@ test("POST /hooks/:token with an unknown token is 401 and requires no auth heade
   });
   assert.equal(res.status, 401);
   assert.deepEqual(await res.json(), { error: "invalid_webhook" });
+});
+
+test("GET /channels/:id/webhooks lists them; DELETE revokes; DELETE of an unknown id is 404", async () => {
+  const created = await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ name: "hooks-mgmt" }),
+  });
+  const channel = await created.json() as { id: string };
+
+  const mint = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+  });
+  const wh = await mint.json() as { id: string; token: string };
+
+  // List returns the webhook, token included (it's the copyable post-URL credential).
+  const listRes = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(listRes.status, 200);
+  const list = await listRes.json() as Array<{ id: string; token: string }>;
+  assert.ok(list.some((w) => w.id === wh.id && w.token === wh.token));
+
+  // Revoke it; afterwards its token no longer posts (the credential is dead).
+  const del = await fetch(`${baseUrl}/channels/${channel.id}/webhooks/${wh.id}`, {
+    method: "DELETE",
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(del.status, 200);
+  const afterList = await fetch(`${baseUrl}/channels/${channel.id}/webhooks`, {
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal((await afterList.json() as unknown[]).length, 0);
+  const deadPost = await fetch(`${baseUrl}/hooks/${encodeURIComponent(wh.token)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "should be rejected now" }),
+  });
+  assert.equal(deadPost.status, 401);
+
+  // Revoking again (unknown id now) is a clean 404.
+  const del2 = await fetch(`${baseUrl}/channels/${channel.id}/webhooks/${wh.id}`, {
+    method: "DELETE",
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(del2.status, 404);
+});
+
+test("GET /webhooks returns the caller's webhooks across channels, annotated with channel name", async () => {
+  const mk = async (name: string) => {
+    const ch = await (await fetch(`${baseUrl}/channels`, {
+      method: "POST",
+      headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    })).json() as { id: string };
+    const wh = await (await fetch(`${baseUrl}/channels/${ch.id}/webhooks`, {
+      method: "POST",
+      headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    })).json() as { id: string };
+    return { ch, wh };
+  };
+  const a = await mk("global-hooks-A");
+  const b = await mk("global-hooks-B");
+
+  const res = await fetch(`${baseUrl}/webhooks`, { headers: { authorization: "Bearer admingood" } });
+  assert.equal(res.status, 200);
+  const all = await res.json() as Array<{ id: string; channelId: string; channelName: string; token: string }>;
+  const byId = new Map(all.map((w) => [w.id, w]));
+  assert.equal(byId.get(a.wh.id)?.channelName, "global-hooks-A");
+  assert.equal(byId.get(b.wh.id)?.channelName, "global-hooks-B");
+  assert.ok(byId.get(a.wh.id)?.token); // tokens included (the copyable credential)
+});
+
+test("GET /webhooks is forbidden for a non-admin (webhook.create defaults to the admin group)", async () => {
+  const res = await fetch(`${baseUrl}/webhooks`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 403);
+});
+
+test("outbound webhooks: create validates URL + events, then list/global/delete work", async () => {
+  const ch = await (await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ name: "outbound-ch" }),
+  })).json() as { id: string };
+
+  // A non-http(s) URL is rejected.
+  const bad = await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ url: "ftp://nope.test/x" }),
+  });
+  assert.equal(bad.status, 400);
+
+  // A valid create defaults events to message.created and mints a secret.
+  const created = await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ url: "https://receiver.test/hook", includeContent: true }),
+  });
+  assert.equal(created.status, 201);
+  const wh = await created.json() as { id: string; secret: string; events: string[]; includeContent: boolean };
+  assert.deepEqual(wh.events, ["message.created"]);
+  assert.equal(wh.includeContent, true);
+  assert.ok(wh.secret.length > 0);
+
+  // Per-channel list + global list both show it.
+  const list = await (await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks`, { headers: { authorization: "Bearer admingood" } })).json() as Array<{ id: string }>;
+  assert.ok(list.some((w) => w.id === wh.id));
+  const global = await (await fetch(`${baseUrl}/outbound-webhooks`, { headers: { authorization: "Bearer admingood" } })).json() as Array<{ id: string; channelName: string }>;
+  assert.equal(global.find((w) => w.id === wh.id)?.channelName, "outbound-ch");
+
+  // Delete, then it's gone; deleting again is 404.
+  assert.equal((await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks/${wh.id}`, { method: "DELETE", headers: { authorization: "Bearer admingood" } })).status, 200);
+  assert.equal((await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks/${wh.id}`, { method: "DELETE", headers: { authorization: "Bearer admingood" } })).status, 404);
+});
+
+test("outbound webhooks: creating is forbidden for a non-admin", async () => {
+  const ch = await (await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ name: "outbound-noadmin" }),
+  })).json() as { id: string };
+  const res = await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer good", "content-type": "application/json" },
+    body: JSON.stringify({ url: "https://receiver.test/hook" }),
+  });
+  assert.equal(res.status, 403);
+});
+
+test("POST /channels/:id/outbound-webhooks/:oid/test is 503 when no dispatcher is wired", async () => {
+  const ch = await (await fetch(`${baseUrl}/channels`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ name: "outbound-test-ping" }),
+  })).json() as { id: string };
+  const wh = await (await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood", "content-type": "application/json" },
+    body: JSON.stringify({ url: "https://receiver.test/hook" }),
+  })).json() as { id: string };
+  // The default `server` wires no `outbound` dispatcher → test-ping is 503 (route exists, feature off).
+  const res = await fetch(`${baseUrl}/channels/${ch.id}/outbound-webhooks/${wh.id}/test`, {
+    method: "POST",
+    headers: { authorization: "Bearer admingood" },
+  });
+  assert.equal(res.status, 503);
 });
 
 test("GET /search returns results when a search dep is wired", async () => {

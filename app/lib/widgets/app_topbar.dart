@@ -25,6 +25,8 @@ class AppTopBar extends StatelessWidget {
     this.mentionCount = 0,
     this.runnerState,
     this.onSshKeys,
+    this.onWebhooks,
+    this.onAdmin,
   });
 
   final Principal principal;
@@ -32,8 +34,15 @@ class AppTopBar extends StatelessWidget {
   final VoidCallback onSignOut;
   final VoidCallback? onSearch;
 
-  /// Opens the git SSH-key manager (profile). Null ⇒ no SSH-key affordance.
+  /// Opens the git SSH-key manager (profile). Null ⇒ hidden from the menu.
   final VoidCallback? onSshKeys;
+
+  /// Opens the global inbound-webhook manager. Null ⇒ hidden from the menu.
+  final VoidCallback? onWebhooks;
+
+  /// Opens the admin / audit-review console. Shown in the menu only for a platform admin
+  /// ([Principal.isAdmin]); null ⇒ never shown.
+  final VoidCallback? onAdmin;
 
   /// The bundled runner daemon's live state (desktop). Null ⇒ no runner chip (web/mobile).
   final ValueListenable<RunnerDaemonState>? runnerState;
@@ -78,20 +87,64 @@ class AppTopBar extends StatelessWidget {
           const SizedBox(width: 16),
           _UserChip(principal: principal),
           const SizedBox(width: 4),
-          if (onSshKeys != null) ...[
-            IconButton(
-              onPressed: onSshKeys,
-              icon: const Icon(Icons.vpn_key, size: 18),
-              tooltip: 'Git SSH key',
-              color: AppColors.textMuted,
-            ),
-          ],
+          _AppMenu(
+            isAdmin: principal.isAdmin,
+            onSshKeys: onSshKeys,
+            onWebhooks: onWebhooks,
+            onAdmin: onAdmin,
+          ),
           IconButton(
             onPressed: onSignOut,
             icon: const Icon(Icons.logout, size: 18),
             tooltip: 'Sign out',
             color: AppColors.textMuted,
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The top-bar overflow menu: an expandable list gathering the account/admin actions that used to
+/// be separate icons — Git SSH key, the global Webhooks manager, and (admins only) the Admin
+/// console. Each entry appears only when its callback is provided (and, for Admin, [isAdmin]).
+class _AppMenu extends StatelessWidget {
+  const _AppMenu({required this.isAdmin, this.onSshKeys, this.onWebhooks, this.onAdmin});
+
+  final bool isAdmin;
+  final VoidCallback? onSshKeys;
+  final VoidCallback? onWebhooks;
+  final VoidCallback? onAdmin;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = <PopupMenuEntry<VoidCallback>>[
+      if (onSshKeys != null) _item(Icons.vpn_key, 'Git SSH key', onSshKeys!),
+      if (onWebhooks != null) _item(Icons.webhook, 'Webhooks', onWebhooks!),
+      if (onAdmin != null && isAdmin) _item(Icons.admin_panel_settings, 'Admin console', onAdmin!),
+    ];
+    if (items.isEmpty) return const SizedBox.shrink();
+    return PopupMenuButton<VoidCallback>(
+      tooltip: 'Menu',
+      icon: const Icon(Icons.menu, size: 18, color: AppColors.textMuted),
+      color: AppColors.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+        side: const BorderSide(color: AppColors.border),
+      ),
+      onSelected: (action) => action(),
+      itemBuilder: (_) => items,
+    );
+  }
+
+  PopupMenuItem<VoidCallback> _item(IconData icon, String label, VoidCallback action) {
+    return PopupMenuItem<VoidCallback>(
+      value: action,
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: AppColors.textMuted),
+          const SizedBox(width: 10),
+          Text(label, style: const TextStyle(color: AppColors.text, fontSize: 13.5)),
         ],
       ),
     );

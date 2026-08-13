@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHttpServer } from "../src/http/server.ts";
+import { defaultCapabilityPolicy } from "../src/auth/capabilities.ts";
 import { searchMessages } from "../src/search/search.ts";
 import { MemoryStore } from "../src/store/memory.ts";
 import type { VerifyToken } from "../src/types.ts";
@@ -21,7 +22,11 @@ async function channelWith(store: MemoryStore, members: string[], name = "c") {
 }
 
 function serverFor(store: MemoryStore) {
-  return createHttpServer({ verifyToken: verify, store, search: (u, q) => searchMessages(store, u, q) });
+  // These parity tests predate webhook.create defaulting to the admin group and exercise the
+  // webhook POSTING path, not the capability gate (alice/bob are plain members) — so ungate
+  // webhook.create here. The admin-group default is covered in http.test.ts + capabilities.test.ts.
+  const capabilities = { ...defaultCapabilityPolicy("secchat-admins"), "webhook.create": { group: "", stepUpSeconds: 0 } };
+  return createHttpServer({ verifyToken: verify, store, search: (u, q) => searchMessages(store, u, q), capabilities });
 }
 
 test("exit 1 — a reply is threaded under its parent", async () => {

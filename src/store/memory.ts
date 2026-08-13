@@ -75,6 +75,8 @@ import type {
   User,
   UserSshKey,
   Webhook,
+  OutboundWebhook,
+  OutboundEvent,
 } from "../types.ts";
 
 export class MemoryStore implements Store, SessionStore {
@@ -598,6 +600,76 @@ export class MemoryStore implements Store, SessionStore {
   async getWebhookByToken(token: string): Promise<Webhook | null> {
     if (!token) return null;
     return this.#webhooksByToken.get(token) ?? null;
+  }
+
+  /** A channel's inbound webhooks, newest first (createdAt desc), for the management UI. */
+  async listWebhooks(channelId: Id): Promise<Webhook[]> {
+    return [...this.#webhooksById.values()]
+      .filter((w) => w.channelId === channelId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Revokes a webhook — drops it from BOTH indexes. Scoped to `channelId` so a member of one
+   * channel can't revoke another channel's webhook by id. Returns false when no such row exists
+   * in this channel (caller maps to 404), true when one was removed. */
+  async deleteWebhook(channelId: Id, webhookId: Id): Promise<boolean> {
+    const webhook = this.#webhooksById.get(webhookId);
+    if (!webhook || webhook.channelId !== channelId) return false;
+    this.#webhooksById.delete(webhookId);
+    this.#webhooksByToken.delete(webhook.token);
+    return true;
+  }
+
+  // ── Outbound webhooks ──────────────────────────────────────────────────────────────────────
+
+  #outboundById = new Map<Id, OutboundWebhook>();
+
+  async createOutboundWebhook(input: {
+    channelId: Id;
+    url: string;
+    events: OutboundEvent[];
+    includeContent: boolean;
+    createdBy: string;
+  }): Promise<OutboundWebhook> {
+    const hook: OutboundWebhook = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      url: input.url,
+      secret: randomBytes(24).toString("base64url"), // HMAC signing secret — treat like a secret
+      events: [...input.events],
+      includeContent: input.includeContent,
+      active: true,
+      createdBy: input.createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    this.#outboundById.set(hook.id, hook);
+    return hook;
+  }
+
+  async listOutboundWebhooks(channelId: Id): Promise<OutboundWebhook[]> {
+    return [...this.#outboundById.values()]
+      .filter((w) => w.channelId === channelId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null> {
+    const hook = this.#outboundById.get(id);
+    return hook && hook.channelId === channelId ? hook : null;
+  }
+
+  async deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean> {
+    const hook = this.#outboundById.get(id);
+    if (!hook || hook.channelId !== channelId) return false;
+    this.#outboundById.delete(id);
+    return true;
+  }
+
+  async recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void> {
+    const hook = this.#outboundById.get(id);
+    if (!hook) return; // a delivery racing a revoke is a no-op, not an error
+    hook.lastStatus = status;
+    hook.lastError = error ?? undefined;
+    hook.lastDeliveryAt = new Date().toISOString();
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a

@@ -37,6 +37,8 @@ import '../widgets/sidebar.dart';
 import '../widgets/ssh_key_dialog.dart';
 import '../widgets/step_up_dialog.dart';
 import '../widgets/user_picker.dart';
+import '../widgets/webhooks_dialog.dart';
+import 'admin.dart';
 
 /// Test seam: how [ChatScreen] obtains its runner-daemon supervisor. Widget tests override this with
 /// a no-op so they never spawn a real child process (which would leak pending timers under the test
@@ -1531,6 +1533,29 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               const SizedBox(height: 6),
               _DrawerTile(
+                icon: Icons.webhook,
+                label: 'Webhooks',
+                onTap: () {
+                  Navigator.of(context).pop();
+                  showGlobalWebhooksDialog(context, api: widget.api, channels: _channels);
+                },
+              ),
+              // Admin console — only a platform admin sees this (the backend gates it too).
+              if (widget.principal.isAdmin) ...[
+                const SizedBox(height: 6),
+                _DrawerTile(
+                  icon: Icons.admin_panel_settings,
+                  label: 'Admin console',
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
+                    );
+                  },
+                ),
+              ],
+              const SizedBox(height: 6),
+              _DrawerTile(
                 icon: Icons.logout,
                 label: 'Sign out',
                 onTap: widget.onSignOut,
@@ -1572,6 +1597,10 @@ class _ChatScreenState extends State<ChatScreen> {
             mentionCount: _unseenMentions,
             runnerState: _daemon.supported ? _daemon.state : null,
             onSshKeys: () => showSshKeyDialog(context, api: widget.api),
+            onWebhooks: () => showGlobalWebhooksDialog(context, api: widget.api, channels: _channels),
+            onAdmin: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
+            ),
           ),
           Expanded(
             child: Row(
@@ -1634,6 +1663,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
                   _openMembers(ch);
+                },
+              ),
+            if (!isDm)
+              _SheetRow(
+                icon: Icons.webhook,
+                label: 'Inbound webhooks',
+                onTap: () {
+                  Navigator.of(sheetCtx).pop();
+                  showWebhooksDialog(context, api: widget.api, channel: ch);
                 },
               ),
             _SheetRow(
@@ -1753,6 +1791,11 @@ class _ChatScreenState extends State<ChatScreen> {
             // Membership is fixed for a DM (a 1:1 pair); every other channel gets the panel.
             onMembers: selected.kind == ChannelKind.dm ? null : () => _openMembers(selected),
             onPins: () => _openPins(selected),
+            // Inbound webhooks are a channel-level integration — offered on every non-DM channel
+            // (the backend gates minting/revoking on the webhook.create capability).
+            onWebhooks: selected.kind == ChannelKind.dm
+                ? null
+                : () => showWebhooksDialog(context, api: widget.api, channel: selected),
           ),
         // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
@@ -1972,6 +2015,7 @@ class _ChannelHeader extends StatelessWidget {
     this.onMarkChannel,
     this.onMembers,
     this.onPins,
+    this.onWebhooks,
   });
 
   final Channel channel;
@@ -2000,6 +2044,9 @@ class _ChannelHeader extends StatelessWidget {
 
   /// Opens the pinned-messages panel. Null hides the control.
   final VoidCallback? onPins;
+
+  /// Opens the inbound-webhook manager. Null hides the control (e.g. DMs).
+  final VoidCallback? onWebhooks;
 
   @override
   Widget build(BuildContext context) {
@@ -2056,6 +2103,16 @@ class _ChannelHeader extends StatelessWidget {
               onPressed: onMembers,
               icon: const Icon(Icons.group_outlined, size: 17),
               tooltip: 'Members',
+              color: AppColors.textMuted,
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 4),
+          ],
+          if (onWebhooks != null) ...[
+            IconButton(
+              onPressed: onWebhooks,
+              icon: const Icon(Icons.webhook, size: 17),
+              tooltip: 'Inbound webhooks',
               color: AppColors.textMuted,
               visualDensity: VisualDensity.compact,
             ),
