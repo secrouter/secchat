@@ -183,6 +183,28 @@ abstract class ApiClient {
   /// A channel's pinned messages (newest pin first), enriched with content. Any member may read it.
   Future<List<PinnedMessage>> getPins(String channelId);
 
+  /// The admin / audit-review snapshot (`GET /admin/api/overview`). Admin-only server-side (the
+  /// `secchat-admins` group); throws [ApiException] 403 for a non-admin, 404 if the console is
+  /// not wired in this deployment.
+  Future<AdminOverview> getAdminOverview();
+
+  /// A channel's inbound webhooks (`GET /channels/:id/webhooks`), for the management UI. Requires
+  /// the `webhook.create` capability server-side (admin group by default). Tokens are included.
+  Future<List<Webhook>> listWebhooks(String channelId);
+
+  /// Every inbound webhook across the channels the caller is a member of (`GET /webhooks`), each
+  /// carrying its [Webhook.channelName] — powers the global webhook manager. Same capability as
+  /// [listWebhooks]; throws [ApiException] 403 without it.
+  Future<List<Webhook>> listAllWebhooks();
+
+  /// Mint a new inbound webhook for a channel (`POST /channels/:id/webhooks`) — returns it with its
+  /// freshly-generated token. Same capability as [listWebhooks].
+  Future<Webhook> createWebhook(String channelId);
+
+  /// Revoke an inbound webhook (`DELETE /channels/:id/webhooks/:webhookId`). The token stops posting
+  /// immediately. Throws [ApiException] 404 if it's already gone.
+  Future<void> deleteWebhook(String channelId, String webhookId);
+
   /// Pin / unpin a message (any member). Reflected live via a `pin` WS event.
   Future<void> pinMessage(String messageId);
   Future<void> unpinMessage(String messageId);
@@ -629,6 +651,31 @@ class HttpApiClient implements ApiClient {
   Future<List<PinnedMessage>> getPins(String channelId) async {
     final data = await _get('/channels/$channelId/pins') as List<dynamic>;
     return data.map((e) => PinnedMessage.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<AdminOverview> getAdminOverview() async =>
+      AdminOverview.fromJson(await _get('/admin/api/overview') as Map<String, dynamic>);
+
+  @override
+  Future<List<Webhook>> listWebhooks(String channelId) async {
+    final data = await _get('/channels/$channelId/webhooks') as List<dynamic>;
+    return data.map((e) => Webhook.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<List<Webhook>> listAllWebhooks() async {
+    final data = await _get('/webhooks') as List<dynamic>;
+    return data.map((e) => Webhook.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  @override
+  Future<Webhook> createWebhook(String channelId) async =>
+      Webhook.fromJson(await _post('/channels/$channelId/webhooks') as Map<String, dynamic>);
+
+  @override
+  Future<void> deleteWebhook(String channelId, String webhookId) async {
+    await _delete('/channels/$channelId/webhooks/$webhookId');
   }
 
   @override

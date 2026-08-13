@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken } from "../types.ts";
+import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, Principal, Reaction, Store, User, UserSshKey, VerifyToken, Webhook } from "../types.ts";
 import { encryptSecret, generateEd25519 } from "../ssh/keys.ts";
 import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
@@ -361,6 +361,10 @@ function buildRouter(
     // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
     sendJson(res, 200, {
       ...principal,
+      // Server-authoritative admin flag: whether this principal is in the deployment's configured
+      // admin group (SECCHAT_ADMIN_GROUP). The client uses THIS instead of guessing the group name,
+      // so the admin console surfaces correctly whatever a deployment names its admin group.
+      isAdmin: isAdmin(principal, admin?.adminGroup ?? "secchat-admins"),
       marking: {
         levels: marking.levels,
         default: marking.default,
@@ -1303,6 +1307,54 @@ function buildRouter(
     const wh = await store.createWebhook(channelId, principal.sub);
     await store.appendAudit({ actor: principal.sub, action: "webhook.create", target: wh.id });
     sendJson(res, 201, wh);
+  });
+
+  // List a channel's inbound webhooks (management UI). Returns the tokens too — they ARE the
+  // credential the app renders as a copyable post URL — so this is gated the SAME as minting one
+  // (`webhook.create`): a viewer of the standing credentials must hold the same capability as their
+  // creator. Membership is still required first.
+  router.add("GET", "/channels/:id/webhooks", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    sendJson(res, 200, await store.listWebhooks(channelId));
+  });
+
+  // Revoke an inbound webhook — same capability + membership as minting one. Scoped to the channel
+  // in the path so a member can't revoke another channel's webhook by id (the store enforces it
+  // too). 404 when there's no such webhook in this channel.
+  router.add("DELETE", "/channels/:id/webhooks/:whid", async ({ req, res, params, principal }) => {
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const removed = await store.deleteWebhook(channelId, params.whid!);
+    if (!removed) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    await store.appendAudit({ actor: principal.sub, action: "webhook.revoke", target: params.whid! });
+    sendJson(res, 200, { ok: true });
+  });
+
+  // Global inbound-webhook view for the management menu: every webhook across the channels the
+  // caller is a MEMBER of, each annotated with its channel's name — so an operator sees all their
+  // webhooks in one place instead of opening each channel. Same `webhook.create` capability as the
+  // per-channel routes (it returns tokens); membership scoping means it never leaks another
+  // channel's webhooks even if a deployment ungates the capability.
+  router.add("GET", "/webhooks", async ({ req, res, principal }) => {
+    if (!(await enforceCapability(req, res, principal, "webhook.create"))) return;
+    const out: Array<Webhook & { channelName: string }> = [];
+    for (const c of await store.listChannels()) {
+      if (!(await store.isMember(c.id, principal.sub))) continue;
+      for (const wh of await store.listWebhooks(c.id)) out.push({ ...wh, channelName: c.name ?? c.id });
+    }
+    sendJson(res, 200, out);
   });
 
   // ── Full-text search. `search` is the injected port (see SearchFn above); a deployment/test

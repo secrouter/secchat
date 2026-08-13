@@ -60,11 +60,14 @@ export function authorizeCapability(
 export function defaultCapabilityPolicy(adminGroup: string): CapabilityPolicy {
   const ungated: CapabilityRule = { group: "", stepUpSeconds: 0 };
   return {
-    // These are already admin-gated today; keep that as the out-of-the-box group.
+    // These default to the admin group; a deployment can re-point any of them at another IdP group.
     "message.redact": { group: adminGroup, stepUpSeconds: 0 },
     "marking.downgrade": { group: adminGroup, stepUpSeconds: 0 },
-    // These are ungated today; a deployment ties them to a group (e.g. an Authentik/Entra group).
+    // Minting/revoking a standing external credential defaults to admins too — set
+    // SECCHAT_CAP_WEBHOOK_GROUP to widen it to another group (or "" to ungate).
+    "webhook.create": { group: adminGroup, stepUpSeconds: 0 },
+    // Still ungated by default (any member may stand up their own coding agent); a deployment ties
+    // it to a group if it wants to restrict that.
     "agent.manage": { ...ungated },
-    "webhook.create": { ...ungated },
   };
 }

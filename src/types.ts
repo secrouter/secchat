@@ -425,6 +425,8 @@ export interface Store {
   // Inbound webhooks.
   createWebhook(channelId: Id, createdBy: string): Promise<Webhook>; // mints a random token
   getWebhookByToken(token: string): Promise<Webhook | null>;
+  listWebhooks(channelId: Id): Promise<Webhook[]>; // a channel's inbound webhooks, newest first
+  deleteWebhook(channelId: Id, webhookId: Id): Promise<boolean>; // revoke; false if not in this channel
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

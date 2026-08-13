@@ -1215,6 +1215,26 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToWebhook(rows[0]) : null;
   }
 
+  /** A channel's inbound webhooks, newest first, for the management UI. */
+  async listWebhooks(channelId: Id): Promise<Webhook[]> {
+    const { rows } = await this.#pool.query<WebhookRow>(
+      `SELECT id, channel_id, token, created_by, created_at FROM webhooks
+         WHERE channel_id = $1 ORDER BY created_at DESC`,
+      [channelId],
+    );
+    return rows.map(rowToWebhook);
+  }
+
+  /** Revokes a webhook, scoped to `channelId` (a member of one channel can't delete another's by
+   * id). Returns whether a row was actually removed — rowCount 0 ⇒ no such webhook here (404). */
+  async deleteWebhook(channelId: Id, webhookId: Id): Promise<boolean> {
+    const { rowCount } = await this.#pool.query(
+      `DELETE FROM webhooks WHERE id = $1 AND channel_id = $2`,
+      [webhookId, channelId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
   /** Purges plaintext, stamps the tombstone, and appends the audit event — all in ONE transaction
    * (a stronger guarantee than "three separate steps"): either the whole redaction (content
    * deleted + redacted_at stamped + audit event recorded) lands, or none of it does. Fails closed

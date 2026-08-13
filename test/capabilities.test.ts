@@ -34,16 +34,16 @@ test("step-up gate: a stale re-auth is rejected; group is checked BEFORE step-up
 
 test("a capability with no group and no step-up allows anyone", () => {
   const open = defaultCapabilityPolicy("admins");
+  // agent.manage is the ungated-by-default capability (any member may stand up a coding agent).
   assert.deepEqual(authorizeCapability(bob, "agent.manage", open, Infinity), { allow: true });
-  assert.deepEqual(authorizeCapability(bob, "webhook.create", open, Infinity), { allow: true });
 });
 
-test("defaultCapabilityPolicy: redact/downgrade default to the admin group, step-up off", () => {
+test("defaultCapabilityPolicy: redact/downgrade/webhook default to the admin group, step-up off", () => {
   const p = defaultCapabilityPolicy("secchat-admins");
   assert.deepEqual(p["message.redact"], { group: "secchat-admins", stepUpSeconds: 0 });
   assert.deepEqual(p["marking.downgrade"], { group: "secchat-admins", stepUpSeconds: 0 });
-  assert.equal(p["agent.manage"].group, "");
-  assert.equal(p["webhook.create"].group, "");
+  assert.deepEqual(p["webhook.create"], { group: "secchat-admins", stepUpSeconds: 0 });
+  assert.equal(p["agent.manage"].group, ""); // still ungated by default
   for (const cap of ["message.redact", "agent.manage", "marking.downgrade", "webhook.create"] as Capability[]) {
     assert.equal(p[cap].stepUpSeconds, 0);
   }

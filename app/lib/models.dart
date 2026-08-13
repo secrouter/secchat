@@ -67,10 +67,17 @@ class Principal {
     this.displayName,
     this.email,
     this.marking = MarkingPolicy.fallback,
+    this.serverIsAdmin,
   });
 
   final String sub;
   final List<String> groups;
+
+  /// Server-authoritative admin flag from `GET /me` (`isAdmin`) — whether this user is in the
+  /// deployment's configured admin group, computed by the backend so the client needn't know the
+  /// group's name. Null only against an older server that doesn't send it (then [isAdmin] falls
+  /// back to the historical `secchat-admins` group check).
+  final bool? serverIsAdmin;
 
   /// The signed-in user's display name (`GET /me`'s `name` claim). Null when the
   /// IdP didn't supply one — the [label] then falls back to the sub.
@@ -83,7 +90,7 @@ class Principal {
   /// the banners, the composer's marking picker, and local rank comparisons.
   final MarkingPolicy marking;
 
-  bool get isAdmin => groups.contains('secchat-admins');
+  bool get isAdmin => serverIsAdmin ?? groups.contains('secchat-admins');
 
   /// A human label for the top bar etc.: the display name, else the email, else
   /// the raw sub (an opaque hash under sub_mode: hashed_user_id).
@@ -103,6 +110,7 @@ class Principal {
     marking: json['marking'] is Map<String, dynamic>
         ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
         : MarkingPolicy.fallback,
+    serverIsAdmin: json['isAdmin'] as bool?,
   );
 }
 
@@ -1044,4 +1052,193 @@ final class ErrorEntry extends TranscriptEntry {
 final class SystemEntry extends TranscriptEntry {
   const SystemEntry(this.text);
   final String text;
+}
+
+// ── Inbound webhooks ───────────────────────────────────────────────────────────────────────
+
+/// One inbound webhook for a channel (`GET/POST /channels/:id/webhooks`). The [token] IS the
+/// credential — an external system POSTs `{ "text": "..." }` to [postUrl] to drop a message into
+/// the channel as a bot author. Treat the token like a secret.
+class Webhook {
+  const Webhook({
+    required this.id,
+    required this.channelId,
+    required this.token,
+    required this.createdBy,
+    required this.createdAt,
+    this.channelName,
+  });
+
+  final String id;
+  final String channelId;
+  final String token;
+  final String createdBy;
+  final String createdAt;
+
+  /// The owning channel's display name — only set by the global `GET /webhooks` view (null for the
+  /// per-channel list, where the channel is already the context).
+  final String? channelName;
+
+  factory Webhook.fromJson(Map<String, dynamic> json) => Webhook(
+    id: json['id'] as String,
+    channelId: json['channelId'] as String,
+    token: json['token'] as String,
+    createdBy: (json['createdBy'] as String?) ?? '',
+    createdAt: (json['createdAt'] as String?) ?? '',
+    channelName: json['channelName'] as String?,
+  );
+
+  /// The full inbound URL an external system POSTs to, e.g. `https://host/hooks/<token>`.
+  Uri postUrl(Uri origin) => origin.replace(path: '/hooks/$token');
+}
+
+// ── Admin / audit-review console (GET /admin/api/overview) ─────────────────────────────────
+
+/// A read-only snapshot for the native admin console — the JSON the server-rendered `/admin` page
+/// is built from, rendered natively here so it rides the app's authenticated client. Admin-only
+/// (the backend gates it on the `secchat-admins` group; see [Principal.isAdmin]).
+class AdminOverview {
+  const AdminOverview({
+    required this.generatedAt,
+    required this.channels,
+    required this.agents,
+    required this.sessions,
+    required this.audit,
+    required this.messagesChainOk,
+    required this.auditChainOk,
+  });
+
+  final String generatedAt;
+  final List<AdminChannel> channels;
+  final List<AdminAgent> agents;
+  final List<AdminSession> sessions;
+  final List<AuditEvent> audit;
+  final bool messagesChainOk;
+  final bool auditChainOk;
+
+  /// Both tamper-evident chains verified end-to-end — the console's headline health signal.
+  bool get chainsOk => messagesChainOk && auditChainOk;
+
+  factory AdminOverview.fromJson(Map<String, dynamic> json) {
+    List<T> list<T>(String key, T Function(Map<String, dynamic>) of) =>
+        ((json[key] as List<dynamic>?) ?? const [])
+            .map((e) => of(e as Map<String, dynamic>))
+            .toList(growable: false);
+    final chains = (json['chains'] as Map<String, dynamic>?) ?? const {};
+    return AdminOverview(
+      generatedAt: (json['generatedAt'] as String?) ?? '',
+      channels: list('channels', AdminChannel.fromJson),
+      agents: list('agents', AdminAgent.fromJson),
+      sessions: list('sessions', AdminSession.fromJson),
+      audit: list('audit', AuditEvent.fromJson),
+      messagesChainOk: (chains['messagesOk'] as bool?) ?? false,
+      auditChainOk: (chains['auditOk'] as bool?) ?? false,
+    );
+  }
+}
+
+class AdminChannel {
+  const AdminChannel({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.cuiMarking,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String kind;
+  final String? name;
+  final String? cuiMarking;
+  final String createdAt;
+
+  factory AdminChannel.fromJson(Map<String, dynamic> json) => AdminChannel(
+    id: json['id'] as String,
+    kind: (json['kind'] as String?) ?? 'human',
+    name: json['name'] as String?,
+    cuiMarking: json['cuiMarking'] as String?,
+    createdAt: (json['createdAt'] as String?) ?? '',
+  );
+}
+
+class AdminAgent {
+  const AdminAgent({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.ownerSub,
+    required this.model,
+  });
+
+  final String id;
+  final String kind;
+  final String? name;
+  final String ownerSub;
+  final String? model;
+
+  factory AdminAgent.fromJson(Map<String, dynamic> json) => AdminAgent(
+    id: json['id'] as String,
+    kind: (json['kind'] as String?) ?? '',
+    name: json['name'] as String?,
+    ownerSub: (json['ownerSub'] as String?) ?? '',
+    model: json['model'] as String?,
+  );
+}
+
+class AdminSession {
+  const AdminSession({
+    required this.id,
+    required this.agentId,
+    required this.status,
+    required this.hostType,
+    required this.runnerId,
+    required this.leaseExpiresAt,
+  });
+
+  final String id;
+  final String agentId;
+  final String status;
+  final String hostType;
+  final String? runnerId;
+  final String leaseExpiresAt;
+
+  factory AdminSession.fromJson(Map<String, dynamic> json) => AdminSession(
+    id: json['id'] as String,
+    agentId: (json['agentId'] as String?) ?? '',
+    status: (json['status'] as String?) ?? '',
+    hostType: (json['hostType'] as String?) ?? '',
+    runnerId: json['runnerId'] as String?,
+    leaseExpiresAt: (json['leaseExpiresAt'] as String?) ?? '',
+  );
+}
+
+/// One link in the tamper-evident audit chain (`AuditEvent` in the backend types).
+class AuditEvent {
+  const AuditEvent({
+    required this.seq,
+    required this.at,
+    required this.actor,
+    required this.actAs,
+    required this.action,
+    required this.target,
+    required this.detail,
+  });
+
+  final int seq;
+  final String at;
+  final String actor;
+  final String? actAs;
+  final String action;
+  final String? target;
+  final String? detail;
+
+  factory AuditEvent.fromJson(Map<String, dynamic> json) => AuditEvent(
+    seq: (json['seq'] as num?)?.toInt() ?? 0,
+    at: (json['at'] as String?) ?? '',
+    actor: (json['actor'] as String?) ?? '',
+    actAs: json['actAs'] as String?,
+    action: (json['action'] as String?) ?? '',
+    target: json['target'] as String?,
+    detail: json['detail'] as String?,
+  );
 }

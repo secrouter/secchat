@@ -79,8 +79,8 @@ export interface Config {
   dlp: DlpPolicy;
 
   /** Privileged-action authorization: each capability's required IdP group + step-up freshness.
-   * `SECCHAT_CAP_<REDACT|AGENT|DOWNGRADE|WEBHOOK>_GROUP` / `_STEPUP`. Defaults preserve today's
-   * behavior (redact/downgrade → admin group; agent/webhook ungated; step-up off). */
+   * `SECCHAT_CAP_<REDACT|AGENT|DOWNGRADE|WEBHOOK>_GROUP` / `_STEPUP`. Defaults: redact/downgrade/
+   * webhook → the admin group; agent ungated; step-up off. */
   capabilities: CapabilityPolicy;
 
   /** Step-up token minter/verifier — present when a signing secret is available

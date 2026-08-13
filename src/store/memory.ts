@@ -600,6 +600,24 @@ export class MemoryStore implements Store, SessionStore {
     return this.#webhooksByToken.get(token) ?? null;
   }
 
+  /** A channel's inbound webhooks, newest first (createdAt desc), for the management UI. */
+  async listWebhooks(channelId: Id): Promise<Webhook[]> {
+    return [...this.#webhooksById.values()]
+      .filter((w) => w.channelId === channelId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Revokes a webhook — drops it from BOTH indexes. Scoped to `channelId` so a member of one
+   * channel can't revoke another channel's webhook by id. Returns false when no such row exists
+   * in this channel (caller maps to 404), true when one was removed. */
+  async deleteWebhook(channelId: Id, webhookId: Id): Promise<boolean> {
+    const webhook = this.#webhooksById.get(webhookId);
+    if (!webhook || webhook.channelId !== channelId) return false;
+    this.#webhooksById.delete(webhookId);
+    this.#webhooksByToken.delete(webhook.token);
+    return true;
+  }
+
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a
    * short note), never content, so it's safe on the metadata-only audit chain. */
   async redactMessage(id: Id, by: string, reason: string): Promise<void> {

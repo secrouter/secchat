@@ -354,6 +354,79 @@ class FakeApiClient implements ApiClient {
     return List.of(pinsByChannel[channelId] ?? const []);
   }
 
+  /// Admin overview a test should see from [getAdminOverview]; null ⇒ an empty snapshot.
+  AdminOverview? adminOverview;
+
+  @override
+  Future<AdminOverview> getAdminOverview() async {
+    _maybeThrow('getAdminOverview');
+    return adminOverview ??
+        const AdminOverview(
+          generatedAt: '',
+          channels: [],
+          agents: [],
+          sessions: [],
+          audit: [],
+          messagesChainOk: true,
+          auditChainOk: true,
+        );
+  }
+
+  /// Inbound webhooks per channel; the webhook calls mutate these.
+  final Map<String, List<Webhook>> webhooksByChannel = {};
+
+  /// Every webhook mutation, in order.
+  final List<({String op, String channelId, String? webhookId})> webhookCalls = [];
+  int _nextWebhookId = 1;
+
+  @override
+  Future<List<Webhook>> listWebhooks(String channelId) async {
+    _maybeThrow('listWebhooks');
+    return List.of(webhooksByChannel[channelId] ?? const []);
+  }
+
+  /// Channel display names for the global webhook view's [Webhook.channelName] annotation.
+  final Map<String, String> channelNamesById = {};
+
+  @override
+  Future<List<Webhook>> listAllWebhooks() async {
+    _maybeThrow('listAllWebhooks');
+    return [
+      for (final entry in webhooksByChannel.entries)
+        for (final w in entry.value)
+          Webhook(
+            id: w.id,
+            channelId: w.channelId,
+            token: w.token,
+            createdBy: w.createdBy,
+            createdAt: w.createdAt,
+            channelName: channelNamesById[entry.key] ?? entry.key,
+          ),
+    ];
+  }
+
+  @override
+  Future<Webhook> createWebhook(String channelId) async {
+    _maybeThrow('createWebhook');
+    final wh = Webhook(
+      id: 'wh-${_nextWebhookId++}',
+      channelId: channelId,
+      token: 'tok-${DateTime.now().microsecondsSinceEpoch}',
+      createdBy: me.sub,
+      createdAt: DateTime.now().toUtc().toIso8601String(),
+    );
+    webhooksByChannel.putIfAbsent(channelId, () => []).insert(0, wh);
+    webhookCalls.add((op: 'create', channelId: channelId, webhookId: wh.id));
+    return wh;
+  }
+
+  @override
+  Future<void> deleteWebhook(String channelId, String webhookId) async {
+    _maybeThrow('deleteWebhook');
+    webhookCalls.add((op: 'delete', channelId: channelId, webhookId: webhookId));
+    webhooksByChannel[channelId]?.removeWhere((w) => w.id == webhookId);
+  }
+
   @override
   Future<void> pinMessage(String messageId) async {
     _maybeThrow('pinMessage');
