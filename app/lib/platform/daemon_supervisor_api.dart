@@ -28,7 +28,15 @@ abstract class DaemonSupervisor {
 
   /// Start (idempotent) the daemon for [secchatUrl] as the user holding [token]. No-op if
   /// unsupported or already running, or if [token] is empty.
-  void start({required String secchatUrl, required String token});
+  ///
+  /// [isRunnerToken] tells the platform implementation whether [token] is actually a SecChat
+  /// runner token (minted via `POST /auth/runner-token`) as opposed to a full principal bearer
+  /// (a caller's fallback when minting isn't available). The backend's `/agent-llm/v1` proxy only
+  /// accepts runner tokens — 401s a principal bearer — so implementations must not point pi's
+  /// `PI_API_KEY`/`PI_BASE_URL` at that proxy with a non-runner token; pi would then silently fail
+  /// every model call against a server with runner tokens disabled. Default `true` (the common
+  /// case: runner tokens are enabled whenever a session secret is configured).
+  void start({required String secchatUrl, required String token, bool isRunnerToken = true});
 
   /// Stop the daemon (no auto-restart) and reset to [RunnerDaemonState.off].
   Future<void> stop();
@@ -48,7 +56,7 @@ class NoopDaemonSupervisor implements DaemonSupervisor {
   bool get supported => false;
 
   @override
-  void start({required String secchatUrl, required String token}) {}
+  void start({required String secchatUrl, required String token, bool isRunnerToken = true}) {}
 
   @override
   Future<void> stop() async {}

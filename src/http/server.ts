@@ -98,6 +98,21 @@ import type { StepUp } from "../auth/stepup.ts";
 import type { RunnerToken } from "../auth/runner-token.ts";
 import { parseCookies } from "../auth/session.ts";
 
+/** Deps for the `/agent-llm/v1` proxy — the ONLY path a coding-agent's `pi` CLI is allowed to reach
+ * SecRouter through (pi never talks to SecRouter directly, so it never holds a SecRouter
+ * credential of its own). Optional: unset ⇒ `/agent-llm/v1/*` isn't specially handled and falls
+ * through to the normal auth+router pipeline, which 401s a runner-token bearer (it isn't a valid
+ * principal token) same as any other unrecognized credential. */
+interface AgentLlmDeps {
+  /** SecRouter's base URL (config.secrouterUrl) — proxied to `${secrouterUrl}/v1/chat/completions`
+   * and `${secrouterUrl}/v1/models`. */
+  secrouterUrl: string;
+  /** Resolves a fresh `svc-secchat` OIDC service token per call — the SAME provider the assistant
+   * path uses (secrouter/token.ts's makeServiceTokenProvider, built once in src/index.ts). Unset ⇒
+   * forward with no Authorization header (open dev gateway — today's fallback behavior). */
+  getServiceToken?: () => Promise<string>;
+}
+
 interface RouteContext {
   req: IncomingMessage;
   res: ServerResponse;
@@ -1762,6 +1777,129 @@ function buildRouter(
   return router;
 }
 
+/** The bearer to present to SecRouter for the agent-llm proxy: a freshly-resolved `svc-secchat`
+ * service token when configured, else none (dev fallback). Mirrors secrouter/client.ts's
+ * resolveBearer, minus its static-token fallback — pi never holds a SecRouter credential of its
+ * own, so the proxy has no equivalent of `secrouterToken` to fall back to. */
+async function resolveAgentLlmBearer(agentLlm: AgentLlmDeps): Promise<string | undefined> {
+  return agentLlm.getServiceToken ? agentLlm.getServiceToken() : undefined;
+}
+
+/** Pipes a Web ReadableStream (fetch's `response.body`) straight to a Node ServerResponse, byte
+ * for byte, for SSE passthrough — no buffering, so a token reaches pi the moment SecRouter emits
+ * it. Cancels the upstream reader if the client disconnects early (`res` 'close') so a dropped pi
+ * session doesn't leave the SecRouter connection dangling. */
+async function pipeWebStreamToResponse(body: ReadableStream<Uint8Array>, res: ServerResponse): Promise<void> {
+  const reader = body.getReader();
+  const onClose = () => {
+    reader.cancel().catch(() => {});
+  };
+  res.once("close", onClose);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) res.write(Buffer.from(value));
+    }
+  } finally {
+    res.off("close", onClose);
+    res.end();
+  }
+}
+
+/** The `/agent-llm/v1` proxy handler (see `AgentLlmDeps` above) — the sole path a coding-agent's
+ * `pi` CLI is allowed to reach SecRouter through. Auth is a RUNNER TOKEN, not the normal
+ * principal bearer/session: pi acts on behalf of the session owner, not an interactively logged-in
+ * user, so this verifies with the SAME verifier the `/runner` WebSocket accepts (src/auth/
+ * runner-token.ts) and resolves the owner sub from it — 401 on anything else. Forwards to
+ * SecRouter with the service-token Authorization + `X-Sec-Acting-User: <owner>` (mirrors
+ * secrouter/client.ts's assistant-path header logic) so SecRouter attributes policy/budget/audit
+ * to the owner, never to SecChat's own identity. Streams SSE straight through when the request
+ * body has `stream: true`; forwards JSON otherwise. Propagates SecRouter's status code either
+ * way. */
+async function handleAgentLlmProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  method: string,
+  agentLlm: AgentLlmDeps,
+  runnerToken: RunnerToken | undefined,
+): Promise<void> {
+  if (!runnerToken) {
+    // Configured proxy but no runner-token verifier wired — can't authenticate any caller.
+    sendJson(res, 503, { error: "agent_llm_unavailable", detail: "no runner-token verifier configured" });
+    return;
+  }
+  const token = bearerToken(req.headers.authorization);
+  const verified = token ? await runnerToken.verify(token).catch(() => null) : null;
+  if (!verified) {
+    sendJson(res, 401, { error: "unauthorized" });
+    return;
+  }
+  const owner = verified.sub;
+
+  if (method === "GET" && pathname === "/agent-llm/v1/models") {
+    const headers: Record<string, string> = { "X-Sec-Acting-User": owner };
+    const bearer = await resolveAgentLlmBearer(agentLlm);
+    if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+    let upstream: Response;
+    try {
+      upstream = await fetch(`${agentLlm.secrouterUrl}/v1/models`, { headers });
+    } catch (err) {
+      sendJson(res, 502, { error: "secrouter_unreachable", detail: String(err) });
+      return;
+    }
+    const text = await upstream.text();
+    res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
+    res.end(text);
+    return;
+  }
+
+  if (method === "POST" && pathname === "/agent-llm/v1/chat/completions") {
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: "bad_json" });
+      return;
+    }
+    const wantsStream = (body as { stream?: unknown } | null)?.stream === true;
+    const headers: Record<string, string> = { "content-type": "application/json", "X-Sec-Acting-User": owner };
+    const bearer = await resolveAgentLlmBearer(agentLlm);
+    if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+    let upstream: Response;
+    try {
+      upstream = await fetch(`${agentLlm.secrouterUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      sendJson(res, 502, { error: "secrouter_unreachable", detail: String(err) });
+      return;
+    }
+    if (wantsStream) {
+      if (!upstream.body) {
+        sendJson(res, 502, { error: "secrouter_empty_stream" });
+        return;
+      }
+      res.writeHead(upstream.status, {
+        "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      await pipeWebStreamToResponse(upstream.body, res);
+      return;
+    }
+    const text = await upstream.text();
+    res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
+    res.end(text);
+    return;
+  }
+
+  sendJson(res, 404, { error: "not_found" });
+}
+
 /** Builds (but does not start listening) the SecChat HTTP server. `GET /healthz` is always
  * unauthenticated, and so is `GET /admin` when `deps.admin?.devMode` is true (a local/dev
  * convenience — see the dev-mode bypass below); every other route requires either a valid
@@ -1828,6 +1966,9 @@ export function createHttpServer(deps: {
   /** Destination-host allowlist for creating outbound webhooks (config.outboundAllowedHosts). Empty
    * ⇒ any http(s) host is permitted. */
   outboundAllowedHosts?: readonly string[];
+  /** The `/agent-llm/v1` proxy's SecRouter target + service-token resolver (see AgentLlmDeps).
+   * Unset ⇒ `/agent-llm/v1/*` isn't specially handled (falls through to the normal pipeline). */
+  agentLlm?: AgentLlmDeps;
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
@@ -1889,6 +2030,15 @@ export function createHttpServer(deps: {
           sendJson(res, 500, { error: "internal" });
         }
       }
+      return;
+    }
+
+    // AGENT-LLM PROXY: special-cased before the auth block the SAME way `/hooks/` is — its
+    // credential is a RUNNER TOKEN (see handleAgentLlmProxy), not a principal bearer/session, so
+    // deps.verifyToken/deps.auth below would reject it outright. Only engages when deps.agentLlm
+    // is wired; otherwise these paths fall through to the normal pipeline unchanged.
+    if (deps.agentLlm && pathname.startsWith("/agent-llm/v1/")) {
+      await handleAgentLlmProxy(req, res, pathname, method, deps.agentLlm, deps.runnerToken);
       return;
     }
 

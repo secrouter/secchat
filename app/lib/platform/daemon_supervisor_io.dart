@@ -6,16 +6,34 @@ import 'package:flutter/foundation.dart';
 
 import 'daemon_supervisor_api.dart';
 
-/// Where the runner daemon's pi points its model calls, wired at build time. SECROUTER_ORIGIN is
-/// empty by default — set it when the deployment's gateway (SecRouter) is reachable, or pi has no
-/// endpoint and a coding session just sits idle. The model defaults to `secllm/balanced` (the
-/// tool-capable Gemma 4 26B — `secllm/fast`, a 3B, does NOT reliably emit tool calls); override at
-/// build to pin a different model or `auto` (router-chosen):
+/// Where the runner daemon's pi points its model calls. Normally this is the SecChat BACKEND's own
+/// `/agent-llm/v1` proxy — `secchatUrl` (the `_url` passed to [DaemonSupervisor.start], the same
+/// origin the app talks to SecChat on) plus that path, with `PI_API_KEY` set to the runner token so
+/// the proxy can verify it and attribute the call to the signed-in owner before forwarding to
+/// SecRouter with the service credential. This is what makes pi's calls work under a secured
+/// gateway: hitting SecRouter directly (the old wiring) 401s there, since pi only ever carries the
+/// runner token, not a SecRouter-recognized credential.
+///
+/// SECROUTER_ORIGIN is the dev-only fallback, used only when `secchatUrl` isn't a real http(s)
+/// origin (e.g. a desktop build with no `SECCHAT_ORIGIN` dart-define, where the app's origin falls
+/// back to a `file://` URI and the proxy path can't be built) — set it when the deployment's gateway
+/// (SecRouter) is reachable and open, or pi has no endpoint and a coding session just sits idle. No
+/// `PI_API_KEY` is sent on this path, matching SecRouter's open/dev-gateway behavior. The model
+/// defaults to `secllm/balanced` (the tool-capable Gemma 4 26B — `secllm/fast`, a 3B, does NOT
+/// reliably emit tool calls); override at build to pin a different model or `auto` (router-chosen):
 ///   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal
 ///   --dart-define=SECCHAT_PI_MODEL=secllm/balanced
 const String _secrouterOrigin = String.fromEnvironment('SECROUTER_ORIGIN');
 const String _piModel =
     String.fromEnvironment('SECCHAT_PI_MODEL', defaultValue: 'secllm/balanced');
+
+/// Whether [url] is a real http(s) origin pi can be pointed at — as opposed to the `file://` URI
+/// `Uri.base` degrades to on a desktop build with no `SECCHAT_ORIGIN` dart-define set (see
+/// app.dart's `backendOrigin`).
+bool _isHttpOrigin(String url) {
+  final uri = Uri.tryParse(url);
+  return uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+}
 
 /// A spawned daemon process — just the bits the supervisor needs, so a test can inject a fake.
 abstract class DaemonProcess {
@@ -175,6 +193,7 @@ class _ProcessSupervisor implements DaemonSupervisor {
   Timer? _retry;
   String? _url;
   String? _token;
+  bool _isRunnerToken = true;
 
   @override
   ValueListenable<RunnerDaemonState> get state => _state;
@@ -183,11 +202,12 @@ class _ProcessSupervisor implements DaemonSupervisor {
   bool get supported => Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
   @override
-  void start({required String secchatUrl, required String token}) {
+  void start({required String secchatUrl, required String token, bool isRunnerToken = true}) {
     if (!supported || token.isEmpty) return;
     if (_state.value == RunnerDaemonState.running || _state.value == RunnerDaemonState.starting) return;
     _url = secchatUrl;
     _token = token;
+    _isRunnerToken = isRunnerToken;
     _stopping = false;
     unawaited(_spawn());
   }
@@ -204,10 +224,27 @@ class _ProcessSupervisor implements DaemonSupervisor {
         // the common tool dirs so the runner can find it. (SECCHAT_PI_RUNNER/PI_BIN still override.)
         if (Platform.isMacOS || Platform.isLinux) 'PATH': _augmentedPath(),
         // Point pi's model calls at the gateway. Without a base URL pi has no model endpoint, so a
-        // coding session just sits idle until its lease lapses. Set at build time:
-        //   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal
+        // coding session just sits idle until its lease lapses. Prefer routing through the SecChat
+        // backend's own `/agent-llm/v1` proxy (same origin as `_url`/SECCHAT_URL above) with the
+        // runner token as the bearer credential — the proxy verifies that token, attributes the call
+        // to the signed-in owner, and forwards to SecRouter with the service credential. This is
+        // what lets pi work under a secured gateway; calling SecRouter directly 401s there, since pi
+        // never holds a SecRouter-recognized credential. Falls back to hitting SecRouter directly
+        // (today's behavior, dev-only / open gateway) only when `_url` isn't a real http(s) origin —
+        // e.g. no SECCHAT_ORIGIN dart-define on a desktop build. Set at build time:
+        //   --dart-define=SECROUTER_ORIGIN=https://secrouter.sec.internal   (dev fallback only)
         //   --dart-define=SECCHAT_PI_MODEL=secllm/fast
-        if (_secrouterOrigin.isNotEmpty) 'PI_BASE_URL': '$_secrouterOrigin/v1',
+        //
+        // Gated on _isRunnerToken: the proxy only ever accepts a runner token (401s anything
+        // else), so if minting one failed and _token fell back to a full principal bearer (see
+        // chat.dart's _startDaemon), pointing pi at the proxy anyway would just make every model
+        // call 401 silently. Fall through to the SecRouter-direct dev fallback (no credential
+        // sent) instead — same as when the origin isn't http(s) at all.
+        if (_isHttpOrigin(_url!) && _isRunnerToken) ...{
+          'PI_BASE_URL': '$_url/agent-llm/v1',
+          'PI_API_KEY': _token!,
+        } else if (_secrouterOrigin.isNotEmpty)
+          'PI_BASE_URL': '$_secrouterOrigin/v1',
         if (_piModel.isNotEmpty) 'PI_MODEL': _piModel,
         // pi must actually reach the gateway for a coding session to do anything, so opt out of
         // pi's offline lockdown (see pi-runner's PI_OFFLINE) — the gateway is the one allowed

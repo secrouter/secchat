@@ -77,6 +77,42 @@ test("makeLlmClient — streams assistant deltas parsed from SecRouter's SSE res
   }
 });
 
+test("makeLlmClient — getServiceToken (the OIDC client-credentials provider) takes precedence over the static secrouterToken", async () => {
+  let capturedHeaders: IncomingHttpHeaders = {};
+
+  const server = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      capturedHeaders = req.headers;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+
+  try {
+    const { port } = server.address() as AddressInfo;
+    // Both a static token AND a service-token resolver are configured; the resolver must win —
+    // it's what lets a deployment cut over to SecRouter's secure mode without also having to blank
+    // out the (now-unused) static token.
+    const client = makeLlmClient({
+      secrouterUrl: `http://127.0.0.1:${port}`,
+      secrouterToken: "stale-static-token",
+      getServiceToken: async () => "fresh-oidc-token",
+    });
+
+    for await (const _delta of client.complete({ model: "claude-x", messages: MESSAGES, actingUser: "user-42" })) {
+      // draining is enough
+    }
+
+    assert.equal(capturedHeaders["authorization"], "Bearer fresh-oidc-token");
+  } finally {
+    server.close();
+  }
+});
+
 test("makeLlmClient — a non-2xx response throws on iteration, and omits Authorization without a token", async () => {
   let capturedHeaders: IncomingHttpHeaders = {};
 

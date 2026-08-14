@@ -90,6 +90,10 @@ test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — a
   assert.equal(env.find((e) => e.name === "SECCHAT_URL")?.value, POOL.secchatUrl);
   assert.equal(env.find((e) => e.name === "SECCHAT_RUNNER_TOKEN")?.value, "TOK");
   assert.equal(env.find((e) => e.name === "SECCHAT_POOL_SESSION")?.value, "s1");
+  // pi in the pod routes through SecChat's /agent-llm/v1 proxy using the owner's runner token,
+  // so its model calls attribute to the owner and never carry a SecRouter credential into the pod.
+  assert.equal(env.find((e) => e.name === "PI_BASE_URL")?.value, `${POOL.secchatUrl}/agent-llm/v1`);
+  assert.equal(env.find((e) => e.name === "PI_API_KEY")?.value, "TOK");
   const sc = container.securityContext as { allowPrivilegeEscalation?: boolean; capabilities?: { drop?: string[] } };
   assert.equal(sc.allowPrivilegeEscalation, false);
   assert.deepEqual(sc.capabilities?.drop, ["ALL"]);

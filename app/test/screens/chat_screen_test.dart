@@ -53,6 +53,7 @@ void main() {
     expect(fake.mintRunnerTokenCalls, 1, reason: 'minted a scoped runner token');
     expect(sup.startedToken, 'rtok-123', reason: 'started the daemon with the scoped token, not the bearer');
     expect(sup.startedUrl, isNotNull);
+    expect(sup.startedIsRunnerToken, true, reason: 'a minted token IS a runner token — safe to point pi at the /agent-llm/v1 proxy');
   });
 
   testWidgets('when runner tokens are unconfigured, the daemon falls back to the bearer token', (tester) async {
@@ -69,6 +70,11 @@ void main() {
     await pumpSettled(tester);
 
     expect(sup.startedToken, fake.token, reason: 'fell back to the bearer token');
+    expect(
+      sup.startedIsRunnerToken,
+      false,
+      reason: 'a bearer fallback is not a runner token — the daemon must not point pi at the /agent-llm/v1 proxy with it',
+    );
   });
 
   testWidgets(
@@ -1340,6 +1346,7 @@ class _RecordingSupervisor implements DaemonSupervisor {
   final _state = ValueNotifier<RunnerDaemonState>(RunnerDaemonState.off);
   String? startedUrl;
   String? startedToken;
+  bool? startedIsRunnerToken;
 
   @override
   ValueListenable<RunnerDaemonState> get state => _state;
@@ -1348,9 +1355,10 @@ class _RecordingSupervisor implements DaemonSupervisor {
   bool get supported => true;
 
   @override
-  void start({required String secchatUrl, required String token}) {
+  void start({required String secchatUrl, required String token, bool isRunnerToken = true}) {
     startedUrl = secchatUrl;
     startedToken = token;
+    startedIsRunnerToken = isRunnerToken;
   }
 
   @override

@@ -7,7 +7,19 @@
 import type { Config } from "../config.ts";
 import type { LlmClient, LlmCompleteRequest, LlmModel, LlmResponseMeta } from "../types.ts";
 
-type SecRouterClientConfig = Pick<Config, "secrouterUrl" | "secrouterToken">;
+type SecRouterClientConfig = Pick<Config, "secrouterUrl" | "secrouterToken"> & {
+  /** Resolves a fresh OIDC service token per call when SecRouter runs with security enabled (see
+   * secrouter/token.ts). Takes precedence over the static `secrouterToken`; when neither is set no
+   * Authorization header is sent (an open dev gateway). */
+  getServiceToken?: () => Promise<string>;
+};
+
+/** The bearer to present on a SecRouter call: a freshly-resolved OIDC service token when a provider
+ * is wired, else the static token, else none. */
+async function resolveBearer(cfg: SecRouterClientConfig): Promise<string | undefined> {
+  if (cfg.getServiceToken) return cfg.getServiceToken();
+  return cfg.secrouterToken;
+}
 
 /** The slice of an OpenAI-style chat-completion SSE chunk the assistant path reads. SecRouter's
  * chunks may carry more fields (id, usage, ...); everything else is ignored. */
@@ -35,7 +47,8 @@ export function makeLlmClient(cfg: SecRouterClientConfig): LlmClient {
  * the route can surface a clean error rather than an empty list that looks like "no models". */
 async function listModels(cfg: SecRouterClientConfig): Promise<LlmModel[]> {
   const headers: Record<string, string> = {};
-  if (cfg.secrouterToken) headers["Authorization"] = `Bearer ${cfg.secrouterToken}`;
+  const bearer = await resolveBearer(cfg);
+  if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   const response = await fetch(`${cfg.secrouterUrl}/v1/models`, { headers });
   if (!response.ok) throw new Error(`SecRouter list models failed with status ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ id?: string; owned_by?: string }> };
@@ -60,8 +73,9 @@ async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteReq
     // ladders must use the same names (they do by default); an unknown name is ignored there.
     headers["x-data-classification"] = req.classification;
   }
-  if (cfg.secrouterToken) {
-    headers["Authorization"] = `Bearer ${cfg.secrouterToken}`;
+  const bearer = await resolveBearer(cfg);
+  if (bearer) {
+    headers["Authorization"] = `Bearer ${bearer}`;
   }
 
   const response = await fetch(`${cfg.secrouterUrl}/v1/chat/completions`, {
