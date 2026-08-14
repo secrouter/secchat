@@ -158,6 +158,11 @@ export interface Message {
    * chain: the row stays anchored to `contentSha256` (the original) while revisions accrue
    * out-of-band and each edit is recorded as an audited `message.edit` event. */
   editedAt?: string;
+  /** For an agent/assistant message, the model SecRouter actually served this turn (from the
+   * chat-completion response — may differ from the requested id, e.g. when "auto" routes). Pure
+   * provenance metadata like promptedBy; NOT bound into the message hash. Unset for human messages
+   * and when the response carried no model. */
+  model?: string;
 }
 
 /** One version of a message's text. Revision 1 is the original (held on the Message row itself);
@@ -209,6 +214,9 @@ export interface AppendMessageInput {
   /** The attachments-manifest digest (see Message.attachmentsSha256). '' / omitted ⇒ no attachments.
    * Computed by the HTTP layer from the claimed attachments and bound into the message hash. */
   attachmentsSha256?: string;
+  /** The model that produced this agent/assistant turn (see Message.model). Provenance metadata,
+   * not hashed. Set at insert (the messages row is otherwise append-only). */
+  model?: string;
 }
 
 /** A file attached to a message. Bytes live content-addressed on the filesystem (by `sha256`), never
@@ -521,8 +529,15 @@ export interface LlmModel {
 }
 
 /** Streams assistant text deltas. The real impl talks to SecRouter; tests use a fake. */
+/** Out-param `complete` fills in as the response streams: the model SecRouter actually served
+ * (which can differ from the requested id when the request routes via "auto"). The caller reads
+ * it after consuming the stream and stamps it onto the persisted message (see Message.model). */
+export interface LlmResponseMeta {
+  model?: string;
+}
+
 export interface LlmClient {
-  complete(req: LlmCompleteRequest): AsyncIterable<string>;
+  complete(req: LlmCompleteRequest, meta?: LlmResponseMeta): AsyncIterable<string>;
   /** Lists the models SecRouter offers (for the chat window's model picker). Optional so test
    * fakes and minimal clients need not implement it — the /models route returns [] without it. */
   listModels?(): Promise<LlmModel[]>;

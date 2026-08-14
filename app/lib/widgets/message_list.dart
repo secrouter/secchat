@@ -491,6 +491,15 @@ class _MessageBubble extends StatelessWidget {
               style: AppFonts.mono(fontSize: 10.5, color: AppColors.textFaint),
             ),
           ),
+        // The model SecRouter actually served this turn (provenance metadata) — a small muted tag.
+        if (isAgent && message.model != null && message.model!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(
+              'model: ${message.model}',
+              style: AppFonts.mono(fontSize: 10.5, color: AppColors.textFaint),
+            ),
+          ),
         const SizedBox(height: 2),
         if (message.isRedacted)
           const Text(

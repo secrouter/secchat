@@ -175,6 +175,7 @@ interface MessageRow {
   hash: string;
   created_at: Date;
   redacted_at: Date | null;
+  model: string | null;
   // Derived (not a stored column): MAX(at) over this message's revisions, present only once
   // edited. getMessage doesn't select it, so it's optional — absent there means editedAt undefined.
   edited_at?: Date | null;
@@ -351,6 +352,7 @@ function rowToMessage(row: MessageRow): Message {
     authorType: row.author_type as AuthorType,
     promptedBy: row.prompted_by ?? undefined,
     parentId: row.parent_id ?? undefined,
+    model: row.model ?? undefined,
     contentSha256: row.content_sha256,
     marking: row.marking,
     attachmentsSha256: row.attachments_sha256,
@@ -768,9 +770,9 @@ export class PgStore implements Store, SessionStore {
 
       // channel_id's FK makes an unknown channel fail closed here, matching MemoryStore's throw.
       await client.query(
-        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, marking, attachments_sha256, prev_hash, hash, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, marking, attachmentsSha256, prevHash, hash, createdAt],
+        `INSERT INTO messages (id, channel_id, seq, author_ref, author_type, prompted_by, parent_id, content_sha256, marking, attachments_sha256, prev_hash, hash, created_at, model)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [id, input.channelId, seq, input.authorRef, input.authorType, input.promptedBy ?? null, input.parentId ?? null, contentSha256, marking, attachmentsSha256, prevHash, hash, createdAt, input.model ?? null],
       );
       await client.query(`INSERT INTO message_content (message_id, content) VALUES ($1, $2)`, [id, input.content]);
 
@@ -790,6 +792,7 @@ export class PgStore implements Store, SessionStore {
         prevHash,
         hash,
         createdAt,
+        model: input.model,
       });
     } catch (err) {
       await client.query("ROLLBACK");

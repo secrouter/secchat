@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import '../version.dart';
 
 /// The SecChat wordmark: a gradient glyph tile plus "SecChat" with "Sec" in
 /// the brand accent. Used on the login card and, at [small] size, in the
@@ -37,6 +38,18 @@ class BrandMark extends StatelessWidget {
               TextSpan(text: 'Sec', style: TextStyle(color: AppColors.accent)),
               TextSpan(text: 'Chat', style: TextStyle(color: AppColors.text)),
             ],
+          ),
+        ),
+        // Version tag in a muted, monospace font just after the wordmark.
+        SizedBox(width: small ? 6 : 8),
+        Padding(
+          padding: EdgeInsets.only(top: small ? 3 : 5),
+          child: Text(
+            'v$kAppVersion',
+            style: AppFonts.mono(
+              fontSize: small ? 10 : 12,
+              color: AppColors.textFaint,
+            ),
           ),
         ),
       ],

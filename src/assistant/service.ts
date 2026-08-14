@@ -81,6 +81,9 @@ export async function handleAssistantTurn(
   // actingUser is the agent's OWNER, not `args.promptedBy` — an agent always acts as the user
   // who owns it (decision #2), so SecRouter's policy/budget/audit land on the owner regardless
   // of who prompted this particular turn.
+  // Filled by complete() as the stream arrives with the model SecRouter actually served (which may
+  // differ from the requested id when routing via "auto") — stamped onto the persisted message.
+  const meta: { model?: string } = {};
   const stream = deps.llm.complete({
     // Per-agent model (set via the picker) wins; else the deployment default; else "auto". Never
     // "default" — SecRouter treats that as a passthrough to an unconfigured provider and 502s.
@@ -88,7 +91,7 @@ export async function handleAssistantTurn(
     messages,
     actingUser: args.agent.ownerSub,
     classification,
-  });
+  }, meta);
 
   let full = "";
   for await (const delta of stream) {
@@ -116,7 +119,7 @@ export async function handleAssistantTurn(
   if (deps.markingPolicy) {
     const enriched = await governedAgentAppend(
       { store: deps.store, marking: deps.markingPolicy, dlp: deps.dlp },
-      { channelId: args.channelId, authorRef: args.agent.id, content: full, promptedBy: args.promptedBy },
+      { channelId: args.channelId, authorRef: args.agent.id, content: full, promptedBy: args.promptedBy, model: meta.model },
     );
     deps.broadcast?.(args.channelId, { type: "message", message: enriched });
     return enriched;
@@ -128,6 +131,7 @@ export async function handleAssistantTurn(
     authorType: "agent",
     content: full,
     promptedBy: args.promptedBy,
+    model: meta.model,
   });
 
   deps.broadcast?.(args.channelId, { type: "message", message: { ...msg, content: full } });

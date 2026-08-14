@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../formatting.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'badges.dart';
 
@@ -47,6 +48,9 @@ class _CodingStripState extends State<CodingStrip> {
   bool _busy = false;
   GrantExecuteResult? _flash;
   Timer? _flashTimer;
+  // Mobile only: the details/controls are collapsed behind an expand toggle (the bar is too narrow
+  // for the full row on a phone — see build()'s compact branch).
+  bool _expanded = false;
 
   @override
   void dispose() {
@@ -115,40 +119,97 @@ class _CodingStripState extends State<CodingStrip> {
   @override
   Widget build(BuildContext context) {
     final badge = _badgeFor(widget.executeMode);
+    final compact = isCompact(context);
+
+    // The live mode badge — always visible whether the agent may currently make changes.
+    final Widget modeBadge =
+        PillBadge(badge.label, color: badge.color, background: badge.bg, borderColor: badge.border);
+    // The mode-change control (or its ended / owner-only stand-ins).
+    final Widget control = widget.sessionEnded
+        ? const PillBadge('Ended')
+        : widget.canGrant
+            ? _ModeDropdown(mode: widget.executeMode, busy: _busy, onSelected: _setMode)
+            : const Text(
+                'Only the owner can change execution mode',
+                style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+              );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+          padding: EdgeInsets.symmetric(horizontal: compact ? 14 : 22, vertical: 10),
           decoration: const BoxDecoration(
             color: AppColors.warnBg,
             border: Border(bottom: BorderSide(color: AppColors.warnBorder)),
           ),
-          child: Row(
-            children: [
-              const Icon(Icons.terminal, size: 16, color: AppColors.warn),
-              const SizedBox(width: 10),
-              const Text(
-                'Coding agent session',
-                style: TextStyle(color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(width: 10),
-              Text(shortId(widget.sessionId), style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint)),
-              const SizedBox(width: 10),
-              // Live mode badge — always visible whether the agent may currently make changes.
-              PillBadge(badge.label, color: badge.color, background: badge.bg, borderColor: badge.border),
-              const Spacer(),
-              if (widget.sessionEnded)
-                const PillBadge('Ended')
-              else if (widget.canGrant)
-                _ModeDropdown(mode: widget.executeMode, busy: _busy, onSelected: _setMode)
-              else
-                const Text(
-                  'Only the owner can change execution mode',
-                  style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+          // Mobile: a tight always-visible header (icon + live mode badge + expand toggle) with the
+          // session label / id / mode control collapsed into an expandable panel, so the bar never
+          // overflows a narrow screen. Wide: the full single row.
+          child: compact
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.terminal, size: 16, color: AppColors.warn),
+                        const SizedBox(width: 10),
+                        Expanded(child: Align(alignment: Alignment.centerLeft, child: modeBadge)),
+                        IconButton(
+                          onPressed: () => setState(() => _expanded = !_expanded),
+                          icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
+                          iconSize: 20,
+                          color: AppColors.warn,
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                          tooltip: _expanded ? 'Hide details' : 'Show execution controls',
+                        ),
+                      ],
+                    ),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 160),
+                      curve: Curves.easeOut,
+                      alignment: Alignment.topCenter,
+                      child: _expanded
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: 10),
+                              child: Wrap(
+                                spacing: 10,
+                                runSpacing: 8,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  const Text(
+                                    'Coding agent session',
+                                    style: TextStyle(
+                                        color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
+                                  ),
+                                  Text(shortId(widget.sessionId),
+                                      style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint)),
+                                  control,
+                                ],
+                              ),
+                            )
+                          : const SizedBox(width: double.infinity),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    const Icon(Icons.terminal, size: 16, color: AppColors.warn),
+                    const SizedBox(width: 10),
+                    const Text(
+                      'Coding agent session',
+                      style: TextStyle(color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(shortId(widget.sessionId), style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint)),
+                    const SizedBox(width: 10),
+                    modeBadge,
+                    const Spacer(),
+                    control,
+                  ],
                 ),
-            ],
-          ),
         ),
         AnimatedSize(
           duration: const Duration(milliseconds: 160),
