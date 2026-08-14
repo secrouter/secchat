@@ -98,6 +98,50 @@ void main() {
 
       expect(find.textContaining('No Kubernetes agent pool is configured'), findsOneWidget);
     });
+
+    testWidgets('lists git SSH keys and revokes one after confirmation', (tester) async {
+      tester.view.physicalSize = const Size(1400, 3000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final api = FakeApiClient();
+      api.adminOverview = const AdminOverview(
+        generatedAt: '', channels: [], agents: [], sessions: [], audit: [],
+        messagesChainOk: true, auditChainOk: true,
+      );
+      api.adminSshKeys = const AdminSshKeys(enabled: true, keys: [
+        AdminSshKey(sub: 'alice', displayName: 'Alice Ng', keyType: 'ssh-ed25519', publicKey: 'ssh-ed25519 AAAA', fingerprint: 'SHA256:alicefp', createdAt: '2026-08-01T00:00:00.000Z'),
+      ]);
+
+      await tester.pumpWidget(MaterialApp(home: AdminScreen(api: api)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('GIT SSH KEYS'), findsOneWidget); // panel title (upper-cased)
+      expect(find.text('SHA256:alicefp'), findsOneWidget);
+
+      // Revoke → confirm dialog → confirm → the API is called for that sub.
+      await tester.ensureVisible(find.text('Revoke'));
+      await tester.tap(find.text('Revoke'));
+      await tester.pumpAndSettle();
+      expect(find.text('Revoke git SSH key?'), findsOneWidget); // the confirm dialog
+      await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('Revoke')));
+      await tester.pumpAndSettle();
+      expect(api.revokedSshKeys, ['alice']);
+    });
+
+    testWidgets('git SSH keys panel shows the not-enabled note when the feature is off', (tester) async {
+      final api = FakeApiClient();
+      api.adminOverview = const AdminOverview(
+        generatedAt: '', channels: [], agents: [], sessions: [], audit: [],
+        messagesChainOk: true, auditChainOk: true,
+      );
+      api.adminSshKeys = const AdminSshKeys(enabled: false); // no keys, feature off
+      await tester.pumpWidget(MaterialApp(home: AdminScreen(api: api)));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining("Git SSH identities aren't enabled"), findsOneWidget);
+    });
   });
 
   group('webhooks dialog', () {

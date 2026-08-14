@@ -1774,6 +1774,44 @@ function buildRouter(
     sendJson(res, 200, poolStatus ? poolStatus() : { configured: false });
   });
 
+  // Git SSH identities (admin-gated): the roster of who has a git key registered — PUBLIC metadata
+  // only (owner, type, fingerprint, added-at), NEVER the encrypted private envelope. `enabled`
+  // reflects whether the deployment wired the feature (a master key); keys can still exist + be
+  // revoked when it's off. Enriched with the directory display name for a readable roster.
+  router.add("GET", "/admin/api/ssh-keys", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const [rows, users] = await Promise.all([store.listUserSshKeys(), store.listUsers()]);
+    const nameBySub = new Map(users.map((u) => [u.sub, u.displayName]));
+    const keys = rows.map((row) => ({ sub: row.sub, displayName: nameBySub.get(row.sub) ?? null, ...publicSshKey(row) }));
+    sendJson(res, 200, { enabled: Boolean(ssh), keys });
+  });
+
+  // Revoke ANOTHER user's git key (admin offboarding / compromise): drop it from the store so it
+  // stops being injected into future coding sessions, audited against the target sub. (The public
+  // key should also be removed from the git host.) Not gated on the ssh feature flag — a stale key
+  // from a since-disabled feature is still revocable.
+  router.add("DELETE", "/admin/api/ssh-keys/:sub", async ({ res, params, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const target = params.sub!;
+    const removed = await store.deleteUserSshKey(target);
+    if (removed) await store.appendAudit({ actor: principal.sub, action: "ssh_key.revoke", target, detail: "admin revoke" });
+    sendJson(res, removed ? 200 : 404, { removed });
+  });
+
   router.add("GET", "/admin", async ({ res, principal }) => {
     if (!admin) {
       sendJson(res, 404, { error: "admin_unavailable" });

@@ -1387,6 +1387,50 @@ class PoolSessionInfo {
   );
 }
 
+/// The admin git-SSH-key roster (`GET /admin/api/ssh-keys`): whether the feature is enabled +
+/// every user's key (public metadata only — never the private envelope).
+class AdminSshKeys {
+  const AdminSshKeys({required this.enabled, this.keys = const []});
+
+  final bool enabled;
+  final List<AdminSshKey> keys;
+
+  factory AdminSshKeys.fromJson(Map<String, dynamic> json) => AdminSshKeys(
+    enabled: json['enabled'] == true,
+    keys: ((json['keys'] as List<dynamic>?) ?? const [])
+        .map((e) => AdminSshKey.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
+}
+
+/// One user's registered git SSH identity — public fields only.
+class AdminSshKey {
+  const AdminSshKey({
+    required this.sub,
+    required this.displayName,
+    required this.keyType,
+    required this.publicKey,
+    required this.fingerprint,
+    required this.createdAt,
+  });
+
+  final String sub;
+  final String? displayName;
+  final String keyType;
+  final String publicKey;
+  final String fingerprint;
+  final String createdAt;
+
+  factory AdminSshKey.fromJson(Map<String, dynamic> json) => AdminSshKey(
+    sub: (json['sub'] as String?) ?? '',
+    displayName: json['displayName'] as String?,
+    keyType: (json['keyType'] as String?) ?? '',
+    publicKey: (json['publicKey'] as String?) ?? '',
+    fingerprint: (json['fingerprint'] as String?) ?? '',
+    createdAt: (json['createdAt'] as String?) ?? '',
+  );
+}
+
 /// One link in the tamper-evident audit chain (`AuditEvent` in the backend types).
 class AuditEvent {
   const AuditEvent({

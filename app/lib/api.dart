@@ -193,6 +193,14 @@ abstract class ApiClient {
   /// [ApiException] 403 for a non-admin.
   Future<PoolStatus> getPoolStatus();
 
+  /// The git-SSH-key roster (`GET /admin/api/ssh-keys`, admin-only): every user's key (public
+  /// metadata only). Throws [ApiException] 403 for a non-admin.
+  Future<AdminSshKeys> getAdminSshKeys();
+
+  /// Revoke a user's git SSH key as an admin (`DELETE /admin/api/ssh-keys/:sub`). Returns whether a
+  /// key was removed (false if the user had none). Throws [ApiException] 403 for a non-admin.
+  Future<bool> revokeAdminSshKey(String sub);
+
   /// A channel's inbound webhooks (`GET /channels/:id/webhooks`), for the management UI. Requires
   /// the `webhook.create` capability server-side (admin group by default). Tokens are included.
   Future<List<Webhook>> listWebhooks(String channelId);
@@ -692,6 +700,16 @@ class HttpApiClient implements ApiClient {
   @override
   Future<PoolStatus> getPoolStatus() async =>
       PoolStatus.fromJson(await _get('/pool/status') as Map<String, dynamic>);
+
+  @override
+  Future<AdminSshKeys> getAdminSshKeys() async =>
+      AdminSshKeys.fromJson(await _get('/admin/api/ssh-keys') as Map<String, dynamic>);
+
+  @override
+  Future<bool> revokeAdminSshKey(String sub) async {
+    final res = await _delete('/admin/api/ssh-keys/${Uri.encodeComponent(sub)}') as Map<String, dynamic>;
+    return res['removed'] == true;
+  }
 
   @override
   Future<List<Webhook>> listWebhooks(String channelId) async {

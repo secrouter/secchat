@@ -24,6 +24,7 @@ class AdminScreen extends StatefulWidget {
 class _AdminScreenState extends State<AdminScreen> {
   AdminOverview? _overview;
   PoolStatus? _pool;
+  AdminSshKeys? _sshKeys;
   String? _error;
   bool _loading = true;
 
@@ -40,18 +41,25 @@ class _AdminScreenState extends State<AdminScreen> {
     });
     try {
       final overview = await widget.api.getAdminOverview();
-      // Pool status is best-effort: a hiccup on that endpoint must not blank the whole console,
-      // which is the primary audit-review surface. Null ⇒ the pool panel is simply omitted.
+      // The pool + SSH-key panels are best-effort: a hiccup on either endpoint must not blank the
+      // whole console, which is the primary audit-review surface. Null ⇒ that panel is simply omitted.
       PoolStatus? pool;
       try {
         pool = await widget.api.getPoolStatus();
       } catch (_) {
         pool = null;
       }
+      AdminSshKeys? sshKeys;
+      try {
+        sshKeys = await widget.api.getAdminSshKeys();
+      } catch (_) {
+        sshKeys = null;
+      }
       if (!mounted) return;
       setState(() {
         _overview = overview;
         _pool = pool;
+        _sshKeys = sshKeys;
         _loading = false;
       });
     } catch (error) {
@@ -61,6 +69,39 @@ class _AdminScreenState extends State<AdminScreen> {
         _loading = false;
       });
     }
+  }
+
+  /// Admin-revoke a user's git SSH key: confirm, call the API, then reload the roster. Failures
+  /// surface as a snackbar; the console isn't blanked.
+  Future<void> _revokeKey(String sub, String label) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Revoke git SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: Text(
+          "This drops $label's git key so it stops being injected into future coding sessions. "
+          'The public key should also be removed from the git host. This cannot be undone.',
+          style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Revoke', style: TextStyle(color: AppColors.bad))),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    String? failure;
+    try {
+      await widget.api.revokeAdminSshKey(sub);
+    } catch (error) {
+      failure = error is ApiException ? error.message : 'Failed to revoke the key.';
+    }
+    if (!mounted) return;
+    if (failure != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(failure)));
+    }
+    await _load();
   }
 
   @override
@@ -116,6 +157,10 @@ class _AdminScreenState extends State<AdminScreen> {
         if (_pool != null) ...[
           const SizedBox(height: 28),
           _PoolPanel(pool: _pool!),
+        ],
+        if (_sshKeys != null) ...[
+          const SizedBox(height: 28),
+          _SshKeysPanel(sshKeys: _sshKeys!, onRevoke: _revokeKey),
         ],
         const SizedBox(height: 28),
         _AuditPanel(audit: overview.audit),
@@ -466,6 +511,58 @@ String _fmtDuration(int seconds) {
 
 /// A pod's age (ms since start) as a compact duration.
 String _fmtAge(int ms) => _fmtDuration((ms / 1000).round());
+
+/// The git SSH key roster (admin-only, `GET /admin/api/ssh-keys`): who has a git identity registered
+/// — public metadata only (owner, fingerprint, added-at), never the private key — with an admin
+/// revoke action per row (offboarding / compromise). Shows a note when the feature isn't enabled.
+class _SshKeysPanel extends StatelessWidget {
+  const _SshKeysPanel({required this.sshKeys, required this.onRevoke});
+
+  final AdminSshKeys sshKeys;
+  final Future<void> Function(String sub, String label) onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!sshKeys.enabled && sshKeys.keys.isEmpty) {
+      return const _Panel(
+        title: 'Git SSH keys',
+        child: Text(
+          "Git SSH identities aren't enabled for this deployment.",
+          style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic, fontSize: 13),
+        ),
+      );
+    }
+    return _Panel(
+      title: 'Git SSH keys',
+      note: sshKeys.enabled ? null : 'Feature disabled — existing keys are shown so they can be revoked.',
+      child: _DataTable(
+        headers: const ['User', 'Fingerprint', 'Added', ''],
+        widths: const [2, 3, 2, 1],
+        rows: [
+          for (final k in sshKeys.keys)
+            [
+              _cellWithId(k.displayName ?? k.sub, k.sub),
+              _mono(k.fingerprint),
+              _mono(_fmtDate(k.createdAt)),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => onRevoke(k.sub, k.displayName ?? k.sub),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.bad,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('Revoke', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+        ],
+      ),
+    );
+  }
+}
 
 class _AuditPanel extends StatelessWidget {
   const _AuditPanel({required this.audit});

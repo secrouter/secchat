@@ -533,6 +533,75 @@ test("GET /pool/status: reports configured:false when the pool isn't wired", asy
   assert.deepEqual(await res.json(), { configured: false });
 });
 
+// ── Admin git SSH key roster (GET/DELETE /admin/api/ssh-keys) ───────────────────────────────────
+let sshServer: Server;
+let sshBaseUrl: string;
+const sshRows = [
+  { sub: "alice", keyType: "ssh-ed25519", publicKey: "ssh-ed25519 AAAA alice", fingerprint: "SHA256:alicefp", privateKeyEnc: "SECRET-ENVELOPE", createdAt: "2026-08-01T00:00:00.000Z" },
+  { sub: "bob", keyType: "ssh-ed25519", publicKey: "ssh-ed25519 BBBB bob", fingerprint: "SHA256:bobfp", privateKeyEnc: "SECRET-ENVELOPE-2", createdAt: "2026-08-02T00:00:00.000Z" },
+];
+const sshRevoked: string[] = [];
+
+before(async () => {
+  sshServer = createHttpServer({
+    verifyToken,
+    store: {
+      ...store,
+      listUserSshKeys: async () => sshRows.filter((k) => !sshRevoked.includes(k.sub)),
+      listUsers: async () => [
+        { sub: "alice", displayName: "Alice Ng", email: "", groups: [] },
+        { sub: "bob", displayName: "Bob Reyes", email: "", groups: [] },
+      ],
+      deleteUserSshKey: async (sub: string) => {
+        if (sshRows.some((k) => k.sub === sub) && !sshRevoked.includes(sub)) {
+          sshRevoked.push(sub);
+          return true;
+        }
+        return false;
+      },
+    } as unknown as Store,
+    admin: { adminGroup: "secchat-admins", devMode: false, overview: async () => fakeOverview, renderConsole },
+  });
+  await new Promise<void>((resolve) => sshServer.listen(0, resolve));
+  const address = sshServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  sshBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => sshServer.close(() => resolve()));
+});
+
+test("GET /admin/api/ssh-keys: an admin sees the key roster (public metadata only)", async () => {
+  const res = await fetch(`${sshBaseUrl}/admin/api/ssh-keys`, { headers: { authorization: "Bearer admingood" } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { enabled: boolean; keys: Array<{ sub: string; displayName: string | null; fingerprint: string }> };
+  assert.equal(body.keys.length, 2);
+  assert.equal(body.keys[0]!.sub, "alice");
+  assert.equal(body.keys[0]!.displayName, "Alice Ng"); // enriched from the directory
+  assert.equal(body.keys[0]!.fingerprint, "SHA256:alicefp");
+  // The encrypted private envelope is NEVER serialized to a client.
+  assert.ok(!JSON.stringify(body).includes("SECRET-ENVELOPE"));
+});
+
+test("GET /admin/api/ssh-keys: a non-admin is forbidden", async () => {
+  const res = await fetch(`${sshBaseUrl}/admin/api/ssh-keys`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 403);
+});
+
+test("DELETE /admin/api/ssh-keys/:sub: an admin revokes a user key; a missing one is 404", async () => {
+  const del = await fetch(`${sshBaseUrl}/admin/api/ssh-keys/bob`, { method: "DELETE", headers: { authorization: "Bearer admingood" } });
+  assert.equal(del.status, 200);
+  assert.deepEqual(await del.json(), { removed: true });
+  // The roster no longer lists bob.
+  const res = await fetch(`${sshBaseUrl}/admin/api/ssh-keys`, { headers: { authorization: "Bearer admingood" } });
+  const body = (await res.json()) as { keys: Array<{ sub: string }> };
+  assert.deepEqual(body.keys.map((k) => k.sub), ["alice"]);
+  // Revoking an already-gone key is 404.
+  const again = await fetch(`${sshBaseUrl}/admin/api/ssh-keys/bob`, { method: "DELETE", headers: { authorization: "Bearer admingood" } });
+  assert.equal(again.status, 404);
+});
+
 // ── Fake search port (src/http/server.ts's `SearchFn`) — used ONLY by the GET /search tests
 // below, injected into a SEPARATE server instance (`searchServer`/`searchBaseUrl`) so the tests
 // above keep proving the no-search path (`server`/`baseUrl`, already built without `search`)

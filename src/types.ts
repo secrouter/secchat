@@ -377,6 +377,10 @@ export interface Store {
   /** The user's SSH key row, INCLUDING the encrypted private envelope, or null. Callers that return
    * it to a client MUST project away `privateKeyEnc` first (see the /me/ssh-key route). */
   getUserSshKey(sub: string): Promise<UserSshKey | null>;
+  /** Every user's SSH key row (INCLUDING the encrypted private envelope) — for the admin key
+   * roster. Callers that return these to a client MUST project away `privateKeyEnc` first (see the
+   * GET /admin/api/ssh-keys route). Ordered oldest-first. */
+  listUserSshKeys(): Promise<UserSshKey[]>;
   /** Remove a user's SSH key. Returns whether a row was removed. */
   deleteUserSshKey(sub: string): Promise<boolean>;
   /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
