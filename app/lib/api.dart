@@ -188,6 +188,11 @@ abstract class ApiClient {
   /// not wired in this deployment.
   Future<AdminOverview> getAdminOverview();
 
+  /// The Kubernetes agent-pool status (`GET /pool/status`, admin-only): limits + live sessions.
+  /// Returns `PoolStatus(configured: false)` when the deployment doesn't wire a pool; throws
+  /// [ApiException] 403 for a non-admin.
+  Future<PoolStatus> getPoolStatus();
+
   /// A channel's inbound webhooks (`GET /channels/:id/webhooks`), for the management UI. Requires
   /// the `webhook.create` capability server-side (admin group by default). Tokens are included.
   Future<List<Webhook>> listWebhooks(String channelId);
@@ -683,6 +688,10 @@ class HttpApiClient implements ApiClient {
   @override
   Future<AdminOverview> getAdminOverview() async =>
       AdminOverview.fromJson(await _get('/admin/api/overview') as Map<String, dynamic>);
+
+  @override
+  Future<PoolStatus> getPoolStatus() async =>
+      PoolStatus.fromJson(await _get('/pool/status') as Map<String, dynamic>);
 
   @override
   Future<List<Webhook>> listWebhooks(String channelId) async {

@@ -372,6 +372,15 @@ class FakeApiClient implements ApiClient {
         );
   }
 
+  /// Pool status a test should see from [getPoolStatus]; null ⇒ "no pool configured".
+  PoolStatus? poolStatus;
+
+  @override
+  Future<PoolStatus> getPoolStatus() async {
+    _maybeThrow('getPoolStatus');
+    return poolStatus ?? const PoolStatus(configured: false);
+  }
+
   /// Inbound webhooks per channel; the webhook calls mutate these.
   final Map<String, List<Webhook>> webhooksByChannel = {};
 

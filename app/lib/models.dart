@@ -1303,6 +1303,90 @@ class AdminSession {
   );
 }
 
+/// The Kubernetes agent-pool limits + live sessions (`GET /pool/status`, admin-only). `configured`
+/// is false when the deployment doesn't wire a pool — the other fields are then null/empty.
+class PoolStatus {
+  const PoolStatus({
+    required this.configured,
+    this.namespace,
+    this.image,
+    this.limits,
+    this.live,
+    this.sessions = const [],
+  });
+
+  final bool configured;
+  final String? namespace;
+  final String? image;
+  final PoolLimits? limits;
+  final int? live;
+  final List<PoolSessionInfo> sessions;
+
+  factory PoolStatus.fromJson(Map<String, dynamic> json) {
+    if (json['configured'] != true) return const PoolStatus(configured: false);
+    final rawSessions = (json['sessions'] as List<dynamic>?) ?? const [];
+    return PoolStatus(
+      configured: true,
+      namespace: json['namespace'] as String?,
+      image: json['image'] as String?,
+      limits: json['limits'] is Map<String, dynamic>
+          ? PoolLimits.fromJson(json['limits'] as Map<String, dynamic>)
+          : null,
+      live: (json['live'] as num?)?.toInt(),
+      sessions: rawSessions
+          .map((e) => PoolSessionInfo.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+/// The deployment's pool caps (from the `SECCHAT_POOL_*` env / secsite.toml `[secchat.pool]`).
+class PoolLimits {
+  const PoolLimits({
+    required this.maxPods,
+    required this.maxPerOwner,
+    required this.ttlSeconds,
+    required this.attachTimeoutMs,
+  });
+
+  final int maxPods;
+  final int maxPerOwner;
+  final int ttlSeconds;
+  final int attachTimeoutMs;
+
+  factory PoolLimits.fromJson(Map<String, dynamic> json) => PoolLimits(
+    maxPods: (json['maxPods'] as num?)?.toInt() ?? 0,
+    maxPerOwner: (json['maxPerOwner'] as num?)?.toInt() ?? 0,
+    ttlSeconds: (json['ttlSeconds'] as num?)?.toInt() ?? 0,
+    attachTimeoutMs: (json['attachTimeoutMs'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// One live pool session — metadata only (never session content).
+class PoolSessionInfo {
+  const PoolSessionInfo({
+    required this.sessionId,
+    required this.ownerSub,
+    required this.podName,
+    required this.attached,
+    required this.ageMs,
+  });
+
+  final String sessionId;
+  final String ownerSub;
+  final String podName;
+  final bool attached;
+  final int ageMs;
+
+  factory PoolSessionInfo.fromJson(Map<String, dynamic> json) => PoolSessionInfo(
+    sessionId: (json['sessionId'] as String?) ?? '',
+    ownerSub: (json['ownerSub'] as String?) ?? '',
+    podName: (json['podName'] as String?) ?? '',
+    attached: json['attached'] == true,
+    ageMs: (json['ageMs'] as num?)?.toInt() ?? 0,
+  );
+}
+
 /// One link in the tamper-evident audit chain (`AuditEvent` in the backend types).
 class AuditEvent {
   const AuditEvent({

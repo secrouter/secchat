@@ -23,6 +23,7 @@ class AdminScreen extends StatefulWidget {
 
 class _AdminScreenState extends State<AdminScreen> {
   AdminOverview? _overview;
+  PoolStatus? _pool;
   String? _error;
   bool _loading = true;
 
@@ -39,9 +40,18 @@ class _AdminScreenState extends State<AdminScreen> {
     });
     try {
       final overview = await widget.api.getAdminOverview();
+      // Pool status is best-effort: a hiccup on that endpoint must not blank the whole console,
+      // which is the primary audit-review surface. Null ⇒ the pool panel is simply omitted.
+      PoolStatus? pool;
+      try {
+        pool = await widget.api.getPoolStatus();
+      } catch (_) {
+        pool = null;
+      }
       if (!mounted) return;
       setState(() {
         _overview = overview;
+        _pool = pool;
         _loading = false;
       });
     } catch (error) {
@@ -103,6 +113,10 @@ class _AdminScreenState extends State<AdminScreen> {
         _AgentsPanel(agents: overview.agents),
         const SizedBox(height: 28),
         _SessionsPanel(sessions: overview.sessions, agentById: agentById),
+        if (_pool != null) ...[
+          const SizedBox(height: 28),
+          _PoolPanel(pool: _pool!),
+        ],
         const SizedBox(height: 28),
         _AuditPanel(audit: overview.audit),
         const SizedBox(height: 20),
@@ -353,6 +367,105 @@ class _SessionsPanel extends StatelessWidget {
     );
   }
 }
+
+/// The Kubernetes agent-pool panel: the deployment's caps + the live pooled sessions (metadata
+/// only). Shows an informational note when no pool is configured, so an admin can tell "off" apart
+/// from "on with zero sessions". Read-only — the limits come from the deploy config
+/// (SECCHAT_POOL_* / secsite.toml [secchat.pool]); changing them is a redeploy, not a GUI action.
+class _PoolPanel extends StatelessWidget {
+  const _PoolPanel({required this.pool});
+
+  final PoolStatus pool;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!pool.configured) {
+      return const _Panel(
+        title: 'Agent pool',
+        child: Text(
+          'No Kubernetes agent pool is configured for this deployment.',
+          style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic, fontSize: 13),
+        ),
+      );
+    }
+    final limits = pool.limits;
+    final live = pool.live ?? pool.sessions.length;
+    final meta = [
+      if (pool.namespace != null && pool.namespace!.isNotEmpty) 'namespace ${pool.namespace}',
+      if (pool.image != null && pool.image!.isNotEmpty) 'image ${pool.image}',
+    ].join(' · ');
+    return _Panel(
+      title: 'Agent pool',
+      note: meta.isEmpty ? null : meta,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 14,
+            runSpacing: 14,
+            children: [
+              _poolCard('Live / max pods', limits == null ? '$live' : '$live / ${limits.maxPods}',
+                  emphasize: limits != null && limits.maxPods > 0 && live >= limits.maxPods),
+              _poolCard('Per-owner cap', limits == null ? '—' : '${limits.maxPerOwner}'),
+              _poolCard('Pod TTL', limits == null ? '—' : _fmtDuration(limits.ttlSeconds)),
+              _poolCard('Attach timeout', limits == null ? '—' : _fmtDuration((limits.attachTimeoutMs / 1000).round())),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _DataTable(
+            headers: const ['Owner', 'Pod', 'State', 'Age'],
+            widths: const [2, 3, 1, 1],
+            rows: [
+              for (final s in pool.sessions)
+                [
+                  _mono(s.ownerSub),
+                  _mono(s.podName),
+                  s.attached ? _statusPill('active') : _pill('starting', tone: AppColors.warn),
+                  _mono(_fmtAge(s.ageMs)),
+                ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small labeled metric card (mirrors _SummaryCards' style). `emphasize` colours the value as a
+/// warning — used when the pool is at its global cap (new sessions will be rejected).
+Widget _poolCard(String label, String value, {bool emphasize = false}) => Container(
+  width: 168,
+  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+  decoration: BoxDecoration(
+    color: AppColors.surface,
+    border: Border.all(color: AppColors.border),
+    borderRadius: BorderRadius.circular(AppRadius.sm),
+  ),
+  child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        label.toUpperCase(),
+        style: const TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.6, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        value,
+        style: TextStyle(color: emphasize ? AppColors.warn : AppColors.accent, fontSize: 22, fontWeight: FontWeight.w700),
+      ),
+    ],
+  ),
+);
+
+/// A whole-seconds duration as a compact "1h 0m" / "5m 30s" / "45s".
+String _fmtDuration(int seconds) {
+  if (seconds >= 3600) return '${seconds ~/ 3600}h ${(seconds % 3600) ~/ 60}m';
+  if (seconds >= 60) return '${seconds ~/ 60}m ${seconds % 60}s';
+  return '${seconds}s';
+}
+
+/// A pod's age (ms since start) as a compact duration.
+String _fmtAge(int ms) => _fmtDuration((ms / 1000).round());
 
 class _AuditPanel extends StatelessWidget {
   const _AuditPanel({required this.audit});

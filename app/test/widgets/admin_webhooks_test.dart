@@ -56,6 +56,48 @@ void main() {
 
       expect(find.text('CHAIN BROKEN'), findsOneWidget);
     });
+
+    testWidgets('renders the agent-pool panel with limits + live sessions', (tester) async {
+      tester.view.physicalSize = const Size(1400, 2600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final api = FakeApiClient();
+      api.adminOverview = const AdminOverview(
+        generatedAt: '', channels: [], agents: [], sessions: [], audit: [],
+        messagesChainOk: true, auditChainOk: true,
+      );
+      api.poolStatus = const PoolStatus(
+        configured: true,
+        namespace: 'secchat-pool',
+        image: 'reg/secchat-runnerd:1',
+        limits: PoolLimits(maxPods: 20, maxPerOwner: 3, ttlSeconds: 3600, attachTimeoutMs: 120000),
+        live: 1,
+        sessions: [PoolSessionInfo(sessionId: 's1', ownerSub: 'alice', podName: 'secchat-pool-s1', attached: true, ageMs: 65000)],
+      );
+
+      await tester.pumpWidget(MaterialApp(home: AdminScreen(api: api)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('AGENT POOL'), findsOneWidget); // panel title (upper-cased)
+      expect(find.text('1 / 20'), findsOneWidget); // live / max pods card
+      expect(find.text('alice'), findsOneWidget); // the live session's owner
+      expect(find.text('secchat-pool-s1'), findsOneWidget);
+    });
+
+    testWidgets('agent-pool panel shows the not-configured note when no pool is wired', (tester) async {
+      final api = FakeApiClient();
+      api.adminOverview = const AdminOverview(
+        generatedAt: '', channels: [], agents: [], sessions: [], audit: [],
+        messagesChainOk: true, auditChainOk: true,
+      );
+      // poolStatus left null ⇒ the fake returns PoolStatus(configured: false).
+      await tester.pumpWidget(MaterialApp(home: AdminScreen(api: api)));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('No Kubernetes agent pool is configured'), findsOneWidget);
+    });
   });
 
   group('webhooks dialog', () {
