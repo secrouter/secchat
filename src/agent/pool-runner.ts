@@ -94,6 +94,13 @@ export function buildPoolPodSpec(input: {
             { name: "SECCHAT_URL", value: config.secchatUrl },
             { name: "SECCHAT_RUNNER_TOKEN", value: runnerToken },
             { name: "SECCHAT_POOL_SESSION", value: sessionId },
+            // Route the pod's pi model calls through SecChat's own /agent-llm/v1 proxy (NOT SecRouter
+            // directly) — same as the desktop daemon. The proxy authenticates the pod by its
+            // owner-scoped runner token (PI_API_KEY, the same credential it attaches with) and forwards
+            // to the secured SecRouter with the service token + X-Sec-Acting-User, so the pool agent's
+            // model calls attribute to the owner and never carry a SecRouter credential into the pod.
+            { name: "PI_BASE_URL", value: `${config.secchatUrl.replace(/\/$/, "")}/agent-llm/v1` },
+            { name: "PI_API_KEY", value: runnerToken },
           ],
           resources: {
             limits: { cpu: config.cpuLimit, memory: config.memoryLimit },
