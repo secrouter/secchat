@@ -20,7 +20,7 @@ WORKDIR /app
 # deployment uses; in an air-gapped/private setup this may need registry auth — pre-stage the binary
 # and point PI_BIN at it instead, or build with --build-arg INSTALL_PI=0 and run in relay/stub mode
 # (SECCHAT_RUNNER_STUB=1) for a smoke test.
-ARG PI_PACKAGE=@earendil-works/pi-coding-agent
+ARG PI_PACKAGE=@earendil-works/pi-coding-agent@0.83.0
 ARG INSTALL_PI=1
 RUN if [ "$INSTALL_PI" = "1" ]; then npm install -g "$PI_PACKAGE" || echo "pi install skipped — set PI_BIN to a provided binary"; fi
 
