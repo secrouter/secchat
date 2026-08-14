@@ -38,6 +38,8 @@ export interface GovernedAppendInput {
   authorRef: string;
   content: string;
   promptedBy?: string;
+  /** The model SecRouter served this turn (provenance metadata; see Message.model). */
+  model?: string;
 }
 
 export type GovernedMessage = Message & { content: string; dlpFlags?: string[] };
@@ -81,6 +83,7 @@ export async function governedAgentAppend(deps: GovernedAppendDeps, input: Gover
     content: input.content,
     promptedBy: input.promptedBy,
     marking: formatMarking(effective),
+    model: input.model,
   });
   if (dlpHits.length > 0) {
     // flag mode: a provable, content-free trail on the audit chain — same action as the route.

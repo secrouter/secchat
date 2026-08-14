@@ -5,13 +5,14 @@
 // service identity — this header is set unconditionally, regardless of who prompted the turn.
 
 import type { Config } from "../config.ts";
-import type { LlmClient, LlmCompleteRequest, LlmModel } from "../types.ts";
+import type { LlmClient, LlmCompleteRequest, LlmModel, LlmResponseMeta } from "../types.ts";
 
 type SecRouterClientConfig = Pick<Config, "secrouterUrl" | "secrouterToken">;
 
 /** The slice of an OpenAI-style chat-completion SSE chunk the assistant path reads. SecRouter's
  * chunks may carry more fields (id, usage, ...); everything else is ignored. */
 interface ChatCompletionChunk {
+  model?: string;
   choices?: Array<{ delta?: { content?: string } }>;
 }
 
@@ -20,8 +21,8 @@ interface ChatCompletionChunk {
  * any other request failure, surfaces as a rejection from that iteration, not from this call). */
 export function makeLlmClient(cfg: SecRouterClientConfig): LlmClient {
   return {
-    complete(req: LlmCompleteRequest): AsyncIterable<string> {
-      return streamCompletion(cfg, req);
+    complete(req: LlmCompleteRequest, meta?: LlmResponseMeta): AsyncIterable<string> {
+      return streamCompletion(cfg, req, meta);
     },
     listModels(): Promise<LlmModel[]> {
       return listModels(cfg);
@@ -43,7 +44,7 @@ async function listModels(cfg: SecRouterClientConfig): Promise<LlmModel[]> {
     .map((m) => ({ id: m.id, ownedBy: m.owned_by }));
 }
 
-async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteRequest): AsyncGenerator<string> {
+async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteRequest, meta?: LlmResponseMeta): AsyncGenerator<string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     // ALWAYS set, even when no service token is configured — this is how SecRouter attributes
@@ -76,14 +77,14 @@ async function* streamCompletion(cfg: SecRouterClientConfig, req: LlmCompleteReq
     throw new Error("SecRouter chat completion failed: response had no body");
   }
 
-  yield* parseSseDeltas(response.body);
+  yield* parseSseDeltas(response.body, meta);
 }
 
 /** Parses an OpenAI-style SSE byte stream into assistant text deltas. A `data: ` line's bytes can
  * land split across two reads of the stream (TCP has no notion of the SSE framing), so the
  * partial trailing line is buffered and glued onto the front of the next decoded chunk before
  * re-splitting. */
-async function* parseSseDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* parseSseDeltas(body: ReadableStream<Uint8Array>, meta?: LlmResponseMeta): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -98,7 +99,7 @@ async function* parseSseDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator
       buffer = lines.pop() ?? ""; // last element is "" (buffer ended on \n) or a partial line
 
       for (const line of lines) {
-        const parsed = parseSseLine(line);
+        const parsed = parseSseLine(line, meta);
         if (parsed === "done") return;
         if (parsed !== null) yield parsed;
       }
@@ -114,7 +115,7 @@ async function* parseSseDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator
 /** Parses one SSE line. Returns "done" on the `[DONE]` sentinel, the delta text for a chunk that
  * carries one, or null for anything to skip (blank lines, non-`data:` lines, deltas with no
  * content). */
-function parseSseLine(rawLine: string): string | "done" | null {
+function parseSseLine(rawLine: string, meta?: LlmResponseMeta): string | "done" | null {
   const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine; // tolerate CRLF framing
   if (!line.startsWith("data: ")) return null;
 
@@ -122,6 +123,11 @@ function parseSseLine(rawLine: string): string | "done" | null {
   if (payload === "[DONE]") return "done";
 
   const chunk = JSON.parse(payload) as ChatCompletionChunk;
+  // Record the served model (first chunk that carries it) so the caller can stamp it onto the
+  // persisted message — this is the actual model SecRouter routed to, not the requested id.
+  if (meta && !meta.model && typeof chunk.model === "string" && chunk.model.length > 0) {
+    meta.model = chunk.model;
+  }
   const content = chunk.choices?.[0]?.delta?.content;
   return typeof content === "string" && content.length > 0 ? content : null;
 }

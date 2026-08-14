@@ -356,12 +356,25 @@ function buildRouter(
     // client calls /me on every load, so this is where a user first enters the roster that powers
     // DM selection. Awaited so a just-signed-in user is discoverable by the /users call that
     // typically follows on the same load.
+    const alreadyKnown = await store.getUser(principal.sub);
     await store.upsertUser({
       sub: principal.sub,
       email: principal.email,
       displayName: principal.displayName,
       groups: principal.groups,
     });
+    // First appearance in the directory (first SSO login) → tell every connected client so their
+    // roster / DM picker refreshes and the new user is findable live, without anyone reloading.
+    // A global (channel-less) event, so it goes per-principal via notify() across all online subs.
+    if (!alreadyKnown) {
+      const user = {
+        sub: principal.sub,
+        email: principal.email,
+        displayName: principal.displayName,
+        groups: principal.groups,
+      };
+      for (const sub of presence?.() ?? []) notify?.(sub, { type: "user_joined", user });
+    }
     // Carry the deployment's marking ladder + default so the client can render banners, populate
     // the marking picker, and compare ranks locally (it also enforces, but the server is authority).
     sendJson(res, 200, {
@@ -1254,8 +1267,8 @@ function buildRouter(
     await store.addMember({ channelId, memberRef, memberType: "user", role });
     if (!existed) subscribe?.(memberRef, channelId); // add to the newly-added member's live socket
     await store.appendAudit({ actor: principal.sub, action: existed ? "channel.set_role" : "channel.add_member", target: channelId, detail: `${memberRef}:${role}` });
-    broadcast?.(channelId, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role });
-    notify?.(memberRef, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role }); // refresh the affected user's channel list
+    broadcast?.(channelId, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role, by: principal.sub });
+    notify?.(memberRef, { type: "membership", channelId, op: existed ? "role" : "add", memberRef, role, by: principal.sub }); // refresh the affected user's channel list
     sendJson(res, existed ? 200 : 201, { channelId, memberRef, memberType: "user", role });
   });
 

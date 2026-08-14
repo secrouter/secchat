@@ -286,6 +286,7 @@ export class MemoryStore implements Store, SessionStore {
       authorType: input.authorType,
       promptedBy: input.promptedBy, // NOT a hash input (see header comment) — carried for provenance only
       parentId: input.parentId, // thread parent — same deal: metadata only, not bound into the hash
+      model: input.model, // model that served an agent turn — provenance metadata, not hashed
       contentSha256,
       marking, // chain-bound (see computeMessageHash) — immutable, tamper-evident
       attachmentsSha256, // chain-bound manifest digest — immutable

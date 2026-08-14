@@ -350,6 +350,7 @@ class Message {
     this.reactions = const [],
     this.attachments = const [],
     this.displayName,
+    this.model,
   });
 
   final String id;
@@ -379,6 +380,10 @@ class Message {
   /// as an attribution line (decision #2: an agent acts as its owner's delegate).
   final String? promptedBy;
   final String? parentId;
+
+  /// For an agent/assistant message, the model SecRouter actually served this turn (may differ from
+  /// the requested id when routing via "auto"). Rendered as a small muted badge; null otherwise.
+  final String? model;
 
   /// Set once the author has revised this message — drives the "(edited)"
   /// marker and the "view history" affordance. The original content hash (and
@@ -412,6 +417,7 @@ class Message {
     reactions: reactions,
     attachments: const [], // redacted → files are purged server-side; drop them from the tombstone
     displayName: displayName,
+    model: model,
   );
 
   /// A copy with [reactions] replaced — used to apply live reaction events /
@@ -431,6 +437,7 @@ class Message {
     reactions: reactions,
     attachments: attachments,
     displayName: displayName,
+    model: model,
   );
 
   /// A copy with new [content] and an [editedAt] stamp — applies an edit (live
@@ -450,6 +457,7 @@ class Message {
     reactions: reactions,
     attachments: attachments,
     displayName: displayName,
+    model: model,
   );
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
@@ -475,6 +483,7 @@ class Message {
     attachments: (json['attachments'] as List<dynamic>? ?? const <dynamic>[])
         .map((e) => Attachment.fromJson(e as Map<String, dynamic>))
         .toList(),
+    model: json['model'] as String?,
   );
 }
 
@@ -905,11 +914,19 @@ final class WsMembershipEvent extends WsEvent {
     required this.op,
     required this.memberRef,
     required this.role,
+    required this.by,
     required super.channelId,
   });
   final String op; // 'add' | 'remove' | 'role'
   final String memberRef;
   final String role;
+  final String by; // sub of the actor who made the change ('' for legacy events)
+}
+
+/// A new user appeared in the directory (first SSO login). Global — carries no channel; tells the
+/// client to refresh its roster / DM picker so the newly-signed-in user is findable live.
+final class WsUserJoinedEvent extends WsEvent {
+  const WsUserJoinedEvent() : super(channelId: '');
 }
 
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
@@ -1003,8 +1020,11 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
         op: json['op'] as String? ?? 'add',
         memberRef: json['memberRef'] as String? ?? '',
         role: json['role'] as String? ?? 'member',
+        by: json['by'] as String? ?? '',
         channelId: channelId,
       );
+    case 'user_joined':
+      return const WsUserJoinedEvent();
     default:
       return null;
   }

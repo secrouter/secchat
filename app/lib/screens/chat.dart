@@ -734,12 +734,23 @@ class _ChatScreenState extends State<ChatScreen> {
             }
             _append(channelId, const SystemEntry('Session ended'));
           }
+        case WsUserJoinedEvent():
+          // A new user signed in for the first time — refresh the directory so the DM picker and
+          // roster find them live, no reload needed.
+          unawaited(_loadUsers());
         case WsAssistantErrorEvent(:final error):
           if (isOpen) {
             _typing = null;
             _append(channelId, ErrorEntry(error));
           }
-        case WsMembershipEvent(:final op, :final memberRef):
+        case WsMembershipEvent(:final op, :final memberRef, :final by):
+          // Timeline: surface "X added (by Y)" in the open channel's transcript when someone is
+          // added — ephemeral, matching the other system events (session_ended etc.). Fires for any
+          // member (including me), independent of the sidebar sync below.
+          if (op == 'add' && isOpen) {
+            final who = _labelForSub(memberRef);
+            _append(channelId, SystemEntry(by.isEmpty ? '$who added' : '$who added by ${_labelForSub(by)}'));
+          }
           // A channel I was just added to appears in the sidebar without a reload; one I was removed
           // from disappears. (A role change needs no sidebar change.) Only my OWN membership matters
           // here — other people joining/leaving a channel I already see changes nothing in the rail.
