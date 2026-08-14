@@ -29,6 +29,36 @@ import type { K8sClient } from "./k8s.ts";
  * pull + boot; a pod that never attaches (crash/pull error) is surfaced as a clean session exit. */
 const ATTACH_TIMEOUT_MS = 120_000;
 
+/** A live pool session's public shape — for the `GET /pool/status` observability surface. Carries no
+ * content, only lifecycle metadata (who, which pod, attached?, how old). */
+export interface PoolSessionInfo {
+  sessionId: Id;
+  ownerSub: string;
+  podName: string;
+  attached: boolean;
+  ageMs: number;
+}
+
+/** The `GET /pool/status` payload — deployment config + live sessions, no content. */
+export interface PoolStatus {
+  configured: true;
+  namespace: string;
+  image: string;
+  limits: { maxPods: number; maxPerOwner: number; ttlSeconds: number; attachTimeoutMs: number };
+  live: number;
+  sessions: PoolSessionInfo[];
+}
+
+/** The result of a reconcile sweep against the cluster (see PoolRunner.reconcile). */
+export interface PoolReconcileResult {
+  /** Orphan pod names deleted (in the cluster with our label but no live session here). */
+  reaped: string[];
+  /** How many sessions SecChat currently tracks. */
+  tracked: number;
+  /** How many `app=secchat-pool` pods the cluster reported (0 when the list call failed). */
+  clusterPods: number;
+}
+
 export interface PoolRunner {
   /** The Runner port the control plane drives. */
   runner: Runner;
@@ -40,7 +70,19 @@ export interface PoolRunner {
   /** The pod's socket dropped. For an ephemeral pod this means the pod is gone — end the session and
    * reap the pod (unlike a desktop daemon, whose drops are transient reconnects). */
   handlePoolGone(sessionId: Id, conn: RunnerConnection): void;
+  /** Snapshot of the live pool sessions — the `GET /pool/status` observability surface. */
+  listSessions(): PoolSessionInfo[];
+  /** Full status for `GET /pool/status`: deployment limits + the live sessions. */
+  status(): PoolStatus;
+  /** Reconcile SecChat's tracked sessions against the cluster's actual pods: delete any `app=secchat-
+   * pool` pod with no matching live session here (an orphan SecChat lost track of, e.g. across a
+   * restart). Belt-and-suspenders beyond per-session delete + the pods' own activeDeadlineSeconds.
+   * Best-effort: a failed list/delete is swallowed. Intended to be called periodically. */
+  reconcile(): Promise<PoolReconcileResult>;
 }
+
+/** The label every pool pod carries (buildPoolPodSpec) — the selector reconcile/list use. */
+export const POOL_LABEL_SELECTOR = "app=secchat-pool";
 
 interface PoolSession {
   ownerSub: string;
@@ -53,6 +95,8 @@ interface PoolSession {
   attached: boolean;
   ended: boolean;
   attachTimer?: ReturnType<typeof setTimeout>;
+  /** When start() admitted this session (epoch ms) — for the status surface's `ageMs`. */
+  createdAt: number;
 }
 
 /** Build the Pod manifest for one pool session. Hardened + least-privilege: no K8s API access
@@ -135,9 +179,17 @@ export function makePoolRunner(deps: {
 }): PoolRunner {
   const sessions = new Map<Id, PoolSession>();
   let handler: ((sessionId: Id, event: RunnerEvent) => void) | null = null;
-  const attachTimeoutMs = deps.attachTimeoutMs ?? ATTACH_TIMEOUT_MS;
+  // Attach timeout: explicit test seam first, else the operator-configured value, else the default.
+  const attachTimeoutMs = deps.attachTimeoutMs ?? deps.config.attachTimeoutMs ?? ATTACH_TIMEOUT_MS;
 
   const emit = (sessionId: Id, event: RunnerEvent): void => handler?.(sessionId, event);
+
+  /** How many pods this owner currently holds — for per-owner admission control. */
+  const countForOwner = (ownerSub: string): number => {
+    let n = 0;
+    for (const s of sessions.values()) if (s.ownerSub === ownerSub) n += 1;
+    return n;
+  };
 
   /** Terminal transition: emit exit (+ optional narration), reap the pod, forget the session.
    * Idempotent — the pod's exit event and its socket-close can both land. */
@@ -154,6 +206,21 @@ export function makePoolRunner(deps: {
 
   const runner: Runner = {
     async start(input) {
+      // Admission control (fail-fast): never create an unbounded number of pods. Reject the session
+      // cleanly when at the global cap or this owner's cap, rather than piling pods onto the cluster
+      // and relying solely on the K8s ResourceQuota to (opaquely) reject the create. 0 = unlimited.
+      const { maxPods, maxPerOwner } = deps.config;
+      if (maxPods > 0 && sessions.size >= maxPods) {
+        emit(input.sessionId, { type: "output", text: `▸ pool at capacity (${sessions.size}/${maxPods} agents running) — try again shortly` });
+        emit(input.sessionId, { type: "exit", code: 1 });
+        return;
+      }
+      if (maxPerOwner > 0 && countForOwner(input.ownerSub) >= maxPerOwner) {
+        emit(input.sessionId, { type: "output", text: `▸ pool: you already have ${countForOwner(input.ownerSub)}/${maxPerOwner} agents running — stop one before starting another` });
+        emit(input.sessionId, { type: "exit", code: 1 });
+        return;
+      }
+
       const podName = poolPodName(input.sessionId);
       let token: string;
       try {
@@ -179,6 +246,7 @@ export function makePoolRunner(deps: {
         queued: [],
         attached: false,
         ended: false,
+        createdAt: Date.now(),
       };
       sessions.set(input.sessionId, session);
 
@@ -266,5 +334,44 @@ export function makePoolRunner(deps: {
     void finish(sessionId, session, { code: 1, message: "▸ pool: the agent runner disconnected", emitExit: true });
   }
 
-  return { runner, handlePoolAttach, handlePoolMessage, handlePoolGone };
+  function listSessions(): PoolSessionInfo[] {
+    const now = Date.now();
+    return [...sessions.entries()].map(([sessionId, s]) => ({
+      sessionId,
+      ownerSub: s.ownerSub,
+      podName: s.podName,
+      attached: s.attached,
+      ageMs: now - s.createdAt,
+    }));
+  }
+
+  function status(): PoolStatus {
+    const c = deps.config;
+    const live = listSessions();
+    return {
+      configured: true,
+      namespace: c.namespace,
+      image: c.image,
+      limits: { maxPods: c.maxPods, maxPerOwner: c.maxPerOwner, ttlSeconds: c.activeDeadlineSeconds, attachTimeoutMs: c.attachTimeoutMs },
+      live: live.length,
+      sessions: live,
+    };
+  }
+
+  async function reconcile(): Promise<PoolReconcileResult> {
+    const tracked = sessions.size;
+    const res = await deps.k8s.listPods(POOL_LABEL_SELECTOR).catch(() => null);
+    if (!res || !res.ok) return { reaped: [], tracked, clusterPods: 0 };
+    const trackedPods = new Set([...sessions.values()].map((s) => s.podName));
+    const reaped: string[] = [];
+    for (const pod of res.pods) {
+      if (trackedPods.has(pod.name)) continue; // a live session owns this pod — leave it
+      // Orphan: our label, but no live session here. Reap it (best-effort).
+      const del = await deps.k8s.deletePod(pod.name).catch(() => null);
+      if (del && del.ok) reaped.push(pod.name);
+    }
+    return { reaped, tracked, clusterPods: res.pods.length };
+  }
+
+  return { runner, handlePoolAttach, handlePoolMessage, handlePoolGone, listSessions, status, reconcile };
 }

@@ -482,6 +482,57 @@ after(async () => {
   await new Promise<void>((resolve) => adminServer.close(() => resolve()));
 });
 
+// ── GET /pool/status (admin-gated agent-pool observability) ────────────────────────────────────
+let poolServer: Server;
+let poolBaseUrl: string;
+
+const fakePoolStatus = {
+  configured: true as const,
+  namespace: "secchat-pool",
+  image: "registry.internal/secchat-runnerd:1",
+  limits: { maxPods: 20, maxPerOwner: 3, ttlSeconds: 3600, attachTimeoutMs: 120_000 },
+  live: 1,
+  sessions: [{ sessionId: "s1", ownerSub: "admin-1", podName: "secchat-pool-s1", attached: true, ageMs: 1234 }],
+};
+
+before(async () => {
+  poolServer = createHttpServer({
+    verifyToken,
+    store,
+    admin: { adminGroup: "secchat-admins", devMode: false, overview: async () => fakeOverview, renderConsole },
+    poolStatus: () => fakePoolStatus,
+  });
+  await new Promise<void>((resolve) => poolServer.listen(0, resolve));
+  const address = poolServer.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  poolBaseUrl = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => poolServer.close(() => resolve()));
+});
+
+test("GET /pool/status: an admin sees the pool limits + live sessions", async () => {
+  const res = await fetch(`${poolBaseUrl}/pool/status`, { headers: { authorization: "Bearer admingood" } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as typeof fakePoolStatus;
+  assert.equal(body.configured, true);
+  assert.equal(body.limits.maxPods, 20);
+  assert.equal(body.sessions[0]!.sessionId, "s1");
+});
+
+test("GET /pool/status: a non-admin is forbidden", async () => {
+  const res = await fetch(`${poolBaseUrl}/pool/status`, { headers: { authorization: "Bearer good" } });
+  assert.equal(res.status, 403);
+});
+
+test("GET /pool/status: reports configured:false when the pool isn't wired", async () => {
+  // adminServer has no poolStatus dep — an admin still gets 200, but configured:false.
+  const res = await fetch(`${adminBaseUrl}/pool/status`, { headers: { authorization: "Bearer admingood" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { configured: false });
+});
+
 // ── Fake search port (src/http/server.ts's `SearchFn`) — used ONLY by the GET /search tests
 // below, injected into a SEPARATE server instance (`searchServer`/`searchBaseUrl`) so the tests
 // above keep proving the no-search path (`server`/`baseUrl`, already built without `search`)

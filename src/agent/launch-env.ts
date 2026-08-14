@@ -3,8 +3,9 @@
 //
 //   - "desktop": the user's own SecChat desktop app, whose runner daemon attaches over /runner and
 //     is registered per-owner in RunnerRegistry. Available only while that app is connected.
-//   - "pool":    shared server-side online runners. The routing seam exists (RouterRunner's server
-//     side), but a real pool isn't deployed yet, so this is surfaced as "coming soon".
+//   - "pool":    shared server-side online runners — a per-session ephemeral Kubernetes pod
+//     (agent/pool-runner.ts). Available when the deployment configures the pool (SECCHAT_POOL_IMAGE
+//     + a runner-token minter); when it doesn't, this env is surfaced as unavailable for this box.
 //
 // Kept in one place so the availability the picker shows and the check POST /agents enforces can
 // never disagree.
@@ -46,7 +47,7 @@ export function launchEnvironmentsFor(opts: {
       reason: opts.poolConfigured ? "available" : "not_deployed",
       detail: opts.poolConfigured
         ? "Runs on shared online resources."
-        : "Coming soon — shared online runners aren't deployed yet.",
+        : "No online pool is configured for this deployment.",
     },
   ];
 }

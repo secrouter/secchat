@@ -189,6 +189,16 @@ if (config.pool && config.runnerToken) {
     renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
   });
   console.error(`▸ agent pool: enabled (namespace ${namespace}, image ${config.pool.image})`);
+  // Orphan reaper: reconcile tracked sessions against the cluster's actual pods and delete any
+  // `app=secchat-pool` pod with no live session here (e.g. a pod SecChat lost across a restart).
+  // Belt-and-suspenders beyond per-session delete + the pods' own activeDeadlineSeconds. unref'd so
+  // it never holds the process open; best-effort (a failed sweep is swallowed inside reconcile()).
+  const poolReconcile = setInterval(() => {
+    void poolRunner!.reconcile().then((r) => {
+      if (r.reaped.length > 0) console.error(`▸ agent pool: reaped ${r.reaped.length} orphan pod(s): ${r.reaped.join(", ")}`);
+    });
+  }, 60_000);
+  poolReconcile.unref?.();
 } else if (config.pool && !config.runnerToken) {
   console.error("▸ agent pool: SECCHAT_POOL_IMAGE is set but no runner-token secret (SECCHAT_RUNNER_TOKEN_SECRET / session secret) — pool DISABLED");
 }
@@ -295,6 +305,8 @@ const server = createHttpServer({
   ssh: config.secretKey ? { secretKey: config.secretKey, knownHosts: config.gitKnownHosts } : undefined,
   // Whether the Kubernetes agent pool is available — drives the "Online pool" launch-env option.
   poolConfigured: Boolean(poolRunner),
+  // Admin-gated GET /pool/status: the pool's limits + live sessions (metadata only).
+  poolStatus: poolRunner ? () => poolRunner!.status() : undefined,
   // Outbound-webhook delivery (SecChat → external URLs on events), plus the destination allowlist
   // enforced when a subscription is created.
   outbound: makeOutboundDispatcher(store),

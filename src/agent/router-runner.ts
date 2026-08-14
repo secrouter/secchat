@@ -50,14 +50,18 @@ export function makeRouterRunner(deps: {
       await r.stop(sessionId);
     },
     onEvent(cb) {
-      // Forward the control plane's single handler to BOTH runners; wrap it so the routing entry is
-      // freed when a session exits (else the map would grow one entry per session forever).
+      // Forward the control plane's single handler to EVERY underlying runner; wrap it so the routing
+      // entry is freed when a session exits (else the map would grow one entry per session forever).
+      // The pool runner MUST be wired here too: its sessions emit output/exit/tool_request through its
+      // own handler, so omitting it silently drops every pooled session's events (control plane never
+      // sees them). Guarded because `pool` is optional (unset when the K8s pool isn't configured).
       const wrapped = (sessionId: Id, event: RunnerEvent) => {
         if (event.type === "exit") route.delete(sessionId);
         cb(sessionId, event);
       };
       deps.server.onEvent(wrapped);
       deps.remote.onEvent(wrapped);
+      deps.pool?.onEvent(wrapped);
     },
   };
 }
