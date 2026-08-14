@@ -271,6 +271,15 @@ function buildChildEnv(configDir: string, extra: NodeJS.ProcessEnv | undefined):
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  // LeanCTX lockdown knobs (LEAN_CTX_*) — forwarded so the pi-lean-ctx extension (loaded via -e
+  // below, when SECCHAT_PI_LEANCTX_EXTENSION is set) runs with the suite's locked-down posture
+  // (compression mode, telemetry off, no update phone-home, harden). These are non-secret config
+  // toggles — safe to expose to pi's shell, unlike the strict allowlist above — and secagent owns
+  // their values (secagent.leanctx.lockdown_env); SecChat only passes them through. Prefix-matched
+  // so a new LEAN_CTX_* knob needs no change here.
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("LEAN_CTX_") && value !== undefined) env[key] = value;
+  }
   // Suppress pi's own startup network calls (version checks, catalog refresh, telemetry) for test
   // determinism and CMMC hardening. But PI_OFFLINE also stops pi reaching the CONFIGURED model
   // provider, so a runner that actually needs to call the gateway (baseUrl set) opts out via
@@ -305,6 +314,19 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
   const apiKeyProvider = opts.apiKeyProvider;
   const defaultWorkspace = opts.workspace;
   const extraEnv = opts.env;
+  // TEST-INSTANCE: an EXPLICITLY-NAMED (`-e`) extra extension to load ALONGSIDE the gate — used to
+  // integrate secagent's pi tools. `-e` loads regardless of `--no-extensions` (see the args below),
+  // so folder auto-discovery of OTHER extensions stays off; only this one, named here, is added. It
+  // registers tools (not a competing tool_call handler), so the gate still governs every tool call.
+  const secagentExt = process.env.SECAGENT_PI_EXTENSION;
+  // LeanCTX rides along the SAME way: an explicitly-named (`-e`) extension loaded ALONGSIDE the
+  // gate + secagent tools, so it is scoped to THIS launch — never a host-wide `pi` wrap. secagent
+  // owns the extension file + the LEAN_CTX_* env (forwarded in buildChildEnv); SecChat just names
+  // it here, exactly as it does secagent's. Unset (or a missing file) ⇒ pi runs with no LeanCTX —
+  // a clean fallback. The extension registers ctx_* tools; it never installs a competing tool_call
+  // handler, so the execute-gate still governs every mutating call. See secagent's launch contract
+  // (secagent.leanctx.pi_launch_args) — this is the TypeScript mirror of it.
+  const leanctxExt = process.env.SECCHAT_PI_LEANCTX_EXTENSION;
 
   const sessions = new Map<Id, PiSessionState>();
   let emit: ((sessionId: Id, event: RunnerEvent) => void) | undefined;
@@ -467,6 +489,12 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
       // system prompt, so its coding ability is untouched — this only adds the channel context.
       "--append-system-prompt", AGENT_CHAT_PRIMER,
       "-e", extensionPath,
+      // Extra explicitly-named extension (secagent's pi tools), when SECAGENT_PI_EXTENSION points at
+      // a real file baked into the image. Explicit `-e` bypasses --no-extensions, same as the gate.
+      ...(secagentExt !== undefined && existsSync(secagentExt) ? ["-e", secagentExt] : []),
+      // LeanCTX context-compression extension (secagent's launch contract) — same explicit `-e`,
+      // so it loads past --no-extensions and stays scoped to this session.
+      ...(leanctxExt !== undefined && existsSync(leanctxExt) ? ["-e", leanctxExt] : []),
       "--provider", provider,
       ...(model !== undefined ? ["--model", model] : []),
       ...(resolvedApiKey !== undefined ? ["--api-key", resolvedApiKey] : []),
