@@ -278,11 +278,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Mint a scoped runner token and start the bundled daemon with it. The scoped token works in
   /// cookie-session mode (no bearer) and is least-privilege for bearer users; if the server hasn't
-  /// configured runner tokens, fall back to a bearer token when one exists.
+  /// configured runner tokens, fall back to a bearer token when one exists — the daemon still
+  /// attaches at /runner with it, but `isRunnerToken: false` tells it NOT to point pi's model
+  /// calls at the backend's `/agent-llm/v1` proxy (that proxy only accepts real runner tokens and
+  /// would just 401 a bearer, silently breaking every model call — see daemon_supervisor_io.dart).
   Future<void> _startDaemon() async {
-    final token = (await widget.api.mintRunnerToken()) ?? widget.api.token ?? '';
+    final runnerToken = await widget.api.mintRunnerToken();
+    final token = runnerToken ?? widget.api.token ?? '';
     if (!mounted || token.isEmpty) return;
-    _daemon.start(secchatUrl: widget.api.origin.toString(), token: token);
+    _daemon.start(secchatUrl: widget.api.origin.toString(), token: token, isRunnerToken: runnerToken != null);
   }
 
   Future<void> _loadMentions() async {

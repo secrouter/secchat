@@ -15,6 +15,17 @@ import { type CapabilityPolicy, type CapabilityRule, defaultCapabilityPolicy } f
 import { makeStepUp, type StepUp } from "./auth/stepup.ts";
 import { makeRunnerToken, type RunnerToken } from "./auth/runner-token.ts";
 import { deriveSecretKey } from "./ssh/keys.ts";
+import type { ServiceTokenConfig } from "./secrouter/token.ts";
+
+/** Build the SecRouter client-credentials service identity from the environment, or undefined when
+ * it isn't fully configured (all three of token-url / client-id / client-secret required). */
+function secrouterServiceTokenFromEnv(env: NodeJS.ProcessEnv): ServiceTokenConfig | undefined {
+  const tokenUrl = env.SECCHAT_SECROUTER_TOKEN_URL?.trim();
+  const clientId = env.SECCHAT_SECROUTER_CLIENT_ID?.trim();
+  const clientSecret = env.SECCHAT_SECROUTER_CLIENT_SECRET?.trim();
+  if (!tokenUrl || !clientId || !clientSecret) return undefined;
+  return { tokenUrl, clientId, clientSecret, scope: env.SECCHAT_SECROUTER_SCOPE?.trim() || "secrouter" };
+}
 
 export interface Config {
   host: string;
@@ -28,8 +39,14 @@ export interface Config {
   /** SecRouter gateway base URL — the assistant path routes model calls here (delegated). */
   secrouterUrl: string;
   /** Service token SecChat presents to SecRouter (the assistant path needs it; a bare chat
-   * without agents does not). The real client-credentials flow replaces the static token later. */
+   * without agents does not). The real client-credentials flow (below) replaces the static token
+   * when a service client is configured. */
   secrouterToken?: string;
+  /** OIDC client-credentials service identity for SecRouter's secure mode. When set (all three of
+   * `SECCHAT_SECROUTER_TOKEN_URL` / `_CLIENT_ID` / `_CLIENT_SECRET`), SecChat fetches a fresh OIDC
+   * access token per call (see secrouter/token.ts) instead of the static `secrouterToken` — required
+   * once SecRouter runs with security.enabled. Unset ⇒ the static token (or none) is used, unchanged. */
+  secrouterServiceToken?: ServiceTokenConfig;
   /** Default model for an assistant agent created without an explicit one (the picker sets a
    * per-agent model; this is the fallback). `"auto"` lets SecRouter classify + route; set it to a
    * concrete id (e.g. `secllm/fast`) for a deployment whose SecRouter `auto` tiers reference
@@ -246,6 +263,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jwksUrl: opt(env, "SECCHAT_JWKS_URL", `${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`),
     secrouterUrl: opt(env, "SECROUTER_URL", "http://127.0.0.1:47002"),
     secrouterToken: env.SECROUTER_TOKEN?.trim() || undefined,
+    secrouterServiceToken: secrouterServiceTokenFromEnv(env),
     assistantModel: opt(env, "SECCHAT_ASSISTANT_MODEL", "auto"),
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
     adminGroup,

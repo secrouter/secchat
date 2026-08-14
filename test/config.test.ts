@@ -19,3 +19,46 @@ test("loadConfig fills defaults and derives the JWKS url from the issuer", () =>
 test("loadConfig fails closed on a missing required value", () => {
   assert.throws(() => loadConfig({ SECCHAT_OIDC_ISSUER: "x" }), /SECCHAT_OIDC_AUDIENCE/);
 });
+
+test("secrouterServiceToken is undefined unless all three SECCHAT_SECROUTER_* vars are set (dev/no-security fallback)", () => {
+  assert.equal(loadConfig(base).secrouterServiceToken, undefined);
+  assert.equal(
+    loadConfig({ ...base, SECCHAT_SECROUTER_TOKEN_URL: "https://secsso.sec.internal/application/o/token/" })
+      .secrouterServiceToken,
+    undefined,
+  );
+  assert.equal(
+    loadConfig({
+      ...base,
+      SECCHAT_SECROUTER_TOKEN_URL: "https://secsso.sec.internal/application/o/token/",
+      SECCHAT_SECROUTER_CLIENT_ID: "secchat-service",
+    }).secrouterServiceToken,
+    undefined,
+  );
+});
+
+test("secrouterServiceToken is built once all three vars are set, defaulting scope to \"secrouter\"", () => {
+  const c = loadConfig({
+    ...base,
+    SECCHAT_SECROUTER_TOKEN_URL: "https://secsso.sec.internal/application/o/token/",
+    SECCHAT_SECROUTER_CLIENT_ID: "secchat-service",
+    SECCHAT_SECROUTER_CLIENT_SECRET: "shh",
+  });
+  assert.deepEqual(c.secrouterServiceToken, {
+    tokenUrl: "https://secsso.sec.internal/application/o/token/",
+    clientId: "secchat-service",
+    clientSecret: "shh",
+    scope: "secrouter",
+  });
+});
+
+test("secrouterServiceToken honors an explicit SECCHAT_SECROUTER_SCOPE override", () => {
+  const c = loadConfig({
+    ...base,
+    SECCHAT_SECROUTER_TOKEN_URL: "https://secsso.sec.internal/application/o/token/",
+    SECCHAT_SECROUTER_CLIENT_ID: "secchat-service",
+    SECCHAT_SECROUTER_CLIENT_SECRET: "shh",
+    SECCHAT_SECROUTER_SCOPE: "secrouter:custom",
+  });
+  assert.equal(c.secrouterServiceToken?.scope, "secrouter:custom");
+});

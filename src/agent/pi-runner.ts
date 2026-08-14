@@ -103,6 +103,16 @@ export interface PiRunnerOptions {
    * servers that don't check it still need SOME value — see pi's own models.md), else omitted so
    * pi resolves a built-in provider's real credential normally (auth.json / its own env var). */
   apiKey?: string;
+  /** Async resolver for a FRESH `PI_API_KEY`, invoked once per session at `start()` with that
+   * session's `ownerSub` — e.g. src/index.ts's `config.runnerToken.mint(ownerSub)`, so pi
+   * authenticates to SecChat's OWN `/agent-llm/v1` proxy (typically paired with `baseUrl` pointed
+   * at that proxy) as the session's OWNER, not as SecChat's service identity. Takes precedence
+   * over the static `apiKey`/`PI_API_KEY` for every session spawn: a minted token is short-lived,
+   * so a value resolved once at process startup (the static `apiKey` path) would go stale across a
+   * long-running server; resolving here instead means a session started hours after boot still
+   * gets a fresh token at spawn time. Unset ⇒ falls back to `apiKey`/`PI_API_KEY` unchanged —
+   * today's dev/no-security behavior. */
+  apiKeyProvider?: (ownerSub: string) => Promise<string>;
   /** Working directory for every session that doesn't specify its own via `start()`'s `workspace`
    * input. Default: a fresh temp directory PER SESSION (created in `start`, removed in `stop`) —
    * a real coding session never runs against this server's own cwd unless explicitly told to. */
@@ -292,6 +302,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
   const model = explicitModel ?? (baseUrl === undefined ? undefined : "default");
   const explicitApiKey = opts.apiKey ?? process.env.PI_API_KEY;
   const apiKey = explicitApiKey ?? (baseUrl === undefined ? undefined : "unused");
+  const apiKeyProvider = opts.apiKeyProvider;
   const defaultWorkspace = opts.workspace;
   const extraEnv = opts.env;
 
@@ -431,6 +442,12 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     const extensionPath = join(configDir, "secchat-gate.ts");
     writeFileSync(extensionPath, buildExtensionSource({ provider, model, baseUrl }), "utf8");
 
+    // Mint (or pull from cache) a FRESH credential for THIS session's owner when a provider is
+    // configured — see PiRunnerOptions.apiKeyProvider. A rejected mint fails this session's start
+    // the same way a spawn failure does (thrown out of start(), never silently falling back to a
+    // stale/absent key against a gateway that requires one).
+    const resolvedApiKey = apiKeyProvider ? await apiKeyProvider(input.ownerSub) : apiKey;
+
     const args = [
       "--mode", "rpc",
       // Resume-or-create a durable per-agent session (was --no-session, which was ephemeral).
@@ -452,7 +469,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
       "-e", extensionPath,
       "--provider", provider,
       ...(model !== undefined ? ["--model", model] : []),
-      ...(apiKey !== undefined ? ["--api-key", apiKey] : []),
+      ...(resolvedApiKey !== undefined ? ["--api-key", resolvedApiKey] : []),
     ];
 
     if (process.env.SECCHAT_PI_DEBUG === "1") console.error(`[pi spawn] ${piBin} ${args.join(" ")}`);

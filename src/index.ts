@@ -20,6 +20,8 @@ import { devVerifyToken } from "./dev/auth.ts";
 import { searchMessages } from "./search/search.ts";
 import { createHttpServer } from "./http/server.ts";
 import { makeLlmClient } from "./secrouter/client.ts";
+import { makeServiceTokenProvider } from "./secrouter/token.ts";
+import type { RunnerToken } from "./auth/runner-token.ts";
 import { MemoryStore } from "./store/memory.ts";
 import { PgStore } from "./store/pg.ts";
 import { makeOutboundDispatcher } from "./webhooks/outbound.ts";
@@ -70,15 +72,35 @@ function resolveBin(name: string): string | undefined {
  * via pi-runner.ts's own spawn-error handling if PI_BIN turns out not to resolve after all) OR
  * `PI_BIN` (default `"pi"`) actually resolving on PATH right now. Either way the execute-gate
  * (plan-mode default, owner-authorized mutation) is identically real — only what's on the other
- * end of the Runner port changes. */
-function selectRunner(): Runner {
+ * end of the Runner port changes.
+ *
+ * The in-process runner must NEVER hand pi the raw svc-secchat SecRouter service credential
+ * (that would (a) leak a service credential to any same-host process via `ps`/SECCHAT_PI_DEBUG=1,
+ * and (b) authenticate to SecRouter as svc-secchat with no X-Sec-Acting-User, so every server-run
+ * session's policy/budget/audit would attribute to the SERVICE, not the session owner — the exact
+ * gap this whole change exists to close). Instead it goes through SecChat's OWN `/agent-llm/v1`
+ * proxy (src/http/server.ts's handleAgentLlmProxy), authenticated with a runner token minted
+ * fresh per session for that session's owner — the SAME runner-token+proxy path the desktop
+ * daemon uses (app/lib/platform/daemon_supervisor_io.dart's PI_BASE_URL/PI_API_KEY wiring). The
+ * proxy verifies the runner token, resolves the owner, and is the one place that ever holds the
+ * real SecRouter service credential. `runnerToken` undefined (no SECCHAT_RUNNER_TOKEN_SECRET /
+ * SESSION_SECRET configured) ⇒ the proxy can't authenticate anyone anyway (503s), so pi is left on
+ * its unconfigured default (PI_BASE_URL/PI_API_KEY env, or a built-in provider) unchanged. */
+function selectRunner(port: number, runnerToken: RunnerToken | undefined): Runner {
   const piBin = process.env.PI_BIN?.trim() || "pi";
   const forced = (process.env.SECCHAT_PI_RUNNER?.trim() ?? "") === "1";
   const resolved = resolveBin(piBin);
 
   if (forced || resolved) {
     console.error(`▸ coding-agent runner: pi (${resolved ?? piBin}${forced && !resolved ? " — not found on PATH yet; SECCHAT_PI_RUNNER=1 forces it anyway" : ""})`);
-    return makePiRunner();
+    return makePiRunner(
+      runnerToken
+        ? {
+            baseUrl: `http://127.0.0.1:${port}/agent-llm/v1`,
+            apiKeyProvider: (ownerSub) => runnerToken.mint(ownerSub),
+          }
+        : {},
+    );
   }
   console.error("▸ coding-agent runner: interactive demo stub (pi not found on PATH — set PI_BIN, install pi, or force with SECCHAT_PI_RUNNER=1)");
   return makeInteractiveRunner();
@@ -90,7 +112,17 @@ const config = loadConfig();
 const verifyToken = config.devMode ? devVerifyToken : makeVerifyToken(config);
 if (config.devMode) console.error("! DEV MODE: dev tokens accepted + /admin open + web client served — never in production");
 // The assistant path: model calls go through SecRouter, delegated to each agent's owner.
-const llm = makeLlmClient(config);
+// When a SecRouter service identity is configured, the assistant path authenticates with a fresh
+// OIDC client-credentials token per call (required once SecRouter runs with security.enabled);
+// otherwise it falls back to the static SECROUTER_TOKEN (or none, for an open dev gateway).
+const secrouterTokenProvider = config.secrouterServiceToken
+  ? makeServiceTokenProvider(config.secrouterServiceToken)
+  : null;
+const llm = makeLlmClient({
+  secrouterUrl: config.secrouterUrl,
+  secrouterToken: config.secrouterToken,
+  getServiceToken: secrouterTokenProvider ? () => secrouterTokenProvider.get() : undefined,
+});
 
 // SSO login (OIDC BFF, see auth/bff.ts): the backend runs the Authorization Code + PKCE dance
 // itself and issues an httpOnly session cookie — no OIDC token ever reaches the browser. Always
@@ -133,7 +165,7 @@ const presence = () => hub?.onlineSubs() ?? [];
 // Named (not inlined into makeControlPlane below) so the shutdown handler can stop every session's
 // runner on the way out — unlike the demo runners, pi backs a session with a REAL OS process, and
 // this is the one place that outlives the control plane's own lifecycle.
-const serverRunner = selectRunner();
+const serverRunner = selectRunner(config.port, config.runnerToken);
 // Remote runner daemons attach over `/runner` (see attachRunnerHub below) and register by owner.
 // The router sends a session to the owner's daemon when one is attached, else to the in-process
 // server runner. A daemon's heartbeat renews its sessions' leases so the orphan reaper doesn't cull
@@ -267,6 +299,13 @@ const server = createHttpServer({
   // enforced when a subscription is created.
   outbound: makeOutboundDispatcher(store),
   outboundAllowedHosts: config.outboundAllowedHosts,
+  // /agent-llm/v1 proxy: coding-agent pi never talks to SecRouter directly — it hits this backend
+  // route (authenticated via runner token, see the route's own doc comment) which forwards with
+  // the SAME service-token provider the assistant path uses, attributing to the runner's owner.
+  agentLlm: {
+    secrouterUrl: config.secrouterUrl,
+    getServiceToken: secrouterTokenProvider ? () => secrouterTokenProvider.get() : undefined,
+  },
 });
 hub = attachWsHub(server, {
   verifyToken,
