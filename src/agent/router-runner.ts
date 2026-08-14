@@ -50,14 +50,16 @@ export function makeRouterRunner(deps: {
       await r.stop(sessionId);
     },
     onEvent(cb) {
-      // Forward the control plane's single handler to BOTH runners; wrap it so the routing entry is
-      // freed when a session exits (else the map would grow one entry per session forever).
+      // Forward the control plane's single handler to ALL underlying runners (server, remote, and
+      // the pool when configured); wrap it so the routing entry is freed when a session exits (else
+      // the map would grow one entry per session forever).
       const wrapped = (sessionId: Id, event: RunnerEvent) => {
         if (event.type === "exit") route.delete(sessionId);
         cb(sessionId, event);
       };
       deps.server.onEvent(wrapped);
       deps.remote.onEvent(wrapped);
+      deps.pool?.onEvent(wrapped);
     },
   };
 }
