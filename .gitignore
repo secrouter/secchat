@@ -16,3 +16,15 @@ coverage/
 
 # build caches (e.g. the downloaded node for scripts/bundle-macos-runnerd.sh)
 .cache/
+
+# staging-local deploy state — NEVER commit. .pool-secrets/ holds a live k8s ServiceAccount
+# token and .credentials.txt first-boot credentials; the rest is this box's deployment shape
+# (see the compose.override.yaml header for the topology it encodes).
+.pool-secrets/
+.credentials.txt
+compose.override.yaml
+ts-serve.json
+secrouter.config.json
+secchat-pool.k8s.yaml
+Dockerfile.runnerd-pool
+secchat.code-workspace

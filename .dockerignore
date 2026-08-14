@@ -10,3 +10,5 @@ coverage
 app/.dart_tool
 app/build
 .DS_Store
+.pool-secrets
+.credentials.txt
