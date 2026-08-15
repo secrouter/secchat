@@ -89,7 +89,7 @@ export class MemoryStore implements Store, SessionStore {
   #revisions = new Map<Id, MessageRevision[]>(); // message id -> full history INCL. revision 1; only for edited messages
   #auditLog: AuditEvent[] = []; // one global chain
   #sessions = new Map<Id, AgentSession>(); // insertion order == creation order
-  #grants = new Map<Id, ExecuteGrant[]>(); // sessionId -> grants, append order (last == most recent)
+  #grants = new Map<Id, ExecuteGrant[]>(); // agentId -> grants, append order (last == most recent)
   #reactions = new Map<Id, Reaction[]>(); // messageId -> reactions, append order
   #attachments = new Map<Id, Attachment>(); // attachment id -> row (messageId null until claimed); insertion order = upload order
   #mentions: Mention[] = []; // append order; newest-first is a reverse-scan (dev-scale)
@@ -235,10 +235,14 @@ export class MemoryStore implements Store, SessionStore {
     return this.#agents.get(id) ?? null;
   }
 
-  async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
+  async updateAgent(id: Id, patch: { model?: string; reasoning?: boolean }): Promise<Agent | null> {
     const agent = this.#agents.get(id);
     if (!agent) return null;
-    const updated: Agent = { ...agent, model };
+    const updated: Agent = {
+      ...agent,
+      ...(patch.model !== undefined ? { model: patch.model } : {}),
+      ...(patch.reasoning !== undefined ? { reasoning: patch.reasoning } : {}),
+    };
     this.#agents.set(id, updated);
     return updated;
   }
@@ -787,15 +791,16 @@ export class MemoryStore implements Store, SessionStore {
   }
 
   async addGrant(grant: ExecuteGrant): Promise<void> {
-    const grants = this.#grants.get(grant.sessionId);
+    const grants = this.#grants.get(grant.agentId);
     if (grants) grants.push(grant);
-    else this.#grants.set(grant.sessionId, [grant]);
+    else this.#grants.set(grant.agentId, [grant]);
   }
 
-  /** The most-recently-added, not-yet-consumed grant for this session — i.e. what
-   * agent/gate.ts's evaluateTool() should be checking right now — or undefined if none. */
-  async activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined> {
-    const grants = this.#grants.get(sessionId);
+  /** The most-recently-added, not-yet-consumed grant for this AGENT — i.e. what
+   * agent/gate.ts's evaluateTool() should be checking right now — or undefined if none. Keyed to
+   * the agent so it survives session respawns. */
+  async activeGrant(agentId: Id): Promise<ExecuteGrant | undefined> {
+    const grants = this.#grants.get(agentId);
     if (!grants) return undefined;
     for (let i = grants.length - 1; i >= 0; i--) {
       const grant = grants[i]!;
@@ -807,8 +812,8 @@ export class MemoryStore implements Store, SessionStore {
   /** Marks the current active grant consumed (tombstone, not delete — mirrors redactMessage's
    * approach to Message rows). No-op if there is no active grant, so a caller doesn't need to
    * check activeGrant() first just to make this call safe. */
-  async consumeGrant(sessionId: Id): Promise<void> {
-    const grants = this.#grants.get(sessionId);
+  async consumeGrant(agentId: Id): Promise<void> {
+    const grants = this.#grants.get(agentId);
     if (!grants) return;
     for (let i = grants.length - 1; i >= 0; i--) {
       const grant = grants[i]!;

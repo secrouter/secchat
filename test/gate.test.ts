@@ -29,7 +29,7 @@ test("no-execution (default): even a read tool is denied without any grant", () 
 });
 
 test("plan mode: read tools are allowed, mutating tools are not", () => {
-  const plan: ExecuteGrant = { sessionId: "s1", grantedBy: "owner-1", scope: "plan", grantedAt: "t" };
+  const plan: ExecuteGrant = { agentId: "a1", grantedBy: "owner-1", scope: "plan", grantedAt: "t" };
   assert.equal(evaluateTool({ tool: "grep", grant: plan }).allow, true); // read allowed
   assert.equal(evaluateTool({ tool: "read", grant: plan }).allow, true);
   const m = evaluateTool({ tool: "bash", grant: plan });
@@ -44,13 +44,13 @@ test("a mutating tool with no grant is denied (no-execution)", () => {
 });
 
 test("a 'once' owner grant authorizes a mutation, and is refused once consumed", () => {
-  const grant: ExecuteGrant = { sessionId: "s1", grantedBy: "owner-1", scope: "once", grantedAt: "t" };
+  const grant: ExecuteGrant = { agentId: "a1", grantedBy: "owner-1", scope: "once", grantedAt: "t" };
   assert.equal(evaluateTool({ tool: "bash", grant }).allow, true);
   assert.equal(evaluateTool({ tool: "write", grant: { ...grant, consumed: true } }).allow, false);
 });
 
 test("a 'turn' grant applies only within its own turn", () => {
-  const grant: ExecuteGrant = { sessionId: "s1", grantedBy: "owner-1", scope: "turn", turnId: "turn-9", grantedAt: "t" };
+  const grant: ExecuteGrant = { agentId: "a1", grantedBy: "owner-1", scope: "turn", turnId: "turn-9", grantedAt: "t" };
   assert.equal(evaluateTool({ tool: "edit", grant, turnId: "turn-9" }).allow, true);
   assert.equal(evaluateTool({ tool: "edit", grant, turnId: "turn-10" }).allow, false); // different turn
   assert.equal(evaluateTool({ tool: "edit", grant, turnId: undefined }).allow, false);

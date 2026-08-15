@@ -47,23 +47,13 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { GitSshMaterial, Id, Runner, RunnerEvent } from "../types.ts";
-import { AGENT_CHAT_PRIMER } from "./chat-protocol.ts";
+import { AGENT_CHAT_PRIMER, NO_REPLY_SENTINEL } from "./chat-protocol.ts";
 
 /** Prefix on the extension's `ctx.ui.confirm()` title that marks a request as OUR gate's (vs. some
  * hypothetical other dialog) — shared between the generated extension and the parser below so the
  * two can never drift apart. Followed immediately by the pi tool name. */
 const GATE_TITLE_PREFIX = "secchat-gate:";
 
-/** pi's own built-in read-only tool names (confirmed against the installed package's type
- * definitions: BashToolCallEvent | ReadToolCallEvent | EditToolCallEvent | WriteToolCallEvent |
- * GrepToolCallEvent | FindToolCallEvent | LsToolCallEvent). Mirrors gate.ts's READONLY_TOOLS
- * classification but is necessarily a SEPARATE copy — this list runs inside the pi subprocess
- * (loaded by pi's own extension loader), a different process from gate.ts, so it can't import it.
- * Exactly like interactive-runner.ts's MUTATING_INTENT regex, this is NOT the safety boundary —
- * it only decides whether to skip the approval round trip for a call that is obviously safe.
- * Anything not on this list (including a tool this list doesn't know about) is always routed
- * through the real gate below; the real allow/deny decision is evaluateTool()'s alone. */
-const READONLY_TOOL_NAMES = ["read", "ls", "grep", "find"];
 
 /** Env vars passed through from this process into the pi subprocess. Deliberately an ALLOWLIST,
  * not `...process.env` — pi's bash tool runs arbitrary commands with whatever environment pi
@@ -141,7 +131,7 @@ interface PiSessionState {
  * matters for the gate, not just determinism). No imports: pi's extension loader hands the
  * factory function a live `pi` object at runtime, so nothing here needs `@earendil-works/pi-*` to
  * be installed anywhere in this repo. */
-function buildExtensionSource(opts: { provider: string; model: string | undefined; baseUrl: string | undefined }): string {
+function buildExtensionSource(opts: { provider: string; model: string | undefined; baseUrl: string | undefined; reasoning: boolean }): string {
   const providerRegistration =
     opts.baseUrl === undefined
       ? ""
@@ -152,7 +142,7 @@ function buildExtensionSource(opts: { provider: string; model: string | undefine
     models: [{
       id: ${JSON.stringify(opts.model)},
       name: ${JSON.stringify(opts.model)},
-      reasoning: false,
+      reasoning: ${opts.reasoning === true},
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128000,
@@ -165,17 +155,18 @@ function buildExtensionSource(opts: { provider: string; model: string | undefine
 // Not hand-maintained — regenerated fresh on every session spawn. Two jobs:
 //  1. Optionally point the model backend at an OpenAI-completions-compatible endpoint (SecRouter
 //     in production; a scripted mock in tests) instead of a real upstream provider.
-//  2. Gate every tool call that isn't obviously read-only through SecChat's execute-gate, via
-//     pi's own tool_call event + ctx.ui.confirm() RPC handshake. This is the only extension pi
-//     is allowed to load for this session (see --no-extensions), so it can't be bypassed or
-//     raced by a project-local extension.
+//  2. Route EVERY tool call through SecChat's execute-gate, via pi's own tool_call event +
+//     ctx.ui.confirm() RPC handshake. No tool is skipped in-process: the gate is the single
+//     authority (gate.ts), and its default is NO-EXECUTION — nothing runs, not even a read, until
+//     the owner raises the mode. (A prior version skipped the round trip for read/ls/grep/find,
+//     which let exactly those run even in no-execution mode while synonymous reads like cat/view
+//     were denied — an inconsistency that read as a flaky gate.) The gate auto-allows reads in
+//     plan+ modes with no human prompt, so routing them adds only a fast round trip, not friction.
+//     This is the only extension pi loads for this session (see --no-extensions), so it can't be
+//     bypassed or raced by a project-local extension.
 export default function (pi) {
 ${providerRegistration}
-  var READ_ONLY = new Set(${JSON.stringify(READONLY_TOOL_NAMES)});
-
   pi.on("tool_call", async function (event, ctx) {
-    if (READ_ONLY.has(event.toolName)) return; // plan mode: reads proceed without a round trip
-
     var allowed = await ctx.ui.confirm(${JSON.stringify(GATE_TITLE_PREFIX)} + event.toolName, JSON.stringify(event.input || {}));
     if (!allowed) {
       return { block: true, reason: "blocked by SecChat's execute-gate — ask the agent's owner to grant execution" };
@@ -370,10 +361,12 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     switch (type) {
       case "agent_start":
         session.isStreaming = true;
+        emit?.(sessionId, { type: "activity", active: true }); // drives the "thinking…" indicator
         return;
 
       case "agent_settled":
         session.isStreaming = false;
+        emit?.(sessionId, { type: "activity", active: false });
         return;
 
       case "turn_start":
@@ -385,6 +378,9 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
         const message = evt.message as { role?: unknown } | undefined;
         if (!message || message.role !== "assistant") return;
         const text = extractAssistantText(message);
+        // The agent chose to stay silent (message wasn't for it / no natural reply — see
+        // AGENT_CHAT_PRIMER): it emitted the no-reply sentinel, so post NOTHING to the channel.
+        if (text.trim() === NO_REPLY_SENTINEL) return;
         if (text.length > 0) emit?.(sessionId, { type: "output", text });
         return;
       }
@@ -426,8 +422,13 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     }
   }
 
-  async function start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial }): Promise<void> {
+  async function start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; model?: string; reasoning?: boolean }): Promise<void> {
     const { sessionId, agentId } = input;
+    // Per-session model/reasoning (the agent's own choice) override the runner-wide default resolved
+    // at construction (opts.model / PI_MODEL) — this is how a coding agent's UI-chosen model + the
+    // reasoning toggle actually reach pi's --model + provider registration.
+    const sessionModel = input.model ?? model;
+    const sessionReasoning = input.reasoning ?? false;
 
     const configDir = mkdtempSync(join(tmpdir(), "secchat-pi-config-"));
 
@@ -462,7 +463,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
     const ownWorkspace = false;
 
     const extensionPath = join(configDir, "secchat-gate.ts");
-    writeFileSync(extensionPath, buildExtensionSource({ provider, model, baseUrl }), "utf8");
+    writeFileSync(extensionPath, buildExtensionSource({ provider, model: sessionModel, baseUrl, reasoning: sessionReasoning }), "utf8");
 
     // Mint (or pull from cache) a FRESH credential for THIS session's owner when a provider is
     // configured — see PiRunnerOptions.apiKeyProvider. A rejected mint fails this session's start
@@ -496,7 +497,7 @@ export function makePiRunner(opts: PiRunnerOptions = {}): Runner {
       // so it loads past --no-extensions and stays scoped to this session.
       ...(leanctxExt !== undefined && existsSync(leanctxExt) ? ["-e", leanctxExt] : []),
       "--provider", provider,
-      ...(model !== undefined ? ["--model", model] : []),
+      ...(sessionModel !== undefined ? ["--model", sessionModel] : []),
       ...(resolvedApiKey !== undefined ? ["--api-key", resolvedApiKey] : []),
     ];
 

@@ -768,31 +768,31 @@ if (!DATABASE_URL) {
       leaseExpiresAt: futureLease(),
     });
 
-    assert.equal(await store.activeGrant(session.id), undefined);
+    assert.equal(await store.activeGrant(agent.id), undefined);
 
-    const grant1: ExecuteGrant = { sessionId: session.id, grantedBy: "user-alice", scope: "once", grantedAt: new Date().toISOString() };
+    const grant1: ExecuteGrant = { agentId: agent.id, grantedBy: "user-alice", scope: "once", grantedAt: new Date().toISOString() };
     await store.addGrant(grant1);
-    const active1 = await store.activeGrant(session.id);
-    assert.equal(active1?.sessionId, session.id);
+    const active1 = await store.activeGrant(agent.id);
+    assert.equal(active1?.agentId, agent.id);
     assert.equal(active1?.grantedBy, "user-alice");
     assert.equal(active1?.scope, "once");
     assert.equal(active1?.consumed, false);
     assert.equal(active1?.turnId, undefined);
 
-    await store.consumeGrant(session.id);
-    assert.equal(await store.activeGrant(session.id), undefined);
+    await store.consumeGrant(agent.id);
+    assert.equal(await store.activeGrant(agent.id), undefined);
 
-    await store.consumeGrant(session.id); // no active grant -> no-op, not a throw
+    await store.consumeGrant(agent.id); // no active grant -> no-op, not a throw
 
     const grant2: ExecuteGrant = {
-      sessionId: session.id,
+      agentId: agent.id,
       grantedBy: "user-alice",
       scope: "turn",
       turnId: "turn-1",
       grantedAt: new Date().toISOString(),
     };
     await store.addGrant(grant2);
-    const active2 = await store.activeGrant(session.id);
+    const active2 = await store.activeGrant(agent.id);
     assert.equal(active2?.scope, "turn");
     assert.equal(active2?.turnId, "turn-1");
     assert.equal(active2?.consumed, false);

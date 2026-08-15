@@ -107,19 +107,13 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showArchived = false;
   bool _sortByUnread = false;
   final Set<String> _endedSessionIds = {};
-  // Per-session execute mode, tracked live so the coding strip shows whether the agent may make
-  // changes: set when the owner picks a mode; a `once` grant reverts to no-execution on the first
-  // mutating allow (tool_decision), `plan`/`continual` stay until changed, session end resets.
-  final Map<String, ExecuteMode> _executeModeBySession = {};
-
-  // Mirrors the backend gate's read-only tool allowlist (src/agent/gate.ts READONLY_TOOLS) so the
-  // client disarms a `once` badge only when a MUTATING tool was allowed — a read doesn't consume a
-  // once grant. The server is the source of truth; this just keeps the badge honest.
-  static const Set<String> _readOnlyTools = {
-    'read', 'view', 'cat', 'open', 'ls', 'list', 'grep', 'search',
-    'find', 'glob', 'tree', 'stat', 'diff', 'show',
-  };
-  bool _isReadOnlyTool(String tool) => _readOnlyTools.contains(tool.trim().toLowerCase());
+  // Execute mode per CHANNEL (i.e. per the channel's coding agent), tracked live so the coding strip
+  // shows whether the agent may make changes. Keyed by channel — NOT session — because the backend
+  // grant is keyed to the agent and survives session respawns; a session-keyed badge went stale the
+  // moment the session was reaped + respawned (a new id), which is why the control "stopped working."
+  // Set optimistically when the owner picks a mode, then reconciled by the authoritative
+  // `execute_mode` broadcast (which also fires when a `once` grant is consumed → back to none).
+  final Map<String, ExecuteMode> _executeModeByChannel = {};
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
@@ -720,22 +714,18 @@ class _ChatScreenState extends State<ChatScreen> {
           if (isOpen) _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
         case WsToolDecisionEvent(:final tool, :final allow, :final reason):
           if (isOpen) _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
-          // A `once` grant authorizes exactly one MUTATING call — the first mutate allow consumes
-          // it, dropping back to no-execution. `continual`/`plan` stay until the owner changes them.
-          // (Reads under a `once` grant don't consume it — the backend only consumes on a mutation —
-          // so keep the badge as `once` on a read allow.)
-          if (allow &&
-              _executeModeBySession[_sessionIdByChannel[channelId]] == ExecuteMode.once &&
-              !_isReadOnlyTool(tool)) {
-            _executeModeBySession[_sessionIdByChannel[channelId]!] = ExecuteMode.none;
-          }
+          // The `once`→`none` downgrade is no longer inferred from a tool_decision here: the backend
+          // consumes the grant and broadcasts an authoritative `execute_mode` (none), handled below.
+        case WsExecuteModeEvent(:final mode):
+          // Authoritative badge sync from the backend grant (agent-keyed), so the coding strip stays
+          // correct across respawns / other tabs / a consumed `once`.
+          _executeModeByChannel[channelId] = mode;
         case WsSessionEndedEvent():
           if (isOpen) {
             final sessionId = _sessionIdByChannel[channelId];
-            if (sessionId != null) {
-              _endedSessionIds.add(sessionId);
-              _executeModeBySession.remove(sessionId);
-            }
+            if (sessionId != null) _endedSessionIds.add(sessionId);
+            // NB: do NOT clear the execute mode — the grant is keyed to the agent and persists across
+            // the respawn, so the owner's chosen mode carries over to the next session.
             _append(channelId, const SystemEntry('Session ended'));
           }
         case WsUserJoinedEvent():
@@ -1756,10 +1746,14 @@ class _ChatScreenState extends State<ChatScreen> {
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
         canGrant: selected.owned,
-        executeMode: _executeModeBySession[sessionId] ?? ExecuteMode.none,
+        // Badge follows the channel-keyed mode (agent-keyed grant on the backend), so it stays
+        // correct across session respawns rather than tracking a session id that goes stale.
+        executeMode: _executeModeByChannel[selected.id] ?? ExecuteMode.none,
         onSetMode: (mode) async {
-          // Map each mode to a grant scope, or revoke for no-execution; reflect it on an allowed
-          // verdict. plan/once/always are grants; none clears the grant (back to no tools).
+          // Map each mode to a grant scope, or revoke for no-execution. The grant call still passes
+          // the session id — the backend resolves it to the agent (even a stale/ended id) — so the
+          // grant lands on the agent and the live gate honors it. Set the badge optimistically; the
+          // `execute_mode` broadcast reconciles it authoritatively.
           final result = switch (mode) {
             ExecuteMode.none => await widget.api.revokeExecute(sessionId),
             ExecuteMode.plan => await widget.api.grantExecute(sessionId, scope: 'plan'),
@@ -1767,7 +1761,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ExecuteMode.continual => await widget.api.grantExecute(sessionId, scope: 'always'),
           };
           if (result.allow && mounted) {
-            setState(() => _executeModeBySession[sessionId] = mode);
+            setState(() => _executeModeByChannel[selected.id] = mode);
           }
           return result;
         },
