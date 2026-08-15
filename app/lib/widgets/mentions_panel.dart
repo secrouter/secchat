@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Shows the @mentions inbox as a modal and resolves to the mention the user TAPPED (so the caller
@@ -32,7 +33,7 @@ class _MentionsDialog extends StatelessWidget {
         side: const BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520, maxHeight: 560),
+        constraints: BoxConstraints(maxWidth: dialogWidth(context, 520), maxHeight: 560),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,

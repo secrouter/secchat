@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'brand_icon.dart';
 import 'user_picker.dart';
@@ -121,7 +122,7 @@ class _MembersDialogState extends State<_MembersDialog> {
         side: const BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 560),
+        constraints: BoxConstraints(maxWidth: dialogWidth(context, 480), maxHeight: 560),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,

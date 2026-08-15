@@ -95,7 +95,11 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             BoxShadow(color: Color(0x80000000), blurRadius: 64, offset: Offset(0, 24)),
           ],
         ),
-        child: Column(
+        // Scrollable body: this dialog is tall (name + model + reasoning + environments + workspace)
+        // and the name field autofocuses, so on a phone the soft keyboard halves the available
+        // height — without a scroll view the Column overflows (RenderFlex) instead of scrolling.
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -125,7 +129,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               ),
               const SizedBox(height: 6),
               DropdownButtonFormField<String>(
-                value: _selectedModel,
+                initialValue: _selectedModel,
                 isExpanded: true,
                 dropdownColor: AppColors.surface,
                 style: const TextStyle(color: AppColors.text, fontSize: 13),
@@ -150,7 +154,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
                 ),
                 Switch(
                   value: _reasoning,
-                  activeColor: AppColors.accent,
+                  activeThumbColor: AppColors.accent,
                   onChanged: (v) => setState(() => _reasoning = v),
                 ),
               ],
@@ -221,6 +225,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               ],
             ),
           ],
+          ),
         ),
       ),
     );

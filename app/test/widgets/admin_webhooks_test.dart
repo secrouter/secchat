@@ -120,9 +120,9 @@ void main() {
       expect(find.text('GIT SSH KEYS'), findsOneWidget); // panel title (upper-cased)
       expect(find.text('SHA256:alicefp'), findsOneWidget);
 
-      // Revoke → confirm dialog → confirm → the API is called for that sub.
-      await tester.ensureVisible(find.text('Revoke'));
-      await tester.tap(find.text('Revoke'));
+      // Revoke (the row's icon button) → confirm dialog → confirm → the API is called for that sub.
+      await tester.ensureVisible(find.byTooltip('Revoke'));
+      await tester.tap(find.byTooltip('Revoke'));
       await tester.pumpAndSettle();
       expect(find.text('Revoke git SSH key?'), findsOneWidget); // the confirm dialog
       await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('Revoke')));

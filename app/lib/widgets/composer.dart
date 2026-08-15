@@ -913,6 +913,10 @@ class _MessageComposerState extends State<MessageComposer> {
     );
   }
 
+  /// Toolbar icon-button hit size: comfortable for touch on compact, tight on desktop. The icons
+  /// themselves stay the same size — only the tappable box grows toward the 44pt minimum.
+  double get _toolHit => isCompact(context) ? 40 : 30;
+
   /// The attach-file affordance (spinner while the picker/upload is in flight).
   Widget _attachButton() {
     return IconButton(
@@ -924,7 +928,7 @@ class _MessageComposerState extends State<MessageComposer> {
           : const Icon(Icons.attach_file, size: 17),
       tooltip: 'Attach file',
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+      constraints: BoxConstraints(minWidth: isCompact(context) ? 40 : 32, minHeight: isCompact(context) ? 40 : 32),
       color: AppColors.textMuted,
       onPressed: _attaching ? null : _attach,
     );
@@ -960,7 +964,7 @@ class _MessageComposerState extends State<MessageComposer> {
       onPressed: widget.enabled ? onPressed : null,
       visualDensity: VisualDensity.compact,
       padding: const EdgeInsets.all(6),
-      constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+      constraints: BoxConstraints(minWidth: _toolHit, minHeight: _toolHit),
       color: AppColors.textMuted,
       splashRadius: 18,
     );
@@ -978,7 +982,7 @@ class _MessageComposerState extends State<MessageComposer> {
       onPressed: onPressed,
       visualDensity: VisualDensity.compact,
       padding: const EdgeInsets.all(6),
-      constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+      constraints: BoxConstraints(minWidth: _toolHit, minHeight: _toolHit),
       color: active ? AppColors.accent : AppColors.textMuted,
       splashRadius: 18,
     );

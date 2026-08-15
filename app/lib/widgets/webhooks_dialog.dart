@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../formatting.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'outbound_webhooks_dialog.dart';
 
@@ -54,7 +55,7 @@ class _WebhooksTabsDialog extends StatelessWidget {
         side: const BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 600, maxHeight: 640),
+        constraints: BoxConstraints(maxWidth: dialogWidth(context, 600), maxHeight: 640),
         child: DefaultTabController(
           length: 2,
           child: Column(

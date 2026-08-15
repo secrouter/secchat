@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Per-channel OUTBOUND webhook manager body (embedded as the "Outgoing" tab of the webhooks
@@ -471,9 +472,13 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
     return AlertDialog(
       backgroundColor: AppColors.surface,
       title: const Text('New outbound webhook', style: TextStyle(color: AppColors.text, fontSize: 16)),
+      // dialogWidth caps to the phone viewport; the scroll view keeps the tall body (URL field +
+      // event checkboxes + content switch) usable when the autofocused URL field raises the soft
+      // keyboard and halves the dialog's height budget.
       content: SizedBox(
-        width: 420,
-        child: Column(
+        width: dialogWidth(context, 420),
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -515,6 +520,7 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
                 child: Text(_error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
               ),
           ],
+          ),
         ),
       ),
       actions: [

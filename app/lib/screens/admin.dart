@@ -344,6 +344,7 @@ class _ChannelsPanel extends StatelessWidget {
     return _Panel(
       title: 'Channels',
       child: _DataTable(
+        minWidth: 540,
         headers: const ['Name', 'Kind', 'CUI Marking', 'Created'],
         widths: const [3, 1, 2, 2],
         rows: [
@@ -370,6 +371,7 @@ class _AgentsPanel extends StatelessWidget {
     return _Panel(
       title: 'Agents',
       child: _DataTable(
+        minWidth: 540,
         headers: const ['Name', 'Kind', 'Owner', 'Model'],
         widths: const [3, 1, 2, 2],
         rows: [
@@ -397,6 +399,7 @@ class _SessionsPanel extends StatelessWidget {
     return _Panel(
       title: 'Sessions',
       child: _DataTable(
+        minWidth: 540,
         headers: const ['Agent', 'Status', 'Host', 'Lease expires'],
         widths: const [3, 1, 2, 2],
         rows: [
@@ -458,6 +461,7 @@ class _PoolPanel extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           _DataTable(
+            minWidth: 540,
             headers: const ['Owner', 'Pod', 'State', 'Age'],
             widths: const [2, 3, 1, 1],
             rows: [
@@ -536,6 +540,7 @@ class _SshKeysPanel extends StatelessWidget {
       title: 'Git SSH keys',
       note: sshKeys.enabled ? null : 'Feature disabled — existing keys are shown so they can be revoked.',
       child: _DataTable(
+        minWidth: 540,
         headers: const ['User', 'Fingerprint', 'Added', ''],
         widths: const [2, 3, 2, 1],
         rows: [
@@ -544,17 +549,19 @@ class _SshKeysPanel extends StatelessWidget {
               _cellWithId(k.displayName ?? k.sub, k.sub),
               _mono(k.fingerprint),
               _mono(_fmtDate(k.createdAt)),
+              // An icon (not a text button): on a 390pt phone this table renders full-width and the
+              // flex-1 trailing column gets ~43pt — a "Revoke" TextButton (~60pt intrinsic) overflows
+              // it. The icon fits any width and is a proper touch target.
               Align(
                 alignment: Alignment.centerRight,
-                child: TextButton(
+                child: IconButton(
                   onPressed: () => onRevoke(k.sub, k.displayName ?? k.sub),
-                  style: TextButton.styleFrom(
-                    foregroundColor: AppColors.bad,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: const Text('Revoke', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  tooltip: 'Revoke',
+                  color: AppColors.bad,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                 ),
               ),
             ],
@@ -579,27 +586,23 @@ class _AuditPanel extends StatelessWidget {
     return _Panel(
       title: 'Audit trail',
       note: truncated ? 'Showing the $_maxRows most recent of ${audit.length} events.' : null,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SizedBox(
-          width: 900,
-          child: _DataTable(
-            headers: const ['Seq', 'At', 'Actor', 'Act as', 'Action', 'Target', 'Detail'],
-            widths: const [1, 3, 2, 2, 2, 2, 3],
-            rows: [
-              for (final e in events)
-                [
-                  _mono(e.seq.toString()),
-                  _mono(_fmtDate(e.at)),
-                  _mono(e.actor),
-                  e.actAs == null ? _muted() : _mono(e.actAs!),
-                  _actionCode(e.action),
-                  e.target == null ? _muted() : _mono(e.target!),
-                  e.detail == null ? _muted() : Text(e.detail!, style: const TextStyle(color: AppColors.text, fontSize: 12.5)),
-                ],
+      // minWidth (not a fixed 900 wrapper): fills a wide admin window, scrolls sideways on a phone.
+      child: _DataTable(
+        minWidth: 900,
+        headers: const ['Seq', 'At', 'Actor', 'Act as', 'Action', 'Target', 'Detail'],
+        widths: const [1, 3, 2, 2, 2, 2, 3],
+        rows: [
+          for (final e in events)
+            [
+              _mono(e.seq.toString()),
+              _mono(_fmtDate(e.at)),
+              _mono(e.actor),
+              e.actAs == null ? _muted() : _mono(e.actAs!),
+              _actionCode(e.action),
+              e.target == null ? _muted() : _mono(e.target!),
+              e.detail == null ? _muted() : Text(e.detail!, style: const TextStyle(color: AppColors.text, fontSize: 12.5)),
             ],
-          ),
-        ),
+        ],
       ),
     );
   }
@@ -641,14 +644,36 @@ class _Panel extends StatelessWidget {
 /// A lightweight table: a header row + body rows over a bordered surface. Each column's flex is
 /// given by [widths]. Cells are arbitrary widgets (built via the `_cell*` helpers below).
 class _DataTable extends StatelessWidget {
-  const _DataTable({required this.headers, required this.widths, required this.rows});
+  const _DataTable({required this.headers, required this.widths, required this.rows, this.minWidth});
 
   final List<String> headers;
   final List<int> widths;
   final List<List<Widget>> rows;
 
+  /// Minimum content width. When the viewport is narrower (a phone), the table keeps this width
+  /// inside its own horizontal scroll instead of char-wrapping every mono token (fingerprints,
+  /// subs, pod names) into unreadable multi-line cells. Null ⇒ always fit the viewport.
+  final double? minWidth;
+
   @override
   Widget build(BuildContext context) {
+    final table = _buildTable();
+    if (minWidth == null) return table;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Wide enough: render normally (the scroll never engages). Narrow: pin the table at
+        // minWidth and let it scroll sideways — mirrors the audit table's fixed-width wrapper, but
+        // only when actually needed.
+        final width = constraints.maxWidth >= minWidth! ? constraints.maxWidth : minWidth!;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(width: width, child: table),
+        );
+      },
+    );
+  }
+
+  Widget _buildTable() {
     return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,

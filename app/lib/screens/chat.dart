@@ -1251,7 +1251,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         content: SizedBox(
-          width: 440,
+          width: dialogWidth(context, 440),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1394,8 +1394,8 @@ class _ChatScreenState extends State<ChatScreen> {
       models: [for (final m in _models) m.id],
     );
     if (choice == null || !mounted) return;
-    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace,
-        model: choice.model, reasoning: choice.reasoning);
+    await _createAgent(
+        AgentKind.coding, choice.name, choice.launchEnv, choice.workspace, choice.model, choice.reasoning);
   }
 
   Future<void> _createAgent(AgentKind kind, String name, String? launchEnv,
