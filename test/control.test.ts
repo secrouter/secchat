@@ -324,6 +324,36 @@ test("granting via a STALE session id still reaches the live session (agent-keye
   assert.equal(calls.answerTool.at(-1)?.decision.allow, true); // the live session sees the grant
 });
 
+test("restartAgent stops the running session and spawns a fresh one, broadcasting the new id", async () => {
+  // Live model/reasoning change: pi's config is fixed at spawn, so applying it restarts the session.
+  const { store } = makeFakeSessionStore();
+  const { runner, calls, emit } = makeFakeRunner();
+  void emit;
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const { broadcast, events } = makeFakeBroadcast();
+  const control = makeControlPlane({ sessions: store, runner, getAgent, broadcast });
+
+  const s1 = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  const next = await control.restartAgent(AGENT);
+  assert.ok(next);
+  assert.notEqual(next!.id, s1.id);
+  assert.ok(calls.stop.includes(s1.id)); // the old session's runner was stopped
+  assert.equal((await control.getSession(s1.id))?.status, "ended");
+  // The new session id is broadcast so clients rebind off the now-ended old one.
+  assert.ok(events.some((e) => {
+    const p = e.payload as { type: string; sessionId?: string };
+    return p.type === "agent_session" && p.sessionId === next!.id;
+  }));
+});
+
+test("restartAgent returns null when nothing is running (the change applies on the next spawn)", async () => {
+  const { store } = makeFakeSessionStore();
+  const { runner } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const control = makeControlPlane({ sessions: store, runner, getAgent });
+  assert.equal(await control.restartAgent(AGENT), null);
+});
+
 test("output broadcasts agent_output; an AUTO-ALLOWED read is not broadcast, but denials + mutations are", async () => {
   const { store } = makeFakeSessionStore();
   const { runner, emit, calls } = makeFakeRunner();

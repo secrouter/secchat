@@ -729,6 +729,11 @@ class _ChatScreenState extends State<ChatScreen> {
           _executeModeByChannel[channelId] = mode;
         case WsAgentThinkingEvent(:final active):
           _agentThinkingByChannel[channelId] = active;
+        case WsAgentSessionEvent(:final sessionId):
+          // The agent's session was restarted (e.g. a live model change) — rebind to the new id so
+          // the coding strip + grant calls target the live session, not the ended old one.
+          _sessionIdByChannel[channelId] = sessionId;
+          _endedSessionIds.remove(sessionId);
         case WsSessionEndedEvent():
           if (isOpen) {
             final sessionId = _sessionIdByChannel[channelId];
@@ -2104,7 +2109,10 @@ class _ChannelHeader extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
-          if (agentKind == AgentKind.assistant &&
+          // The model picker is offered for BOTH assistant and coding agents. For a coding agent,
+          // changing the model restarts its pi session live (backend: PATCH /agents → restartAgent),
+          // since pi's model is fixed at spawn.
+          if ((agentKind == AgentKind.assistant || agentKind == AgentKind.coding) &&
               onModelChanged != null &&
               models.isNotEmpty) ...[
             const SizedBox(width: 12),

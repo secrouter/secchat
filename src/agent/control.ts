@@ -169,7 +169,7 @@ export function makeControlPlane(deps: {
     void handleEvent(sessionId, event).catch(() => {});
   });
 
-  async function spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" }): Promise<AgentSession> {
+  async function spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession> {
     const session = await deps.sessions.createSession({
       agentId: input.agent.id,
       channelId: input.channelId,
@@ -283,5 +283,22 @@ export function makeControlPlane(deps: {
     return live[live.length - 1]!;
   }
 
-  return { spawn, grantExecute, revokeExecute, sendInput, getSession, liveSession };
+  /** Restart the agent's live session (see AgentControl.restartAgent) — pi's model + reasoning are
+   * fixed at spawn, so applying a change means killing the running session and spawning a fresh one
+   * with the updated agent. No live session ⇒ null (the change applies on the next spawn). */
+  async function restartAgent(agent: Agent): Promise<AgentSession | null> {
+    const active = (await deps.sessions.listActiveSessions()).filter((s) => s.agentId === agent.id);
+    const current = active[active.length - 1];
+    if (!current) return null;
+    turnAuthorBySession.delete(current.id);
+    await deps.runner.stop(current.id).catch(() => {}); // best-effort: also fires the exit path
+    await deps.sessions.setSessionStatus(current.id, "ended");
+    const next = await spawn({ agent, channelId: current.channelId, hostType: current.hostType });
+    // Tell the channel the NEW session id so every client rebinds off the now-ended old one (the
+    // coding strip + input routing key on it). The grant is agent-keyed, so the mode carries over.
+    deps.broadcast?.(current.channelId, { type: "agent_session", sessionId: next.id, channelId: current.channelId });
+    return next;
+  }
+
+  return { spawn, grantExecute, revokeExecute, sendInput, getSession, liveSession, restartAgent };
 }

@@ -836,6 +836,13 @@ final class WsAgentThinkingEvent extends WsEvent {
   final bool active;
 }
 
+/// The channel's coding agent got a NEW session id (e.g. after a live model/reasoning change
+/// restarted it). Clients rebind their coding-strip + input routing to this id.
+final class WsAgentSessionEvent extends WsEvent {
+  const WsAgentSessionEvent({required this.sessionId, required super.channelId});
+  final String sessionId;
+}
+
 /// A reaction was added/removed on a message — lets every viewer's chips update live.
 final class WsReactionEvent extends WsEvent {
   const WsReactionEvent({
@@ -982,6 +989,11 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsAgentThinkingEvent(
         sessionId: json['sessionId'] as String? ?? '',
         active: json['active'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'agent_session':
+      return WsAgentSessionEvent(
+        sessionId: json['sessionId'] as String? ?? '',
         channelId: channelId,
       );
     case 'execute_mode':

@@ -371,6 +371,7 @@ const controlCalls = {
   revokeExecute: [] as unknown[],
   sendInput: [] as unknown[],
   getSession: [] as unknown[],
+  restartAgent: [] as unknown[],
 };
 
 const control: AgentControl = {
@@ -401,6 +402,10 @@ const control: AgentControl = {
   },
   async liveSession(channelId) {
     return channelId === fakeSession.channelId ? fakeSession : null;
+  },
+  async restartAgent(agent) {
+    controlCalls.restartAgent.push(agent.id);
+    return fakeSession;
   },
 };
 

@@ -664,4 +664,9 @@ export interface AgentControl {
    * Read-only — used to reattach a reloaded client to an already-running session (see GET /channels)
    * without spawning a duplicate. */
   liveSession(channelId: Id): Promise<AgentSession | null>;
+  /** Restart the agent's live session so a changed model/reasoning takes effect NOW (pi's model is
+   * fixed at spawn): stop the current session and spawn a fresh one in the same channel with the
+   * updated agent config. Returns the new session, or null when nothing was running (the change then
+   * applies on the next spawn). Broadcasts an `agent_session` with the new id so clients rebind. */
+  restartAgent(agent: Agent): Promise<AgentSession | null>;
 }

@@ -1684,6 +1684,12 @@ function buildRouter(
     }
     const updated = await store.updateAgent(agent.id, { ...(model ? { model } : {}), ...(reasoning !== undefined ? { reasoning } : {}) });
     await store.appendAudit({ actor: principal.sub, action: "agent.set_model", target: agent.id });
+    // For a CODING agent, apply the change live: restart its running session so pi picks up the new
+    // model + reasoning now (both are fixed at spawn). Best-effort — a restart hiccup never fails the
+    // PATCH, and with no live session the change simply applies on the next spawn.
+    if (updated && updated.kind === "coding" && control) {
+      await control.restartAgent(updated).catch(() => {});
+    }
     sendJson(res, 200, updated);
   });
 
