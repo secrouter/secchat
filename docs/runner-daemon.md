@@ -26,7 +26,8 @@ your machine ── secchat-runnerd ──WS /runner──►  SecChat
 | `SECCHAT_RUNNER_STUB` | unset | `1` → use the interactive echo runner instead of pi (dev / smoke tests without pi installed). |
 | `PI_BIN` | `pi` | Path to the pi CLI when it isn't on `PATH`. |
 | `SECCHAT_RUNNER_HEARTBEAT_MS` | `20000` | Lease heartbeat interval (keeps live sessions from being reaped). |
-| `SECCHAT_RUNNER_RECONNECT_MS` | `2000` | Delay before reconnecting after the socket drops. |
+| `SECCHAT_RUNNER_RECONNECT_MS` | `2000` | Base delay before reconnecting after the socket drops (also the first-failure attach retry). |
+| `SECCHAT_RUNNER_RECONNECT_MAX_MS` | `30000` | Cap for the exponential backoff on repeated **attach** failures (2s → 4s → 8s → … → this cap). |
 
 ## Run mode 1 — standalone (server / container)
 
@@ -51,6 +52,22 @@ docker run --rm \
 The daemon dials out — there is **no inbound port**. In an air-gapped/private registry, pre-stage the
 pi CLI and set `PI_BIN` (or build with `--build-arg INSTALL_PI=0` and smoke-test with
 `SECCHAT_RUNNER_STUB=1`).
+
+### Troubleshooting attach failures
+
+On startup the daemon prints `▸ secchat runner daemon → <url>` and, once connected, `▸ attached to
+<url>`. If you see the first line but never the second, the attach is failing. Node's WebSocket client
+hides the reason, so the daemon **replays the handshake over http(s)** and prints the real cause plus a
+retry line (it then backs off — 2s, 4s, 8s, … up to `SECCHAT_RUNNER_RECONNECT_MAX_MS` — rather than
+looping silently). The common cases:
+
+| Log line | Cause | Fix |
+|---|---|---|
+| `TLS certificate chain not trusted [UNABLE_TO_GET_ISSUER_CERT]` | This process doesn't trust SecChat's certificate chain. | Node needs the **full chain including the root CA** in `NODE_EXTRA_CA_CERTS` — the leaf+intermediate the server serves is **not** enough. Point it at a PEM bundle containing the root (and any intermediates) and restart. On Node 24+, `--use-system-ca` uses the OS trust store instead. |
+| `server rejected the attach (HTTP 401)` (or 403) | Bad/missing/expired credential. | Check `SECCHAT_RUNNER_TOKEN` (or `SECCHAT_TOKEN`) — it may be expired or for a different instance. A desktop-minted runner token is short-lived. |
+| `connection refused [ECONNREFUSED]` | Nothing is listening at `SECCHAT_URL`. | Verify `SECCHAT_URL` (scheme, host, port) and that SecChat is up. |
+| `host not found [ENOTFOUND]` | DNS can't resolve the host in `SECCHAT_URL`. | Fix the hostname / DNS. |
+| `timed out reaching the server` | No response — a firewall/proxy is dropping the connection. | Check egress to `SECCHAT_URL`. |
 
 ## Run mode 2 — bundled in the desktop app
 
