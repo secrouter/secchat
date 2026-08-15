@@ -174,8 +174,11 @@ export function buildPoolPodSpec(input: {
       activeDeadlineSeconds: config.activeDeadlineSeconds, // hard TTL backstop against a leaked pod
       // runAsNonRoot needs a NUMERIC uid: with only a non-numeric image USER (the node image's
       // `node`), the kubelet can't verify non-root at admission and REFUSES to start the pod. 1000 is
-      // the `node` user in the runnerd image's node base — pinning it satisfies the check.
-      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: "RuntimeDefault" } },
+      // the `node` user in the runnerd image's node base — pinning it satisfies the check. fsGroup
+      // makes the kubelet chown volume mounts (the shared workspace emptyDir) to gid 1000 —
+      // WITHOUT it the emptyDir is root-owned and every uid-1000 container gets EACCES on
+      // /workspace (caught live: the sidecar queue and pi's state dir were unwritable).
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: "RuntimeDefault" } },
       volumes: [{ name: "workspace", emptyDir: {} }],
       containers: [
         {

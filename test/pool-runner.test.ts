@@ -109,9 +109,11 @@ test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — a
   assert.equal(podSpec.activeDeadlineSeconds, 3600); // hard TTL backstop
   // runAsNonRoot must pin a NUMERIC uid, else the kubelet can't verify non-root and refuses the pod
   // (caught live on k3s — the runnerd image's `USER node` is non-numeric).
-  const podSc = podSpec.securityContext as { runAsNonRoot?: boolean; runAsUser?: number };
+  const podSc = podSpec.securityContext as { runAsNonRoot?: boolean; runAsUser?: number; fsGroup?: number };
   assert.equal(podSc.runAsNonRoot, true);
   assert.equal(podSc.runAsUser, 1000);
+  // fsGroup chowns the shared workspace emptyDir — without it uid-1000 containers can't write it.
+  assert.equal(podSc.fsGroup, 1000);
   const container = (podSpec.containers as Array<Record<string, unknown>>)[0]!;
   assert.equal(container.image, POOL.image);
   const env = container.env as Array<{ name: string; value: string }>;
