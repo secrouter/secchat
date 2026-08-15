@@ -23,6 +23,11 @@ export interface K8sClient {
   createPod(manifest: Record<string, unknown>): Promise<{ ok: boolean; status: number; name?: string; error?: string }>;
   /** DELETE a Pod by name. A 404 (already gone) counts as `ok` — deletion is idempotent. */
   deletePod(name: string): Promise<{ ok: boolean; status: number }>;
+  /** LIST pods in the namespace, optionally filtered by `labelSelector` (e.g. `app=secchat-pool`).
+   * Returns each pod's name + phase. Used to reconcile SecChat's tracked pool sessions against the
+   * cluster's ACTUAL pods — so an orphan pod SecChat lost track of (e.g. across a restart) can be
+   * reaped. `ok` is a 2xx; on a non-2xx the list is empty and the caller skips reconciliation. */
+  listPods(labelSelector?: string): Promise<{ ok: boolean; status: number; pods: Array<{ name: string; phase?: string }> }>;
 }
 
 /** The standard in-cluster mount paths for a Pod's ServiceAccount credential. */
@@ -44,7 +49,33 @@ export function makeK8sClient(deps: { namespace: string; request: K8sRequestFn }
       const { status } = await deps.request("DELETE", `${base}/${encodeURIComponent(name)}`);
       return { ok: (status >= 200 && status < 300) || status === 404, status };
     },
+    async listPods(labelSelector) {
+      const path = labelSelector ? `${base}?labelSelector=${encodeURIComponent(labelSelector)}` : base;
+      const { status, body } = await deps.request("GET", path);
+      const ok = status >= 200 && status < 300;
+      if (!ok) return { ok, status, pods: [] };
+      return { ok, status, pods: parsePodList(body) };
+    },
   };
+}
+
+/** Parse a K8s `PodList` body into `{name, phase}` entries, best-effort (a malformed body yields an
+ * empty list rather than throwing — reconciliation must never crash on an unexpected API response). */
+function parsePodList(body: string): Array<{ name: string; phase?: string }> {
+  try {
+    const parsed = JSON.parse(body) as { items?: unknown };
+    const items = Array.isArray(parsed.items) ? parsed.items : [];
+    const out: Array<{ name: string; phase?: string }> = [];
+    for (const it of items) {
+      const name = (it as { metadata?: { name?: unknown } }).metadata?.name;
+      if (typeof name !== "string") continue;
+      const phase = (it as { status?: { phase?: unknown } }).status?.phase;
+      out.push({ name, phase: typeof phase === "string" ? phase : undefined });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /** Pull the human `message` out of a K8s `Status` error body, best-effort (for logs only). */

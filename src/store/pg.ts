@@ -658,6 +658,14 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToSshKey(rows[0]) : null;
   }
 
+  async listUserSshKeys(): Promise<UserSshKey[]> {
+    const { rows } = await this.#pool.query<SshKeyRow>(
+      `SELECT sub, key_type, public_key, fingerprint, private_key_enc, created_at
+         FROM user_ssh_keys ORDER BY created_at`,
+    );
+    return rows.map(rowToSshKey);
+  }
+
   async deleteUserSshKey(sub: string): Promise<boolean> {
     const result = await this.#pool.query(`DELETE FROM user_ssh_keys WHERE sub = $1`, [sub]);
     return (result.rowCount ?? 0) > 0;

@@ -372,6 +372,34 @@ class FakeApiClient implements ApiClient {
         );
   }
 
+  /// Pool status a test should see from [getPoolStatus]; null ⇒ "no pool configured".
+  PoolStatus? poolStatus;
+
+  @override
+  Future<PoolStatus> getPoolStatus() async {
+    _maybeThrow('getPoolStatus');
+    return poolStatus ?? const PoolStatus(configured: false);
+  }
+
+  /// SSH-key roster a test should see from [getAdminSshKeys]; null ⇒ "not enabled, no keys".
+  AdminSshKeys? adminSshKeys;
+
+  /// Every sub revoked via [revokeAdminSshKey], in order.
+  final List<String> revokedSshKeys = [];
+
+  @override
+  Future<AdminSshKeys> getAdminSshKeys() async {
+    _maybeThrow('getAdminSshKeys');
+    return adminSshKeys ?? const AdminSshKeys(enabled: false);
+  }
+
+  @override
+  Future<bool> revokeAdminSshKey(String sub) async {
+    _maybeThrow('revokeAdminSshKey');
+    revokedSshKeys.add(sub);
+    return true;
+  }
+
   /// Inbound webhooks per channel; the webhook calls mutate these.
   final Map<String, List<Webhook>> webhooksByChannel = {};
 

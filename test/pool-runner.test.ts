@@ -29,6 +29,9 @@ const POOL: PoolConfig = {
   cpuLimit: "1",
   memoryLimit: "1Gi",
   activeDeadlineSeconds: 3600,
+  maxPods: 20,
+  maxPerOwner: 3,
+  attachTimeoutMs: 120_000,
 };
 
 async function waitFor(pred: () => boolean, ms = 1500): Promise<void> {
@@ -71,6 +74,30 @@ test("k8s client: a non-2xx createPod surfaces the API server's Status message",
   assert.equal(res.error, "forbidden: quota exceeded");
 });
 
+test("k8s client: listPods GETs with the label selector and parses names + phase", async () => {
+  const calls: Array<{ method: string; path: string }> = [];
+  const request: K8sRequestFn = async (method, path) => {
+    calls.push({ method, path });
+    return { status: 200, body: JSON.stringify({ items: [
+      { metadata: { name: "secchat-pool-a" }, status: { phase: "Running" } },
+      { metadata: { name: "secchat-pool-b" } }, // no phase → undefined
+      { metadata: {} }, // no name → dropped
+    ] }) };
+  };
+  const k8s = makeK8sClient({ namespace: "secchat-pool", request });
+  const res = await k8s.listPods("app=secchat-pool");
+  assert.equal(res.ok, true);
+  assert.equal(calls[0]!.method, "GET");
+  assert.equal(calls[0]!.path, "/api/v1/namespaces/secchat-pool/pods?labelSelector=app%3Dsecchat-pool");
+  assert.deepEqual(res.pods, [{ name: "secchat-pool-a", phase: "Running" }, { name: "secchat-pool-b", phase: undefined }]);
+});
+
+test("k8s client: a non-2xx listPods yields an empty list (reconciliation skips)", async () => {
+  const request: K8sRequestFn = async () => ({ status: 403, body: "{}" });
+  const k8s = makeK8sClient({ namespace: "ns", request });
+  assert.deepEqual(await k8s.listPods(), { ok: false, status: 403, pods: [] });
+});
+
 // ── 2. Pod manifest ─────────────────────────────────────────────────────────────────────────────
 
 test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — and NOT the ssh key", () => {
@@ -107,6 +134,7 @@ test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — a
 function makeFakeK8s() {
   const created: Array<Record<string, unknown>> = [];
   const deleted: string[] = [];
+  const extraPods: string[] = []; // pods "in the cluster" this client didn't create (orphans)
   let failCreate = false;
   const k8s = {
     async createPod(m: Record<string, unknown>) {
@@ -117,8 +145,15 @@ function makeFakeK8s() {
       deleted.push(n);
       return { ok: true, status: 200 };
     },
+    async listPods(_labelSelector?: string) {
+      const fromCreated = created
+        .map((m) => (m.metadata as { name?: string }).name)
+        .filter((n): n is string => typeof n === "string");
+      const live = [...fromCreated, ...extraPods].filter((n) => !deleted.includes(n));
+      return { ok: true, status: 200, pods: live.map((name) => ({ name })) };
+    },
   };
-  return { k8s, created, deleted, setFailCreate: (v: boolean) => (failCreate = v) };
+  return { k8s, created, deleted, setFailCreate: (v: boolean) => (failCreate = v), addClusterPod: (n: string) => extraPods.push(n) };
 }
 
 function fakeConn(ownerSub: string): { conn: RunnerConnection; sent: RunnerCommand[] } {
@@ -217,6 +252,85 @@ test("pool runner: a dropped pod socket ends the session and reaps the pod", asy
   await waitFor(() => h.deleted.includes(poolPodName("s5")));
 });
 
+// ── 3b. Admission control (fail-fast at the caps) ──────────────────────────────────────────────
+
+/** Text of any `output` event for a session (for asserting the admission-rejection message). */
+function outputTextFor(events: Array<{ sessionId: string; event: RunnerEvent }>, sessionId: string): string {
+  return events
+    .filter((e) => e.sessionId === sessionId && e.event.type === "output")
+    .map((e) => (e.event as { text: string }).text)
+    .join(" ");
+}
+
+test("pool runner: admission rejects a new session at the GLOBAL cap (no pod created)", async () => {
+  const fake = makeFakeK8s();
+  const events: Array<{ sessionId: string; event: RunnerEvent }> = [];
+  const pool = makePoolRunner({ k8s: fake.k8s, config: { ...POOL, maxPods: 1, maxPerOwner: 0 }, mintRunnerToken: async () => "tok", attachTimeoutMs: 10_000 });
+  pool.runner.onEvent((sessionId, event) => events.push({ sessionId, event }));
+
+  await pool.runner.start({ sessionId: "s1", agentId: "a", ownerSub: "alice" });
+  assert.equal(fake.created.length, 1); // first admitted
+  await pool.runner.start({ sessionId: "s2", agentId: "a", ownerSub: "bob" });
+  assert.equal(fake.created.length, 1); // second REJECTED — no pod created
+  assert.match(outputTextFor(events, "s2"), /capacity/);
+  assert.ok(events.some((e) => e.sessionId === "s2" && e.event.type === "exit"));
+});
+
+test("pool runner: admission rejects at the PER-OWNER cap but admits a different owner", async () => {
+  const fake = makeFakeK8s();
+  const events: Array<{ sessionId: string; event: RunnerEvent }> = [];
+  const pool = makePoolRunner({ k8s: fake.k8s, config: { ...POOL, maxPods: 0, maxPerOwner: 1 }, mintRunnerToken: async () => "tok", attachTimeoutMs: 10_000 });
+  pool.runner.onEvent((sessionId, event) => events.push({ sessionId, event }));
+
+  await pool.runner.start({ sessionId: "a1", agentId: "a", ownerSub: "alice" });
+  await pool.runner.start({ sessionId: "a2", agentId: "a", ownerSub: "alice" }); // alice's 2nd — rejected
+  await pool.runner.start({ sessionId: "b1", agentId: "a", ownerSub: "bob" }); // bob's 1st — admitted
+  assert.deepEqual(fake.created.map((m) => (m.metadata as { name?: string }).name), [poolPodName("a1"), poolPodName("b1")]);
+  assert.match(outputTextFor(events, "a2"), /already have/);
+});
+
+test("pool runner: freeing a slot (stop) re-admits a new session", async () => {
+  const fake = makeFakeK8s();
+  const pool = makePoolRunner({ k8s: fake.k8s, config: { ...POOL, maxPods: 1, maxPerOwner: 0 }, mintRunnerToken: async () => "tok", attachTimeoutMs: 10_000 });
+  pool.runner.onEvent(() => {});
+  await pool.runner.start({ sessionId: "s1", agentId: "a", ownerSub: "alice" });
+  await pool.runner.stop("s1"); // frees the slot (sessions.delete is synchronous in finish)
+  await waitFor(() => fake.deleted.includes(poolPodName("s1")));
+  await pool.runner.start({ sessionId: "s2", agentId: "a", ownerSub: "alice" });
+  assert.equal(fake.created.length, 2); // re-admitted once the slot freed
+});
+
+// ── 3c. Reconciliation + status surface ────────────────────────────────────────────────────────
+
+test("pool runner: reconcile reaps ORPHAN pods but leaves tracked ones", async () => {
+  const fake = makeFakeK8s();
+  fake.addClusterPod("secchat-pool-orphan"); // a labelled pod SecChat doesn't track
+  const pool = makePoolRunner({ k8s: fake.k8s, config: POOL, mintRunnerToken: async () => "tok", attachTimeoutMs: 10_000 });
+  pool.runner.onEvent(() => {});
+  await pool.runner.start({ sessionId: "s1", agentId: "a", ownerSub: "alice" }); // tracked pod secchat-pool-s1
+
+  const res = await pool.reconcile();
+  assert.deepEqual(res.reaped, ["secchat-pool-orphan"]);
+  assert.ok(fake.deleted.includes("secchat-pool-orphan"));
+  assert.ok(!fake.deleted.includes(poolPodName("s1"))); // the live session's pod is NOT reaped
+  assert.equal(res.tracked, 1);
+});
+
+test("pool runner: listSessions reports live sessions (metadata only, no content)", async () => {
+  const fake = makeFakeK8s();
+  const pool = makePoolRunner({ k8s: fake.k8s, config: POOL, mintRunnerToken: async () => "tok", attachTimeoutMs: 10_000 });
+  pool.runner.onEvent(() => {});
+  await pool.runner.start({ sessionId: "s1", agentId: "a", ownerSub: "alice" });
+
+  const list = pool.listSessions();
+  assert.equal(list.length, 1);
+  assert.equal(list[0]!.sessionId, "s1");
+  assert.equal(list[0]!.ownerSub, "alice");
+  assert.equal(list[0]!.podName, poolPodName("s1"));
+  assert.equal(list[0]!.attached, false);
+  assert.ok(list[0]!.ageMs >= 0);
+});
+
 // ── 4. Per-agent routing ──────────────────────────────────────────────────────────────────────
 
 function recordingRunner(): { runner: Runner; starts: string[] } {
@@ -268,6 +382,9 @@ test("runner-hub: a ?pool= attach routes to the PoolRunner by session and stays 
     handlePoolAttach: (sessionId: string, conn: RunnerConnection) => attaches.push({ sessionId, ownerSub: conn.ownerSub }),
     handlePoolMessage: (sessionId: string, _conn: RunnerConnection, msg: RunnerMessage) => messages.push({ sessionId, type: msg.type }),
     handlePoolGone: () => (gone += 1),
+    listSessions: () => [],
+    status: () => ({ configured: true as const, namespace: "secchat-pool", image: "img", limits: { maxPods: 20, maxPerOwner: 3, ttlSeconds: 3600, attachTimeoutMs: 120_000 }, live: 0, sessions: [] }),
+    reconcile: async () => ({ reaped: [], tracked: 0, clusterPods: 0 }),
   };
   const remote = { runner: {} as Runner, handleDaemonMessage: () => {}, handleDaemonGone: () => {} };
   const server = createServer((_req, res) => res.writeHead(404).end());

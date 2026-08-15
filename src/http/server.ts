@@ -19,6 +19,7 @@ import { isAdmin } from "../admin/gate.ts";
 import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import { canGrantExecute } from "../agent/gate.ts";
 import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
+import type { PoolStatus } from "../agent/pool-runner.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -331,6 +332,9 @@ function buildRouter(
   /** Whether the Kubernetes agent pool is configured — drives the "Online pool" launch environment's
    * availability (POST /agents + GET /runner/environments). Unset/false ⇒ pool shown as "coming soon". */
   poolConfigured?: boolean,
+  /** Live agent-pool status for the admin-gated `GET /pool/status` (limits + live sessions). Unset ⇒
+   * the pool isn't configured and the route reports `{configured:false}`. */
+  poolStatus?: () => PoolStatus,
   outbound?: OutboundDispatcher,
   outboundAllowedHosts: readonly string[] = [],
 ): Router<Handler> {
@@ -1755,6 +1759,59 @@ function buildRouter(
     sendJson(res, 200, await admin.overview());
   });
 
+  // Agent-pool observability (admin-gated): deployment limits + the live pool sessions (metadata
+  // only — session id, owner, pod, attached?, age — never content). Reports {configured:false} when
+  // the pool isn't wired, so an operator can tell "off" apart from "on with zero sessions".
+  router.add("GET", "/pool/status", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, poolStatus ? poolStatus() : { configured: false });
+  });
+
+  // Git SSH identities (admin-gated): the roster of who has a git key registered — PUBLIC metadata
+  // only (owner, type, fingerprint, added-at), NEVER the encrypted private envelope. `enabled`
+  // reflects whether the deployment wired the feature (a master key); keys can still exist + be
+  // revoked when it's off. Enriched with the directory display name for a readable roster.
+  router.add("GET", "/admin/api/ssh-keys", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const [rows, users] = await Promise.all([store.listUserSshKeys(), store.listUsers()]);
+    const nameBySub = new Map(users.map((u) => [u.sub, u.displayName]));
+    const keys = rows.map((row) => ({ sub: row.sub, displayName: nameBySub.get(row.sub) ?? null, ...publicSshKey(row) }));
+    sendJson(res, 200, { enabled: Boolean(ssh), keys });
+  });
+
+  // Revoke ANOTHER user's git key (admin offboarding / compromise): drop it from the store so it
+  // stops being injected into future coding sessions, audited against the target sub. (The public
+  // key should also be removed from the git host.) Not gated on the ssh feature flag — a stale key
+  // from a since-disabled feature is still revocable.
+  router.add("DELETE", "/admin/api/ssh-keys/:sub", async ({ res, params, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const target = params.sub!;
+    const removed = await store.deleteUserSshKey(target);
+    if (removed) await store.appendAudit({ actor: principal.sub, action: "ssh_key.revoke", target, detail: "admin revoke" });
+    sendJson(res, removed ? 200 : 404, { removed });
+  });
+
   router.add("GET", "/admin", async ({ res, principal }) => {
     if (!admin) {
       sendJson(res, 404, { error: "admin_unavailable" });
@@ -1960,6 +2017,9 @@ export function createHttpServer(deps: {
   /** Whether the Kubernetes agent pool is configured (config.pool + a runner-token minter). Drives
    * the "Online pool" launch-environment availability. Unset ⇒ pool unavailable ("coming soon"). */
   poolConfigured?: boolean;
+  /** Live agent-pool status accessor for the admin-gated `GET /pool/status` (limits + live sessions,
+   * no content). Unset ⇒ the pool isn't configured and the route reports `{configured:false}`. */
+  poolStatus?: () => PoolStatus;
   /** Outbound-webhook dispatcher (webhooks/outbound.ts). Unset ⇒ outbound events aren't delivered
    * and the outbound-webhook routes still manage subscriptions but the test-ping route 503s. */
   outbound?: OutboundDispatcher;
@@ -1973,7 +2033,7 @@ export function createHttpServer(deps: {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.outbound, deps.outboundAllowedHosts);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.outbound, deps.outboundAllowedHosts);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

@@ -141,7 +141,7 @@ export function makeControlPlane(deps: {
     void handleEvent(sessionId, event).catch(() => {});
   });
 
-  async function spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" }): Promise<AgentSession> {
+  async function spawn(input: { agent: Agent; channelId: Id; hostType: "server" | "local" | "pool" }): Promise<AgentSession> {
     const session = await deps.sessions.createSession({
       agentId: input.agent.id,
       channelId: input.channelId,

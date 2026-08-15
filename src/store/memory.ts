@@ -208,6 +208,10 @@ export class MemoryStore implements Store, SessionStore {
     return this.#sshKeys.get(sub) ?? null;
   }
 
+  async listUserSshKeys(): Promise<UserSshKey[]> {
+    return [...this.#sshKeys.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   async deleteUserSshKey(sub: string): Promise<boolean> {
     return this.#sshKeys.delete(sub);
   }

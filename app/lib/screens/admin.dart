@@ -23,6 +23,8 @@ class AdminScreen extends StatefulWidget {
 
 class _AdminScreenState extends State<AdminScreen> {
   AdminOverview? _overview;
+  PoolStatus? _pool;
+  AdminSshKeys? _sshKeys;
   String? _error;
   bool _loading = true;
 
@@ -39,9 +41,25 @@ class _AdminScreenState extends State<AdminScreen> {
     });
     try {
       final overview = await widget.api.getAdminOverview();
+      // The pool + SSH-key panels are best-effort: a hiccup on either endpoint must not blank the
+      // whole console, which is the primary audit-review surface. Null ⇒ that panel is simply omitted.
+      PoolStatus? pool;
+      try {
+        pool = await widget.api.getPoolStatus();
+      } catch (_) {
+        pool = null;
+      }
+      AdminSshKeys? sshKeys;
+      try {
+        sshKeys = await widget.api.getAdminSshKeys();
+      } catch (_) {
+        sshKeys = null;
+      }
       if (!mounted) return;
       setState(() {
         _overview = overview;
+        _pool = pool;
+        _sshKeys = sshKeys;
         _loading = false;
       });
     } catch (error) {
@@ -51,6 +69,39 @@ class _AdminScreenState extends State<AdminScreen> {
         _loading = false;
       });
     }
+  }
+
+  /// Admin-revoke a user's git SSH key: confirm, call the API, then reload the roster. Failures
+  /// surface as a snackbar; the console isn't blanked.
+  Future<void> _revokeKey(String sub, String label) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text('Revoke git SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: Text(
+          "This drops $label's git key so it stops being injected into future coding sessions. "
+          'The public key should also be removed from the git host. This cannot be undone.',
+          style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Revoke', style: TextStyle(color: AppColors.bad))),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    String? failure;
+    try {
+      await widget.api.revokeAdminSshKey(sub);
+    } catch (error) {
+      failure = error is ApiException ? error.message : 'Failed to revoke the key.';
+    }
+    if (!mounted) return;
+    if (failure != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(failure)));
+    }
+    await _load();
   }
 
   @override
@@ -103,6 +154,14 @@ class _AdminScreenState extends State<AdminScreen> {
         _AgentsPanel(agents: overview.agents),
         const SizedBox(height: 28),
         _SessionsPanel(sessions: overview.sessions, agentById: agentById),
+        if (_pool != null) ...[
+          const SizedBox(height: 28),
+          _PoolPanel(pool: _pool!),
+        ],
+        if (_sshKeys != null) ...[
+          const SizedBox(height: 28),
+          _SshKeysPanel(sshKeys: _sshKeys!, onRevoke: _revokeKey),
+        ],
         const SizedBox(height: 28),
         _AuditPanel(audit: overview.audit),
         const SizedBox(height: 20),
@@ -347,6 +406,157 @@ class _SessionsPanel extends StatelessWidget {
               _statusPill(s.status),
               s.runnerId == null ? _pill(s.hostType) : _cellWithId(s.hostType, s.runnerId!, pillLabel: true),
               _mono(_fmtDate(s.leaseExpiresAt)),
+            ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The Kubernetes agent-pool panel: the deployment's caps + the live pooled sessions (metadata
+/// only). Shows an informational note when no pool is configured, so an admin can tell "off" apart
+/// from "on with zero sessions". Read-only — the limits come from the deploy config
+/// (SECCHAT_POOL_* / secsite.toml [secchat.pool]); changing them is a redeploy, not a GUI action.
+class _PoolPanel extends StatelessWidget {
+  const _PoolPanel({required this.pool});
+
+  final PoolStatus pool;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!pool.configured) {
+      return const _Panel(
+        title: 'Agent pool',
+        child: Text(
+          'No Kubernetes agent pool is configured for this deployment.',
+          style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic, fontSize: 13),
+        ),
+      );
+    }
+    final limits = pool.limits;
+    final live = pool.live ?? pool.sessions.length;
+    final meta = [
+      if (pool.namespace != null && pool.namespace!.isNotEmpty) 'namespace ${pool.namespace}',
+      if (pool.image != null && pool.image!.isNotEmpty) 'image ${pool.image}',
+    ].join(' · ');
+    return _Panel(
+      title: 'Agent pool',
+      note: meta.isEmpty ? null : meta,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 14,
+            runSpacing: 14,
+            children: [
+              _poolCard('Live / max pods', limits == null ? '$live' : '$live / ${limits.maxPods}',
+                  emphasize: limits != null && limits.maxPods > 0 && live >= limits.maxPods),
+              _poolCard('Per-owner cap', limits == null ? '—' : '${limits.maxPerOwner}'),
+              _poolCard('Pod TTL', limits == null ? '—' : _fmtDuration(limits.ttlSeconds)),
+              _poolCard('Attach timeout', limits == null ? '—' : _fmtDuration((limits.attachTimeoutMs / 1000).round())),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _DataTable(
+            headers: const ['Owner', 'Pod', 'State', 'Age'],
+            widths: const [2, 3, 1, 1],
+            rows: [
+              for (final s in pool.sessions)
+                [
+                  _mono(s.ownerSub),
+                  _mono(s.podName),
+                  s.attached ? _statusPill('active') : _pill('starting', tone: AppColors.warn),
+                  _mono(_fmtAge(s.ageMs)),
+                ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small labeled metric card (mirrors _SummaryCards' style). `emphasize` colours the value as a
+/// warning — used when the pool is at its global cap (new sessions will be rejected).
+Widget _poolCard(String label, String value, {bool emphasize = false}) => Container(
+  width: 168,
+  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+  decoration: BoxDecoration(
+    color: AppColors.surface,
+    border: Border.all(color: AppColors.border),
+    borderRadius: BorderRadius.circular(AppRadius.sm),
+  ),
+  child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        label.toUpperCase(),
+        style: const TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.6, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        value,
+        style: TextStyle(color: emphasize ? AppColors.warn : AppColors.accent, fontSize: 22, fontWeight: FontWeight.w700),
+      ),
+    ],
+  ),
+);
+
+/// A whole-seconds duration as a compact "1h 0m" / "5m 30s" / "45s".
+String _fmtDuration(int seconds) {
+  if (seconds >= 3600) return '${seconds ~/ 3600}h ${(seconds % 3600) ~/ 60}m';
+  if (seconds >= 60) return '${seconds ~/ 60}m ${seconds % 60}s';
+  return '${seconds}s';
+}
+
+/// A pod's age (ms since start) as a compact duration.
+String _fmtAge(int ms) => _fmtDuration((ms / 1000).round());
+
+/// The git SSH key roster (admin-only, `GET /admin/api/ssh-keys`): who has a git identity registered
+/// — public metadata only (owner, fingerprint, added-at), never the private key — with an admin
+/// revoke action per row (offboarding / compromise). Shows a note when the feature isn't enabled.
+class _SshKeysPanel extends StatelessWidget {
+  const _SshKeysPanel({required this.sshKeys, required this.onRevoke});
+
+  final AdminSshKeys sshKeys;
+  final Future<void> Function(String sub, String label) onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!sshKeys.enabled && sshKeys.keys.isEmpty) {
+      return const _Panel(
+        title: 'Git SSH keys',
+        child: Text(
+          "Git SSH identities aren't enabled for this deployment.",
+          style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic, fontSize: 13),
+        ),
+      );
+    }
+    return _Panel(
+      title: 'Git SSH keys',
+      note: sshKeys.enabled ? null : 'Feature disabled — existing keys are shown so they can be revoked.',
+      child: _DataTable(
+        headers: const ['User', 'Fingerprint', 'Added', ''],
+        widths: const [2, 3, 2, 1],
+        rows: [
+          for (final k in sshKeys.keys)
+            [
+              _cellWithId(k.displayName ?? k.sub, k.sub),
+              _mono(k.fingerprint),
+              _mono(_fmtDate(k.createdAt)),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => onRevoke(k.sub, k.displayName ?? k.sub),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.bad,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('Revoke', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                ),
+              ),
             ],
         ],
       ),

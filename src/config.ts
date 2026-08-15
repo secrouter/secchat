@@ -158,6 +158,16 @@ export interface PoolConfig {
   /** Hard pod TTL in seconds (`SECCHAT_POOL_TTL`) set as the pod's `activeDeadlineSeconds` — a
    * backstop so K8s always reaps an orphaned pod even if SecChat misses the delete. */
   activeDeadlineSeconds: number;
+  /** Max concurrent pool pods SecChat will keep in flight across ALL owners (`SECCHAT_POOL_MAX_PODS`,
+   * default 20; `0` = unlimited). In-process admission control (fail-fast) so a burst can't create an
+   * unbounded number of pods — independent of, and tighter than, the cluster ResourceQuota. */
+  maxPods: number;
+  /** Max concurrent pool pods a SINGLE owner may hold (`SECCHAT_POOL_MAX_PER_OWNER`, default 3; `0` =
+   * unlimited) — stops one user starving the global cap. */
+  maxPerOwner: number;
+  /** How long to wait for a pod's runnerd to attach before reaping it (`SECCHAT_POOL_ATTACH_TIMEOUT`,
+   * ms, default 120000) — covers image pull + boot. */
+  attachTimeoutMs: number;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -250,6 +260,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         cpuLimit: opt(env, "SECCHAT_POOL_CPU", "1"),
         memoryLimit: opt(env, "SECCHAT_POOL_MEMORY", "1Gi"),
         activeDeadlineSeconds: Number(opt(env, "SECCHAT_POOL_TTL", "3600")),
+        maxPods: Number(opt(env, "SECCHAT_POOL_MAX_PODS", "20")),
+        maxPerOwner: Number(opt(env, "SECCHAT_POOL_MAX_PER_OWNER", "3")),
+        attachTimeoutMs: Number(opt(env, "SECCHAT_POOL_ATTACH_TIMEOUT", "120000")),
       }
     : undefined;
   return {
