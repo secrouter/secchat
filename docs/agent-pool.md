@@ -46,6 +46,35 @@ with.
 | `SECCHAT_POOL_SECCHAT_URL` | `http://secchat:<port>` | Cluster-internal URL a pool pod dials back to reach `/runner`. |
 | `SECCHAT_POOL_CPU` / `SECCHAT_POOL_MEMORY` | `1` / `1Gi` | Per-pod resource limits (K8s quantities). |
 | `SECCHAT_POOL_TTL` | `3600` | Hard pod TTL (`activeDeadlineSeconds`), a backstop against a leaked pod. |
+| `SECCHAT_POOL_MAX_PODS` | `20` | Global in-process admission cap (`0` = unlimited): at the cap, a new pool session is rejected fast with a clear message instead of relying on the cluster quota. |
+| `SECCHAT_POOL_MAX_PER_OWNER` | `3` | Per-owner admission cap (`0` = unlimited). |
+| `SECCHAT_POOL_ATTACH_TIMEOUT` | `120000` | How long (ms) to wait for a pod's runnerd to attach before reaping it — covers image pull + boot. |
+| `SECCHAT_POOL_ANALYSIS_IMAGES` | *(unset ⇒ no sidecars)* | Analysis sidecar catalog, `name=image,name=image` — the analyzers a pool agent may attach (see below). |
+
+## Analysis sidecars (shared /workspace + file work-queue)
+
+An agent created with `analysis: ["<name>", …]` (names from the catalog; checkboxes in the
+New-Coding-Agent dialog) gets each named image as an extra **hardened sidecar container in its
+pod**. Every pool pod declares a shared `workspace` emptyDir mounted at `/workspace` in all
+containers; pi's state + working tree are rooted there (`SECCHAT_PI_STATE_DIR=/workspace/state`),
+so the analyzers' tooling operates on the agent's actual code. The pod-level `fsGroup: 1000`
+matters: without it the emptyDir mounts root-owned and every non-root container gets EACCES.
+
+Containers can't exec into each other, so each sidecar idles on a **file work-queue**:
+
+1. The agent writes a shell command to `/workspace/.analysis/<name>/request` — that write passes
+   through the execute-gate like any other mutating tool call.
+2. The sidecar (a POSIX-`sh` watcher; no image changes needed) moves it to `running`, executes it
+   with its own tooling, writes stdout+stderr to `output` and the status to `exit`, and removes
+   `running`.
+3. The agent polls for `exit` / reads `output`.
+
+## Internet access (per-agent, default OFF)
+
+`analysisEgress: true` at agent creation labels the pod `secchat.io/egress: open`, which the
+cluster's opt-in allow-all-egress NetworkPolicy selects; without it (the default) the pod keeps
+the restricted egress allowlist (DNS + git ports + the SecChat dial-back). Fail-closed: no label →
+no match → restricted. The UI switch is warn-tinted and off by default.
 
 ## Deploying (RBAC + network policy)
 
