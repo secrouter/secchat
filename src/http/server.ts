@@ -355,6 +355,9 @@ function buildRouter(
   /** Live agent-pool status for the admin-gated `GET /pool/status` (limits + live sessions). Unset ⇒
    * the pool isn't configured and the route reports `{configured:false}`. */
   poolStatus?: () => PoolStatus,
+  /** The analysis sidecar names the deployment offers (config.pool.analysisImages keys) — drives
+   * the New-Coding-Agent picker + POST /agents validation. Unset/empty ⇒ feature off. */
+  poolAnalyzers?: readonly string[],
   outbound?: OutboundDispatcher,
   outboundAllowedHosts: readonly string[] = [],
 ): Router<Handler> {
@@ -1537,7 +1540,7 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; reasoning?: boolean; launchEnv?: string; workspace?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; reasoning?: boolean; launchEnv?: string; workspace?: string; analysis?: string[]; analysisEgress?: boolean };
     const kind = body.kind ?? "assistant";
     // A coding agent may mount a local directory (on its runner daemon's host) as pi's workspace —
     // e.g. the user's repo. Only meaningful for a coding agent on the desktop; stored on the agent
@@ -1570,7 +1573,24 @@ function buildRouter(
       // (per-agent routing — see agent/router-runner.ts).
       launchEnv = env.id;
     }
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, reasoning: body.reasoning, workspace, launchEnv });
+    // Analysis sidecars + the pod internet toggle apply only to POOL coding agents. Names are
+    // validated against what the deployment actually offers — an unknown analyzer is a clean 400,
+    // not a pod that silently comes up without it. analysisEgress defaults OFF; it is only ever
+    // true when the caller explicitly set it.
+    let analysis: string[] | undefined;
+    let analysisEgress: boolean | undefined;
+    if (kind === "coding" && launchEnv === "pool") {
+      const requested = Array.isArray(body.analysis) ? body.analysis.map((a) => String(a).trim().toLowerCase()).filter(Boolean) : [];
+      const offered = new Set(poolAnalyzers ?? []);
+      const unknown = requested.filter((a) => !offered.has(a));
+      if (unknown.length > 0) {
+        sendJson(res, 400, { error: "unknown_analyzer", detail: `No such analysis container(s): ${unknown.join(", ")}` });
+        return;
+      }
+      analysis = requested.length > 0 ? requested : undefined;
+      analysisEgress = body.analysisEgress === true ? true : undefined;
+    }
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, reasoning: body.reasoning, workspace, launchEnv, analysis, analysisEgress });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",
@@ -1615,6 +1635,9 @@ function buildRouter(
         desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
         poolConfigured: poolConfigured ?? false,
       }),
+      // The analysis sidecars a pool agent can attach (deployment catalog names) — the picker's
+      // checkbox list. Empty when the pool is off or the deployment configured none.
+      analyzers: poolConfigured ? [...(poolAnalyzers ?? [])] : [],
     });
   });
 
@@ -2049,6 +2072,8 @@ export function createHttpServer(deps: {
   /** Live agent-pool status accessor for the admin-gated `GET /pool/status` (limits + live sessions,
    * no content). Unset ⇒ the pool isn't configured and the route reports `{configured:false}`. */
   poolStatus?: () => PoolStatus;
+  /** Analysis sidecar names the deployment offers (config.pool.analysisImages keys). */
+  poolAnalyzers?: readonly string[];
   /** Outbound-webhook dispatcher (webhooks/outbound.ts). Unset ⇒ outbound events aren't delivered
    * and the outbound-webhook routes still manage subscriptions but the test-ping route 503s. */
   outbound?: OutboundDispatcher;
@@ -2062,7 +2087,7 @@ export function createHttpServer(deps: {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.outbound, deps.outboundAllowedHosts);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.outbound, deps.outboundAllowedHosts);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

@@ -99,26 +99,72 @@ interface PoolSession {
   createdAt: number;
 }
 
+/** The shared per-pod volume every container mounts at this path. pi's state + working tree are
+ * rooted here (SECCHAT_PI_STATE_DIR), so an analysis sidecar's tooling sees the agent's code. */
+export const POOL_WORKSPACE_MOUNT = "/workspace";
+
+/** Build one analysis sidecar's shell watcher: a file-based work queue on the shared volume
+ * (containers in a pod can't exec into each other, so this is the invocation seam). The agent
+ * writes a shell command to `/workspace/.analysis/<name>/request` — that WRITE goes through
+ * SecChat's execute-gate like any other mutating tool call — and the sidecar runs it with its own
+ * tooling, leaving `output` + `exit` behind. POSIX sh only, no dependencies, so it works in any
+ * analyzer image. */
+export function buildAnalysisWatcher(name: string): string {
+  const dir = `${POOL_WORKSPACE_MOUNT}/.analysis/${name}`;
+  return [
+    `mkdir -p ${dir}`,
+    "while true; do",
+    `  if [ -f ${dir}/request ]; then`,
+    `    mv ${dir}/request ${dir}/running`,
+    `    sh ${dir}/running > ${dir}/output 2>&1; echo $? > ${dir}/exit`,
+    `    rm -f ${dir}/running`,
+    "  fi",
+    "  sleep 2",
+    "done",
+  ].join("\n");
+}
+
 /** Build the Pod manifest for one pool session. Hardened + least-privilege: no K8s API access
  * (`automountServiceAccountToken: false`), non-root, all capabilities dropped, one-shot
  * (`restartPolicy: Never`), and a hard `activeDeadlineSeconds` TTL so K8s always reaps it. The pod
  * dials back to `secchatUrl` and identifies its session via SECCHAT_POOL_SESSION (runnerd appends
  * `?pool=<id>` to the attach URL). The SSH key is NOT put here — it rides the `start` command over the
- * authed /runner channel, exactly as for the desktop daemon. */
+ * authed /runner channel, exactly as for the desktop daemon.
+ *
+ * `analysis` names attach the deployment's analysis sidecars (config.analysisImages), each sharing
+ * the pod's /workspace volume (the agent's code) and idling on a file-queue watcher. `analysisEgress`
+ * labels the pod `secchat.io/egress: open` so the cluster's open-egress NetworkPolicy admits it to
+ * the internet — DEFAULT OFF: without it the pod keeps the restricted egress (DNS/git/SecChat). */
 export function buildPoolPodSpec(input: {
   podName: string;
   sessionId: Id;
   ownerSub: string;
   runnerToken: string;
   config: PoolConfig;
+  analysis?: string[];
+  analysisEgress?: boolean;
 }): Record<string, unknown> {
   const { podName, sessionId, runnerToken, config } = input;
+  const hardened = {
+    allowPrivilegeEscalation: false,
+    readOnlyRootFilesystem: false, // git + pi + analyzers need writable tmp/work dirs
+    capabilities: { drop: ["ALL"] },
+  };
+  const workspaceMount = { name: "workspace", mountPath: POOL_WORKSPACE_MOUNT };
+  // Only names the deployment actually offers become containers — an unknown name is skipped here
+  // (POST /agents already validates; this is defense in depth, not the primary check).
+  const analyzers = (input.analysis ?? []).filter((n) => config.analysisImages[n]);
   return {
     apiVersion: "v1",
     kind: "Pod",
     metadata: {
       name: podName,
-      labels: { app: "secchat-pool" },
+      labels: {
+        app: "secchat-pool",
+        // The pod's egress class, matched by the cluster's NetworkPolicies. "open" (internet)
+        // only when the agent explicitly opted in — the default is the restricted allowlist.
+        "secchat.io/egress": input.analysisEgress === true ? "open" : "restricted",
+      },
       // Owner/session as ANNOTATIONS (label values are DNS-restricted; a sub or uuid may not fit).
       annotations: { "secchat.io/session": sessionId, "secchat.io/owner": input.ownerSub },
     },
@@ -130,6 +176,7 @@ export function buildPoolPodSpec(input: {
       // `node`), the kubelet can't verify non-root at admission and REFUSES to start the pod. 1000 is
       // the `node` user in the runnerd image's node base — pinning it satisfies the check.
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: "RuntimeDefault" } },
+      volumes: [{ name: "workspace", emptyDir: {} }],
       containers: [
         {
           name: "runnerd",
@@ -138,6 +185,9 @@ export function buildPoolPodSpec(input: {
             { name: "SECCHAT_URL", value: config.secchatUrl },
             { name: "SECCHAT_RUNNER_TOKEN", value: runnerToken },
             { name: "SECCHAT_POOL_SESSION", value: sessionId },
+            // Root pi's state + working tree on the SHARED volume, so the analysis sidecars' tooling
+            // operates on the agent's actual code (pi-runner: stateRoot = SECCHAT_PI_STATE_DIR).
+            { name: "SECCHAT_PI_STATE_DIR", value: `${POOL_WORKSPACE_MOUNT}/state` },
             // Route the pod's pi model calls through SecChat's own /agent-llm/v1 proxy (NOT SecRouter
             // directly) — same as the desktop daemon. The proxy authenticates the pod by its
             // owner-scoped runner token (PI_API_KEY, the same credential it attaches with) and forwards
@@ -146,16 +196,27 @@ export function buildPoolPodSpec(input: {
             { name: "PI_BASE_URL", value: `${config.secchatUrl.replace(/\/$/, "")}/agent-llm/v1` },
             { name: "PI_API_KEY", value: runnerToken },
           ],
+          volumeMounts: [workspaceMount],
           resources: {
             limits: { cpu: config.cpuLimit, memory: config.memoryLimit },
             requests: { cpu: config.cpuLimit, memory: config.memoryLimit },
           },
-          securityContext: {
-            allowPrivilegeEscalation: false,
-            readOnlyRootFilesystem: false, // git + pi need a writable workspace/tmp
-            capabilities: { drop: ["ALL"] },
-          },
+          securityContext: hardened,
         },
+        // Analysis sidecars: the deployment's tooling images, idling on the shared-volume work
+        // queue (see buildAnalysisWatcher). Same hardening as runnerd; command overrides the image
+        // entrypoint deliberately — batch analyzer images exit immediately otherwise.
+        ...analyzers.map((name) => ({
+          name: `analysis-${name}`,
+          image: config.analysisImages[name]!,
+          command: ["sh", "-c", buildAnalysisWatcher(name)],
+          volumeMounts: [workspaceMount],
+          resources: {
+            limits: { cpu: config.cpuLimit, memory: config.memoryLimit },
+            requests: { cpu: "100m", memory: "128Mi" }, // idle watcher — request little, burst to limit
+          },
+          securityContext: hardened,
+        })),
       ],
     },
   };
@@ -250,7 +311,10 @@ export function makePoolRunner(deps: {
       };
       sessions.set(input.sessionId, session);
 
-      const manifest = buildPoolPodSpec({ podName, sessionId: input.sessionId, ownerSub: input.ownerSub, runnerToken: token, config: deps.config });
+      const manifest = buildPoolPodSpec({
+        podName, sessionId: input.sessionId, ownerSub: input.ownerSub, runnerToken: token,
+        config: deps.config, analysis: input.analysis, analysisEgress: input.analysisEgress,
+      });
       const res = await deps.k8s.createPod(manifest);
       if (!res.ok) {
         await finish(input.sessionId, session, { code: 1, message: `▸ pool: failed to create the agent pod (${res.status}${res.error ? `: ${res.error}` : ""})`, emitExit: true });

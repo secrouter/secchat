@@ -1380,7 +1380,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// the online pool once deployed). Fetch what's available, let the user pick,
   /// then create there — the backend blocks an unavailable choice.
   Future<void> _handleNewCodingAgent() async {
-    List<LaunchEnv> envs;
+    LaunchEnvironments envs;
     try {
       envs = await widget.api.getLaunchEnvironments();
     } catch (error) {
@@ -1390,19 +1390,21 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     final choice = await showCodingAgentDialog(
       context,
-      environments: envs,
+      environments: envs.environments,
       models: [for (final m in _models) m.id],
+      analyzers: envs.analyzers,
     );
     if (choice == null || !mounted) return;
-    await _createAgent(
-        AgentKind.coding, choice.name, choice.launchEnv, choice.workspace, choice.model, choice.reasoning);
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace,
+        choice.model, choice.reasoning, choice.analysis, choice.analysisEgress);
   }
 
   Future<void> _createAgent(AgentKind kind, String name, String? launchEnv,
-      [String? workspace, String? model, bool? reasoning]) async {
+      [String? workspace, String? model, bool? reasoning, List<String>? analysis, bool? analysisEgress]) async {
     try {
       final result = await widget.api.createAgent(
-          kind: kind, name: name, launchEnv: launchEnv, workspace: workspace, model: model, reasoning: reasoning);
+          kind: kind, name: name, launchEnv: launchEnv, workspace: workspace, model: model,
+          reasoning: reasoning, analysis: analysis, analysisEgress: analysisEgress);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;

@@ -206,6 +206,10 @@ export function makeControlPlane(deps: {
       // default. Omitted when unset so the runner falls back to its PI_MODEL/opts default.
       ...(input.agent.model ? { model: input.agent.model } : {}),
       ...(input.agent.reasoning !== undefined ? { reasoning: input.agent.reasoning } : {}),
+      // Pool analysis sidecars + the pod's internet toggle (default off) — pool-runner consumes
+      // these when building the pod spec; other runners ignore them.
+      ...(input.agent.analysis?.length ? { analysis: input.agent.analysis } : {}),
+      ...(input.agent.analysisEgress !== undefined ? { analysisEgress: input.agent.analysisEgress } : {}),
     });
     await deps.sessions.setSessionStatus(session.id, "active");
 

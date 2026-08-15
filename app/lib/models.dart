@@ -596,6 +596,15 @@ class AgentSession {
 /// its pi session runs: the user's connected desktop app, or the (not-yet-
 /// deployed) online pool. The New-Coding-Agent picker shows these and disables
 /// the ones that aren't [available].
+/// `GET /runner/environments` — the launch environments plus the analysis sidecars the pool
+/// offers (empty when the pool is off or the deployment configured none).
+class LaunchEnvironments {
+  const LaunchEnvironments({required this.environments, this.analyzers = const []});
+
+  final List<LaunchEnv> environments;
+  final List<String> analyzers;
+}
+
 class LaunchEnv {
   const LaunchEnv({
     required this.id,

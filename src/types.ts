@@ -125,6 +125,14 @@ export interface Agent {
    * which fall back to the owner's daemon-if-attached-else-server behavior. Not meaningful for an
    * assistant agent (no runner). */
   launchEnv?: "desktop" | "pool";
+  /** For a POOL coding agent: analysis sidecar containers to attach to its pod, by the names the
+   * deployment offers (config.pool.analysisImages). Each shares the pod's /workspace volume so its
+   * tooling operates on the agent's working tree. Empty/unset ⇒ none. */
+  analysis?: string[];
+  /** Whether the agent's pod may reach the INTERNET (an `secchat.io/egress: open` pod label the
+   * cluster's open-egress NetworkPolicy selects). DEFAULT OFF — the pod's egress is otherwise
+   * restricted to DNS/git/SecChat. Only meaningful for the pool launch env. */
+  analysisEgress?: boolean;
   createdAt: string;
 }
 
@@ -627,7 +635,7 @@ export interface Runner {
    * injection, simply omits/ignores it. `launchEnv` is the agent's chosen environment, on which a
    * composite runner (agent/router-runner.ts) routes this session to the desktop daemon, the pool, or
    * the in-process server runner; a concrete single runner ignores it. */
-  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool"; model?: string; reasoning?: boolean }): Promise<void>;
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool"; model?: string; reasoning?: boolean; analysis?: string[]; analysisEgress?: boolean }): Promise<void>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   /** Deliver the gate's verdict for a pending tool_request back to the runner. */
   answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;

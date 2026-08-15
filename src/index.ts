@@ -307,6 +307,8 @@ const server = createHttpServer({
   poolConfigured: Boolean(poolRunner),
   // Admin-gated GET /pool/status: the pool's limits + live sessions (metadata only).
   poolStatus: poolRunner ? () => poolRunner!.status() : undefined,
+  // Analysis sidecar catalog names — the New-Coding-Agent picker's checkbox list.
+  poolAnalyzers: config.pool ? Object.keys(config.pool.analysisImages) : undefined,
   // Outbound-webhook delivery (SecChat → external URLs on events), plus the destination allowlist
   // enforced when a subscription is created.
   outbound: makeOutboundDispatcher(store),
