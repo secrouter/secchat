@@ -150,6 +150,8 @@ test("buildPoolPodSpec: analysis sidecars share the /workspace volume; egress la
   // …and pi's state/workspaces are rooted ON that volume.
   const env = (containers[0]!.env as Array<{ name: string; value: string }>);
   assert.equal(env.find((e) => e.name === "SECCHAT_PI_STATE_DIR")?.value, "/workspace/state");
+  // The pod's pi learns which analyzers ride along (secagent's analysis_run tool keys on this).
+  assert.equal(env.find((e) => e.name === "SECCHAT_ANALYSIS")?.value, "rust");
   // The sidecar idles on the file-queue watcher (its batch entrypoint would exit immediately),
   // with the same hardening as runnerd.
   const sidecar = containers[1]!;
@@ -169,6 +171,17 @@ test("buildPoolPodSpec: analysisEgress=true labels the pod egress OPEN; unknown 
   assert.equal(meta.labels["secchat.io/egress"], "open");
   const containers = (spec.spec as Record<string, unknown>).containers as Array<Record<string, unknown>>;
   assert.deepEqual(containers.map((c) => c.name), ["runnerd", "analysis-rust"]); // unknown skipped
+});
+
+test("buildPoolPodSpec: piExtension wires SECAGENT_PI_EXTENSION; no analyzers ⇒ no SECCHAT_ANALYSIS", () => {
+  const spec = buildPoolPodSpec({
+    podName: "p", sessionId: "s", ownerSub: "alice", runnerToken: "T",
+    config: { ...POOL, piExtension: "/app/pi-extensions/secagent.ts" },
+  });
+  const env = ((spec.spec as Record<string, unknown>).containers as Array<Record<string, unknown>>)[0]!
+    .env as Array<{ name: string; value: string }>;
+  assert.equal(env.find((e) => e.name === "SECAGENT_PI_EXTENSION")?.value, "/app/pi-extensions/secagent.ts");
+  assert.equal(env.find((e) => e.name === "SECCHAT_ANALYSIS"), undefined);
 });
 
 test("parseAnalysisImages: parses the catalog, rejects malformed names", () => {

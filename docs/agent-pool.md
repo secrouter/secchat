@@ -50,6 +50,7 @@ with.
 | `SECCHAT_POOL_MAX_PER_OWNER` | `3` | Per-owner admission cap (`0` = unlimited). |
 | `SECCHAT_POOL_ATTACH_TIMEOUT` | `120000` | How long (ms) to wait for a pod's runnerd to attach before reaping it — covers image pull + boot. |
 | `SECCHAT_POOL_ANALYSIS_IMAGES` | *(unset ⇒ no sidecars)* | Analysis sidecar catalog, `name=image,name=image` — the analyzers a pool agent may attach (see below). |
+| `SECCHAT_POOL_PI_EXTENSION` | *(unset)* | Path INSIDE the runnerd image to secagent's pi extension. When set, pods get `SECAGENT_PI_EXTENSION=<path>` so their pi loads secagent's tools — including `analysis_run`, which drives the sidecars via the work-queue. Pods with sidecars also get `SECCHAT_ANALYSIS=<names>`, which is how that tool discovers them. |
 
 ## Analysis sidecars (shared /workspace + file work-queue)
 

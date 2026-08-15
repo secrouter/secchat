@@ -198,6 +198,13 @@ export function buildPoolPodSpec(input: {
             // model calls attribute to the owner and never carry a SecRouter credential into the pod.
             { name: "PI_BASE_URL", value: `${config.secchatUrl.replace(/\/$/, "")}/agent-llm/v1` },
             { name: "PI_API_KEY", value: runnerToken },
+            // Tell the pod's pi WHICH analysis sidecars ride along — secagent's extension registers
+            // its analysis_run tool from this (self-describing; the model discovers the analyzers
+            // through the tool). Only set when sidecars are actually attached.
+            ...(analyzers.length > 0 ? [{ name: "SECCHAT_ANALYSIS", value: analyzers.join(",") }] : []),
+            // Load secagent's pi extension (analysis_run + the affordance tools) when the image
+            // carries it — the runnerd daemon's pi-runner reads SECAGENT_PI_EXTENSION.
+            ...(config.piExtension ? [{ name: "SECAGENT_PI_EXTENSION", value: config.piExtension }] : []),
           ],
           volumeMounts: [workspaceMount],
           resources: {

@@ -174,6 +174,12 @@ export interface PoolConfig {
    * pod's /workspace volume so the tooling operates on the agent's working tree. Empty ⇒ the
    * feature is off (POST /agents rejects any analysis request). */
   analysisImages: Record<string, string>;
+  /** Path INSIDE the runnerd image to secagent's pi extension (`SECCHAT_POOL_PI_EXTENSION`).
+   * When set, pool pods get `SECAGENT_PI_EXTENSION=<path>` so the pod's pi loads secagent's tools
+   * — including `analysis_run`, which drives the analysis sidecars via the shared-volume work
+   * queue (the pod also gets `SECCHAT_ANALYSIS` naming its attached analyzers). Unset ⇒ pods run
+   * pi without the secagent extension (the analyzers are then only reachable by hand). */
+  piExtension?: string;
 }
 
 /** Parse `SECCHAT_POOL_ANALYSIS_IMAGES` ("name=image,name=image") into the analyzer catalog.
@@ -285,6 +291,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         maxPerOwner: Number(opt(env, "SECCHAT_POOL_MAX_PER_OWNER", "3")),
         attachTimeoutMs: Number(opt(env, "SECCHAT_POOL_ATTACH_TIMEOUT", "120000")),
         analysisImages: parseAnalysisImages(env.SECCHAT_POOL_ANALYSIS_IMAGES),
+        piExtension: env.SECCHAT_POOL_PI_EXTENSION?.trim() || undefined,
       }
     : undefined;
   return {
