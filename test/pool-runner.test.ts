@@ -33,6 +33,7 @@ const POOL: PoolConfig = {
   maxPerOwner: 3,
   attachTimeoutMs: 120_000,
   analysisImages: { rust: "secagent-analyzer-rust:1", ikos: "secagent-analysis:1" },
+  maxTasks: 5,
 };
 
 async function waitFor(pred: () => boolean, ms = 1500): Promise<void> {
@@ -214,6 +215,12 @@ function makeFakeK8s() {
         .filter((n): n is string => typeof n === "string");
       const live = [...fromCreated, ...extraPods].filter((n) => !deleted.includes(n));
       return { ok: true, status: 200, pods: live.map((name) => ({ name })) };
+    },
+    async getPod(_n: string) {
+      return { ok: true, status: 200, phase: "Running" };
+    },
+    async podLogs(_n: string) {
+      return { ok: true, status: 200, logs: "" };
     },
   };
   return { k8s, created, deleted, setFailCreate: (v: boolean) => (failCreate = v), addClusterPod: (n: string) => extraPods.push(n) };

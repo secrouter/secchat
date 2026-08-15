@@ -174,6 +174,13 @@ export interface PoolConfig {
    * pod's /workspace volume so the tooling operates on the agent's working tree. Empty ⇒ the
    * feature is off (POST /agents rejects any analysis request). */
   analysisImages: Record<string, string>;
+  /** Image for one-shot POOL TASKS (`SECCHAT_POOL_TASK_IMAGE`) — the secagent agent image, whose
+   * `secagent` CLI runs batch jobs (`review mr`, `docs build`, `analyze run`, …) in an ephemeral
+   * pod via the task API (POST /pool/tasks). Unset ⇒ the task API is off (503). */
+  taskImage?: string;
+  /** Max concurrent one-shot task pods (`SECCHAT_POOL_MAX_TASKS`, default 5; `0` = unlimited) —
+   * admission for the task API, separate from the interactive-session caps. */
+  maxTasks: number;
   /** Path INSIDE the runnerd image to secagent's pi extension (`SECCHAT_POOL_PI_EXTENSION`).
    * When set, pool pods get `SECAGENT_PI_EXTENSION=<path>` so the pod's pi loads secagent's tools
    * — including `analysis_run`, which drives the analysis sidecars via the shared-volume work
@@ -292,6 +299,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         attachTimeoutMs: Number(opt(env, "SECCHAT_POOL_ATTACH_TIMEOUT", "120000")),
         analysisImages: parseAnalysisImages(env.SECCHAT_POOL_ANALYSIS_IMAGES),
         piExtension: env.SECCHAT_POOL_PI_EXTENSION?.trim() || undefined,
+        taskImage: env.SECCHAT_POOL_TASK_IMAGE?.trim() || undefined,
+        maxTasks: Number(opt(env, "SECCHAT_POOL_MAX_TASKS", "5")),
       }
     : undefined;
   return {
