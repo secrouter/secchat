@@ -828,6 +828,14 @@ final class WsExecuteModeEvent extends WsEvent {
   final ExecuteMode mode;
 }
 
+/// The coding agent started/stopped working a turn (pi agent_start/agent_settled) — drives the
+/// channel's "thinking…" indicator. Ephemeral; never a stored message.
+final class WsAgentThinkingEvent extends WsEvent {
+  const WsAgentThinkingEvent({required this.sessionId, required this.active, required super.channelId});
+  final String sessionId;
+  final bool active;
+}
+
 /// A reaction was added/removed on a message — lets every viewer's chips update live.
 final class WsReactionEvent extends WsEvent {
   const WsReactionEvent({
@@ -970,6 +978,12 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'session_ended':
       return WsSessionEndedEvent(channelId: channelId);
+    case 'agent_thinking':
+      return WsAgentThinkingEvent(
+        sessionId: json['sessionId'] as String? ?? '',
+        active: json['active'] as bool? ?? false,
+        channelId: channelId,
+      );
     case 'execute_mode':
       return WsExecuteModeEvent(
         agentId: json['agentId'] as String? ?? '',

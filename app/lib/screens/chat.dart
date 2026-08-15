@@ -115,6 +115,12 @@ class _ChatScreenState extends State<ChatScreen> {
   // `execute_mode` broadcast (which also fires when a `once` grant is consumed → back to none).
   final Map<String, ExecuteMode> _executeModeByChannel = {};
 
+  // Whether the channel's coding agent is currently working a turn (pi agent_start→agent_settled),
+  // driven by the `agent_thinking` broadcast — shows a "thinking…" indicator on the coding strip.
+  // Cleared the moment the agent's reply lands (or the session ends), so a silent turn (the agent
+  // chose not to reply) doesn't leave it stuck on.
+  final Map<String, bool> _agentThinkingByChannel = {};
+
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
 
@@ -712,6 +718,7 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         case WsAgentOutputEvent(:final sessionId, :final text):
           if (isOpen) _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
+          _agentThinkingByChannel[channelId] = false; // the reply landed — stop "thinking…"
         case WsToolDecisionEvent(:final tool, :final allow, :final reason):
           if (isOpen) _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
           // The `once`→`none` downgrade is no longer inferred from a tool_decision here: the backend
@@ -720,10 +727,13 @@ class _ChatScreenState extends State<ChatScreen> {
           // Authoritative badge sync from the backend grant (agent-keyed), so the coding strip stays
           // correct across respawns / other tabs / a consumed `once`.
           _executeModeByChannel[channelId] = mode;
+        case WsAgentThinkingEvent(:final active):
+          _agentThinkingByChannel[channelId] = active;
         case WsSessionEndedEvent():
           if (isOpen) {
             final sessionId = _sessionIdByChannel[channelId];
             if (sessionId != null) _endedSessionIds.add(sessionId);
+            _agentThinkingByChannel[channelId] = false;
             // NB: do NOT clear the execute mode — the grant is keyed to the agent and persists across
             // the respawn, so the owner's chosen mode carries over to the next session.
             _append(channelId, const SystemEntry('Session ended'));
@@ -1373,14 +1383,21 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (!mounted) return;
-    final choice = await showCodingAgentDialog(context, environments: envs);
+    final choice = await showCodingAgentDialog(
+      context,
+      environments: envs,
+      models: [for (final m in _models) m.id],
+    );
     if (choice == null || !mounted) return;
-    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace);
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace,
+        model: choice.model, reasoning: choice.reasoning);
   }
 
-  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv, [String? workspace]) async {
+  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv,
+      [String? workspace, String? model, bool? reasoning]) async {
     try {
-      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv, workspace: workspace);
+      final result = await widget.api.createAgent(
+          kind: kind, name: name, launchEnv: launchEnv, workspace: workspace, model: model, reasoning: reasoning);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;
@@ -1745,6 +1762,7 @@ class _ChatScreenState extends State<ChatScreen> {
         key: ValueKey(selected.id),
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
+        thinking: _agentThinkingByChannel[selected.id] ?? false,
         canGrant: selected.owned,
         // Badge follows the channel-keyed mode (agent-keyed grant on the backend), so it stays
         // correct across session respawns rather than tracking a session id that goes stale.

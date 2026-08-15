@@ -23,10 +23,15 @@ class CodingStrip extends StatefulWidget {
     required this.canGrant,
     required this.executeMode,
     required this.onSetMode,
+    this.thinking = false,
   });
 
   final String sessionId;
   final bool sessionEnded;
+
+  /// Whether the agent is currently working a turn (pi agent_start→agent_settled) — shows a
+  /// "thinking…" indicator so a slow local model doesn't look hung.
+  final bool thinking;
 
   /// Whether the current user may change the execute mode. Only the agent's owner can (the backend
   /// gate enforces it too); everyone else sees the mode but not the control.
@@ -121,9 +126,21 @@ class _CodingStripState extends State<CodingStrip> {
     final badge = _badgeFor(widget.executeMode);
     final compact = isCompact(context);
 
-    // The live mode badge — always visible whether the agent may currently make changes.
-    final Widget modeBadge =
-        PillBadge(badge.label, color: badge.color, background: badge.bg, borderColor: badge.border);
+    // The live mode badge — always visible whether the agent may currently make changes — with a
+    // "thinking…" indicator inline while the agent is working a turn (so a slow local model doesn't
+    // look hung).
+    final Widget modeBadge = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        PillBadge(badge.label, color: badge.color, background: badge.bg, borderColor: badge.border),
+        if (widget.thinking && !widget.sessionEnded) ...const [
+          SizedBox(width: 10),
+          SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.warn)),
+          SizedBox(width: 6),
+          Text('thinking…', style: TextStyle(color: AppColors.textMuted, fontSize: 12, fontStyle: FontStyle.italic)),
+        ],
+      ],
+    );
     // The mode-change control (or its ended / owner-only stand-ins).
     final Widget control = widget.sessionEnded
         ? const PillBadge('Ended')

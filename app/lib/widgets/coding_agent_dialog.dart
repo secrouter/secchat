@@ -10,21 +10,23 @@ import '../theme.dart';
 /// agent's workspace (e.g. a repo). Unavailable environments are shown but
 /// disabled, with the reason. Returns the chosen name + environment id + optional
 /// workspace path, or `null` if cancelled.
-Future<({String name, String launchEnv, String? workspace})?> showCodingAgentDialog(
+Future<({String name, String launchEnv, String? workspace, String? model, bool reasoning})?> showCodingAgentDialog(
   BuildContext context, {
   required List<LaunchEnv> environments,
+  required List<String> models,
 }) {
-  return showDialog<({String name, String launchEnv, String? workspace})>(
+  return showDialog<({String name, String launchEnv, String? workspace, String? model, bool reasoning})>(
     context: context,
     barrierColor: AppColors.overlay,
-    builder: (dialogContext) => _CodingAgentDialog(environments: environments),
+    builder: (dialogContext) => _CodingAgentDialog(environments: environments, models: models),
   );
 }
 
 class _CodingAgentDialog extends StatefulWidget {
-  const _CodingAgentDialog({required this.environments});
+  const _CodingAgentDialog({required this.environments, required this.models});
 
   final List<LaunchEnv> environments;
+  final List<String> models;
 
   @override
   State<_CodingAgentDialog> createState() => _CodingAgentDialogState();
@@ -34,6 +36,8 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
   final _controller = TextEditingController();
   final _workspaceController = TextEditingController();
   String? _selectedEnv;
+  String? _selectedModel;
+  bool _reasoning = false;
 
   @override
   void initState() {
@@ -43,6 +47,8 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
         .cast<LaunchEnv?>()
         .firstWhere((e) => e!.available, orElse: () => null)
         ?.id;
+    // Default to the first offered model (null when the list is empty ⇒ the server-side default).
+    _selectedModel = widget.models.isNotEmpty ? widget.models.first : null;
   }
 
   @override
@@ -66,6 +72,8 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
       name: name,
       launchEnv: _selectedEnv!,
       workspace: ws.isEmpty ? null : ws,
+      model: _selectedModel,
+      reasoning: _reasoning,
     ));
   }
 
@@ -108,6 +116,44 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               decoration: const InputDecoration(hintText: 'e.g. release-helper'),
               onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _submit(),
+            ),
+            if (widget.models.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Text(
+                'MODEL',
+                style: TextStyle(color: AppColors.textFaint, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6),
+              ),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                value: _selectedModel,
+                isExpanded: true,
+                dropdownColor: AppColors.surface,
+                style: const TextStyle(color: AppColors.text, fontSize: 13),
+                items: [
+                  for (final m in widget.models)
+                    DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)),
+                ],
+                onChanged: (v) => setState(() => _selectedModel = v),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Reasoning', style: TextStyle(color: AppColors.text, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                      Text('Let the model think step by step before answering.', style: TextStyle(color: AppColors.textMuted, fontSize: 11.5)),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: _reasoning,
+                  activeColor: AppColors.accent,
+                  onChanged: (v) => setState(() => _reasoning = v),
+                ),
+              ],
             ),
             const SizedBox(height: 18),
             const Text(
