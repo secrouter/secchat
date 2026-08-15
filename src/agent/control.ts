@@ -21,6 +21,14 @@ import type { Agent, AgentControl, AgentSession, GitSshMaterial, Id, Message, Ru
 
 const DEFAULT_LEASE_TTL_MS = 60_000;
 
+/** Map an execute-grant scope to the client-facing mode label (matches Flutter's ExecuteMode enum),
+ * for the `execute_mode` broadcast that keeps every client's badge in sync with the backend grant. */
+function modeForScope(scope: "plan" | "once" | "turn" | "always"): "plan" | "once" | "continual" {
+  if (scope === "always") return "continual";
+  if (scope === "turn") return "once"; // "turn" isn't a UI mode; a single-use grant is the closest
+  return scope; // "plan" | "once"
+}
+
 export function makeControlPlane(deps: {
   sessions: SessionStore;
   runner: Runner;
@@ -79,7 +87,9 @@ export function makeControlPlane(deps: {
 
       case "tool_request": {
         const agent = await deps.getAgent(session.agentId);
-        const grant = await deps.sessions.activeGrant(sessionId);
+        // Grants are keyed to the AGENT (not this session), so a respawned session honors the mode
+        // the owner already set and a UI holding a stale session id still reaches the live gate.
+        const grant = await deps.sessions.activeGrant(session.agentId);
         let decision = evaluateTool({ tool: event.tool, grant, turnId: event.turnId });
 
         // Hard behavior boundary: a MUTATING tool is only allowed when the CURRENT turn was
@@ -108,21 +118,39 @@ export function makeControlPlane(deps: {
         // was meant for ever runs. classifyTool is gate.ts's own export, used here rather than
         // re-derived, to identify a genuinely mutate-authorizing use.
         if (decision.allow && grant?.scope === "once" && classifyTool(event.tool) === "mutate") {
-          await deps.sessions.consumeGrant(sessionId);
+          await deps.sessions.consumeGrant(session.agentId);
+          // A consumed "once" drops the agent back to no-execution — tell the channel so the mode
+          // badge flips back without waiting for a reload (mirrors the client's optimistic downgrade).
+          deps.broadcast?.(session.channelId, { type: "execute_mode", agentId: session.agentId, mode: "none" });
         }
 
-        deps.broadcast?.(session.channelId, {
-          type: "tool_decision",
-          sessionId,
-          tool: event.tool,
-          allow: decision.allow,
-          reason: decision.reason,
-        });
+        // Surface the verdict to the channel as an auditable chip — EXCEPT an auto-allowed read.
+        // Now that reads also round-trip through the gate (pi-runner.ts no longer skips read/ls/grep/
+        // find in-process), broadcasting every allowed read would spam the transcript with chips for
+        // routine ls/grep. A DENIED tool of any kind, and every MUTATING verdict (allow or deny),
+        // still surface — those are the security-relevant ones. The read's RESULT still renders as an
+        // output tile regardless, so activity stays visible.
+        const surfaceVerdict = !decision.allow || classifyTool(event.tool) === "mutate";
+        if (surfaceVerdict) {
+          deps.broadcast?.(session.channelId, {
+            type: "tool_decision",
+            sessionId,
+            tool: event.tool,
+            allow: decision.allow,
+            reason: decision.reason,
+          });
+        }
         return;
       }
 
       case "status":
         await deps.sessions.setSessionStatus(sessionId, event.status);
+        return;
+
+      case "activity":
+        // Ephemeral "the agent is working" signal → the channel's thinking indicator. Not persisted
+        // and not gated; just fanned out so every viewer sees the agent is busy (or done).
+        deps.broadcast?.(session.channelId, { type: "agent_thinking", sessionId, active: event.active });
         return;
 
       case "exit":
@@ -173,6 +201,11 @@ export function makeControlPlane(deps: {
       // The agent's chosen environment routes this session (agent/router-runner.ts) — desktop daemon,
       // Kubernetes pool, or the in-process server runner.
       ...(input.agent.launchEnv ? { launchEnv: input.agent.launchEnv } : {}),
+      // Per-agent model + reasoning (the coding equivalent of the assistant path's model) — the runner
+      // uses these for pi's --model + the provider's reasoning capability, overriding the server-wide
+      // default. Omitted when unset so the runner falls back to its PI_MODEL/opts default.
+      ...(input.agent.model ? { model: input.agent.model } : {}),
+      ...(input.agent.reasoning !== undefined ? { reasoning: input.agent.reasoning } : {}),
     });
     await deps.sessions.setSessionStatus(session.id, "active");
 
@@ -197,12 +230,15 @@ export function makeControlPlane(deps: {
     if (!decision.allow) return decision;
 
     await deps.sessions.addGrant({
-      sessionId: input.sessionId,
+      agentId: session.agentId,
       grantedBy: input.byUser,
       scope: input.scope,
       turnId: input.turnId,
       grantedAt: new Date(now()).toISOString(),
     });
+    // Tell the channel the new mode so every client's badge stays in lock-step with the backend
+    // grant — regardless of which (possibly stale) session id the granting client happened to hold.
+    deps.broadcast?.(session.channelId, { type: "execute_mode", agentId: session.agentId, mode: modeForScope(input.scope) });
     return { allow: true, reason: "granted" };
   }
 
@@ -219,7 +255,8 @@ export function makeControlPlane(deps: {
     if (!agent) return { allow: false, reason: "unknown agent" };
     const decision = canGrantExecute(agent, input.byUser);
     if (!decision.allow) return decision;
-    await deps.sessions.consumeGrant(input.sessionId);
+    await deps.sessions.consumeGrant(session.agentId);
+    deps.broadcast?.(session.channelId, { type: "execute_mode", agentId: session.agentId, mode: "none" });
     return { allow: true, reason: "revoked" };
   }
 
@@ -246,5 +283,22 @@ export function makeControlPlane(deps: {
     return live[live.length - 1]!;
   }
 
-  return { spawn, grantExecute, revokeExecute, sendInput, getSession, liveSession };
+  /** Restart the agent's live session (see AgentControl.restartAgent) — pi's model + reasoning are
+   * fixed at spawn, so applying a change means killing the running session and spawning a fresh one
+   * with the updated agent. No live session ⇒ null (the change applies on the next spawn). */
+  async function restartAgent(agent: Agent): Promise<AgentSession | null> {
+    const active = (await deps.sessions.listActiveSessions()).filter((s) => s.agentId === agent.id);
+    const current = active[active.length - 1];
+    if (!current) return null;
+    turnAuthorBySession.delete(current.id);
+    await deps.runner.stop(current.id).catch(() => {}); // best-effort: also fires the exit path
+    await deps.sessions.setSessionStatus(current.id, "ended");
+    const next = await spawn({ agent, channelId: current.channelId, hostType: current.hostType });
+    // Tell the channel the NEW session id so every client rebinds off the now-ended old one (the
+    // coding strip + input routing key on it). The grant is agent-keyed, so the mode carries over.
+    deps.broadcast?.(current.channelId, { type: "agent_session", sessionId: next.id, channelId: current.channelId });
+    return next;
+  }
+
+  return { spawn, grantExecute, revokeExecute, sendInput, getSession, liveSession, restartAgent };
 }

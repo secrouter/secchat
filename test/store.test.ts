@@ -509,28 +509,28 @@ test("addGrant -> activeGrant -> consumeGrant -> activeGrant undefined; a later 
     leaseExpiresAt: futureLease(),
   });
 
-  assert.equal(await store.activeGrant(session.id), undefined);
+  assert.equal(await store.activeGrant(session.agentId), undefined);
 
-  const grant1: ExecuteGrant = { sessionId: session.id, grantedBy: "user-alice", scope: "once", grantedAt: new Date().toISOString() };
+  const grant1: ExecuteGrant = { agentId: session.agentId, grantedBy: "user-alice", scope: "once", grantedAt: new Date().toISOString() };
   await store.addGrant(grant1);
-  assert.deepEqual(await store.activeGrant(session.id), grant1);
+  assert.deepEqual(await store.activeGrant(session.agentId), grant1);
 
-  await store.consumeGrant(session.id);
-  assert.equal(await store.activeGrant(session.id), undefined);
+  await store.consumeGrant(session.agentId);
+  assert.equal(await store.activeGrant(session.agentId), undefined);
   assert.equal(grant1.consumed, true); // the stored row was flipped in place, not replaced by a copy
 
   // No active grant right now -> consumeGrant is a no-op, not a throw.
-  await store.consumeGrant(session.id);
+  await store.consumeGrant(session.agentId);
 
   const grant2: ExecuteGrant = {
-    sessionId: session.id,
+    agentId: session.agentId,
     grantedBy: "user-alice",
     scope: "turn",
     turnId: "turn-1",
     grantedAt: new Date().toISOString(),
   };
   await store.addGrant(grant2);
-  assert.deepEqual(await store.activeGrant(session.id), grant2);
+  assert.deepEqual(await store.activeGrant(session.agentId), grant2);
 });
 
 // ── Admin / audit-review console reads ──────────────────────────────────────────────────────

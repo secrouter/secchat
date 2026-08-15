@@ -265,6 +265,8 @@ abstract class ApiClient {
     required String name,
     String? launchEnv,
     String? workspace,
+    String? model,
+    bool? reasoning,
   });
 
   /// The launch environments a coding agent can run in right now
@@ -803,12 +805,16 @@ class HttpApiClient implements ApiClient {
     required String name,
     String? launchEnv,
     String? workspace,
+    String? model,
+    bool? reasoning,
   }) async => CreateAgentResult.fromJson(
     await _post('/agents', {
       'kind': kind.wireValue,
       'name': name,
       if (launchEnv != null) 'launchEnv': launchEnv,
       if (workspace != null && workspace.trim().isNotEmpty) 'workspace': workspace.trim(),
+      if (model != null && model.trim().isNotEmpty) 'model': model.trim(),
+      if (reasoning != null) 'reasoning': reasoning,
     }) as Map<String, dynamic>,
   );
 

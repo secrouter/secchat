@@ -288,7 +288,8 @@ async function triggerCodingAgents(
   content: string,
 ): Promise<void> {
   if (content.trim() === "") return;
-  const agentMember = (await store.listMembers(channelId)).find((m) => m.memberType === "agent");
+  const members = await store.listMembers(channelId);
+  const agentMember = members.find((m) => m.memberType === "agent");
   if (!agentMember) return;
   const agent = await store.getAgent(agentMember.memberRef);
   if (agent?.kind !== "coding") return;
@@ -304,10 +305,29 @@ async function triggerCodingAgents(
   // "authorized" = may this sender authorize edits? That's exactly the gate's owner-only rule, reused
   // here (not re-derived) so the envelope can't disagree with what the gate will actually enforce.
   const authorized = canGrantExecute(agent, authorSub).allow;
+  // Respond SELECTIVELY instead of to every line: the agent is "addressed" when the channel is
+  // effectively 1:1 with it (at most one human member) or the message names / @mentions it. When it
+  // isn't addressed, the message is still delivered (so the agent keeps full context) but the agent
+  // decides for itself whether a reply is natural and may stay silent — pi emits NO_REPLY_SENTINEL
+  // and the runner posts nothing (see AGENT_CHAT_PRIMER + pi-runner.ts).
+  const humanCount = members.filter((m) => m.memberType === "user").length;
+  const addressed = humanCount <= 1 || agentMentioned(content, agent.name);
   // Deliver as a JSON envelope naming the sender + their edit authority; pi was primed for this shape
   // at spawn (AGENT_CHAT_PRIMER). Pass the author so the gate enforces owner-only mutations for THIS
   // turn (not just pi's soft `authorized` cue). Keeps multi-member channels legible to the agent.
-  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized), authorSub);
+  await control.sendInput(session.id, formatUserMessageForAgent(who, content, authorized, addressed), authorSub);
+}
+
+/** Whether a chat message names or @mentions the agent — a case-insensitive whole-word match of the
+ * agent's display name, or an `@name` token. Used to decide the envelope's `addressed` hint (a false
+ * negative just means the agent uses its own judgment; the primer handles the rest). */
+function agentMentioned(content: string, name: string | undefined): boolean {
+  const n = (name ?? "").trim().toLowerCase();
+  if (!n) return false;
+  const text = content.toLowerCase();
+  if (text.includes("@" + n)) return true;
+  const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`).test(text);
 }
 
 function buildRouter(
@@ -1517,7 +1537,7 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; launchEnv?: string; workspace?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; reasoning?: boolean; launchEnv?: string; workspace?: string };
     const kind = body.kind ?? "assistant";
     // A coding agent may mount a local directory (on its runner daemon's host) as pi's workspace —
     // e.g. the user's repo. Only meaningful for a coding agent on the desktop; stored on the agent
@@ -1550,7 +1570,7 @@ function buildRouter(
       // (per-agent routing — see agent/router-runner.ts).
       launchEnv = env.id;
     }
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, workspace, launchEnv });
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, reasoning: body.reasoning, workspace, launchEnv });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",
@@ -1644,9 +1664,11 @@ function buildRouter(
     }
   });
 
-  // Change an assistant's model live (the chat window's header picker). Owner-only — an agent
-  // always acts as its owner, so only they may repoint its model. `model` is any id GET /models
-  // offered, including "auto" (SecRouter classifies + picks per turn).
+  // Change an agent's model and/or reasoning toggle live (the chat window's header picker). Owner-
+  // only — an agent always acts as its owner, so only they may repoint it. `model` is any id GET
+  // /models offered, including "auto" (SecRouter classifies + picks per turn). For a CODING agent
+  // both apply on its next session spawn (pi's model + reasoning are set at spawn); an assistant's
+  // apply on its next turn.
   router.add("PATCH", "/agents/:id", async ({ req, res, params, principal }) => {
     const agent = await store.getAgent(params.id!);
     if (!agent) {
@@ -1657,14 +1679,21 @@ function buildRouter(
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    const body = (await readJsonBody(req)) as { model?: string };
-    const model = typeof body.model === "string" ? body.model.trim() : "";
-    if (!model) {
-      sendJson(res, 400, { error: "bad_request", reason: "model is required" });
+    const body = (await readJsonBody(req)) as { model?: string; reasoning?: boolean };
+    const model = typeof body.model === "string" ? body.model.trim() : undefined;
+    const reasoning = typeof body.reasoning === "boolean" ? body.reasoning : undefined;
+    if (!model && reasoning === undefined) {
+      sendJson(res, 400, { error: "bad_request", reason: "model or reasoning is required" });
       return;
     }
-    const updated = await store.updateAgentModel(agent.id, model);
+    const updated = await store.updateAgent(agent.id, { ...(model ? { model } : {}), ...(reasoning !== undefined ? { reasoning } : {}) });
     await store.appendAudit({ actor: principal.sub, action: "agent.set_model", target: agent.id });
+    // For a CODING agent, apply the change live: restart its running session so pi picks up the new
+    // model + reasoning now (both are fixed at spawn). Best-effort — a restart hiccup never fails the
+    // PATCH, and with no live session the change simply applies on the next spawn.
+    if (updated && updated.kind === "coding" && control) {
+      await control.restartAgent(updated).catch(() => {});
+    }
     sendJson(res, 200, updated);
   });
 

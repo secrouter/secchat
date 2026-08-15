@@ -109,7 +109,10 @@ export interface Agent {
   ownerSub: string;
   kind: AgentKind;
   name?: string;
-  model?: string; // SecRouter model id used for the assistant path
+  model?: string; // SecRouter model id — the assistant path, AND the coding agent's pi --model
+  /** Whether the model runs with reasoning/thinking enabled. For a coding agent it's passed to pi
+   * (the provider registration's `reasoning` capability). Unset/false ⇒ reasoning off. */
+  reasoning?: boolean;
   /** For a coding agent: an absolute LOCAL directory (on the host running its runner daemon) that
    * pi operates in — a "mounted" folder, e.g. the user's repo. Unset ⇒ a private per-agent scratch
    * workspace. Only meaningful for the "desktop" launch environment (a local path on the pool would
@@ -391,7 +394,9 @@ export interface Store {
   getAgent(id: Id): Promise<Agent | null>;
   /** Change an agent's model (the chat window's live model picker → PATCH /agents/:id). Returns
    * the updated agent, or null if no agent has that id. */
-  updateAgentModel(id: Id, model: string): Promise<Agent | null>;
+  /** Patch an agent's model and/or reasoning toggle (only the provided fields change). Returns the
+   * updated agent, or null if it doesn't exist. */
+  updateAgent(id: Id, patch: { model?: string; reasoning?: boolean }): Promise<Agent | null>;
   listAgentsByOwner(ownerSub: string): Promise<Agent[]>;
 
   appendMessage(input: AppendMessageInput): Promise<Message>;
@@ -578,7 +583,13 @@ export type ToolClass = "read" | "mutate";
 /** The owner's scoped authorization to let an agent run mutating tools. ONLY the agent's owner
  * can create one — the execute-gate enforces that (an invited participant never can). */
 export interface ExecuteGrant {
-  sessionId: Id;
+  /** The AGENT the grant belongs to — NOT a session. The execute mode the owner picks is a property
+   * of the agent, so it survives session respawns (a coding session is reaped on lease expiry / pi
+   * exit / restart and comes back with a NEW id). Keying grants to the session made the owner's mode
+   * silently vanish on every respawn, and a UI holding a stale session id wrote grants to a dead
+   * session the gate never read — "the UI stops affecting the gate." Keyed to the agent, any live
+   * session for that agent honors the current grant. */
+  agentId: Id;
   grantedBy: string; // must equal the agent's ownerSub
   scope: "plan" | "once" | "turn" | "always"; // one mutating call / all mutations this turn / continual until revoked
   turnId?: string;
@@ -591,6 +602,9 @@ export type RunnerEvent =
   | { type: "output"; text: string }
   | { type: "tool_request"; tool: string; input?: string; requestId: string; turnId?: string }
   | { type: "status"; status: SessionStatus }
+  // The agent started/finished working a turn (pi agent_start/agent_settled) — drives the "thinking…"
+  // indicator. Ephemeral: never persisted, just broadcast so the channel sees the agent is busy.
+  | { type: "activity"; active: boolean }
   | { type: "exit"; code?: number };
 
 /** The decrypted git SSH material handed to a runner so `git` inside a coding session authenticates
@@ -613,7 +627,7 @@ export interface Runner {
    * injection, simply omits/ignores it. `launchEnv` is the agent's chosen environment, on which a
    * composite runner (agent/router-runner.ts) routes this session to the desktop daemon, the pool, or
    * the in-process server runner; a concrete single runner ignores it. */
-  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool" }): Promise<void>;
+  start(input: { sessionId: Id; agentId: Id; ownerSub: string; workspace?: string; gitSsh?: GitSshMaterial; launchEnv?: "desktop" | "pool"; model?: string; reasoning?: boolean }): Promise<void>;
   sendInput(sessionId: Id, text: string): Promise<void>;
   /** Deliver the gate's verdict for a pending tool_request back to the runner. */
   answerTool(sessionId: Id, requestId: string, decision: { allow: boolean; reason: string }): Promise<void>;
@@ -631,9 +645,10 @@ export interface SessionStore {
   setSessionStatus(id: Id, status: SessionStatus): Promise<void>;
   renewLease(id: Id, leaseExpiresAt: string): Promise<void>;
   addGrant(grant: ExecuteGrant): Promise<void>;
-  /** The current usable (non-consumed) grant for a session, if any. */
-  activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined>;
-  consumeGrant(sessionId: Id): Promise<void>;
+  /** The current usable (non-consumed) grant for an AGENT, if any. Keyed to the agent so it survives
+   * session respawns (see ExecuteGrant.agentId). */
+  activeGrant(agentId: Id): Promise<ExecuteGrant | undefined>;
+  consumeGrant(agentId: Id): Promise<void>;
 }
 
 /** The control plane's surface, as the HTTP layer sees it. The concrete implementation drives a
@@ -653,4 +668,9 @@ export interface AgentControl {
    * Read-only — used to reattach a reloaded client to an already-running session (see GET /channels)
    * without spawning a duplicate. */
   liveSession(channelId: Id): Promise<AgentSession | null>;
+  /** Restart the agent's live session so a changed model/reasoning takes effect NOW (pi's model is
+   * fixed at spawn): stop the current session and spawn a fresh one in the same channel with the
+   * updated agent config. Returns the new session, or null when nothing was running (the change then
+   * applies on the next spawn). Broadcasts an `agent_session` with the new id so clients rebind. */
+  restartAgent(agent: Agent): Promise<AgentSession | null>;
 }

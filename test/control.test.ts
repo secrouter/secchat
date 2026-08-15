@@ -50,15 +50,15 @@ function makeFakeSessionStore() {
       session.leaseExpiresAt = leaseExpiresAt;
     },
     async addGrant(grant) {
-      grants.set(grant.sessionId, grant);
+      grants.set(grant.agentId, grant);
     },
-    async activeGrant(sessionId) {
-      const grant = grants.get(sessionId);
+    async activeGrant(agentId) {
+      const grant = grants.get(agentId);
       if (!grant || grant.consumed) return undefined;
       return grant;
     },
-    async consumeGrant(sessionId) {
-      const grant = grants.get(sessionId);
+    async consumeGrant(agentId) {
+      const grant = grants.get(agentId);
       if (grant) grant.consumed = true;
     },
   };
@@ -200,18 +200,18 @@ test("grantExecute is owner-only, and a \"once\" grant authorizes exactly one mu
   // Non-owner: denied, no grant stored.
   const denied = await control.grantExecute({ sessionId: session.id, byUser: "colleague-2", scope: "once" });
   assert.equal(denied.allow, false);
-  assert.equal(grants.has(session.id), false);
+  assert.equal(grants.has(AGENT.id), false);
 
   // Owner: granted and persisted.
   const granted = await control.grantExecute({ sessionId: session.id, byUser: AGENT.ownerSub, scope: "once" });
   assert.equal(granted.allow, true);
-  assert.equal(grants.get(session.id)?.scope, "once");
-  assert.equal(grants.get(session.id)?.grantedBy, AGENT.ownerSub);
+  assert.equal(grants.get(AGENT.id)?.scope, "once");
+  assert.equal(grants.get(AGENT.id)?.grantedBy, AGENT.ownerSub);
 
   // First "bash": authorized by the grant, which is then consumed.
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-1" });
   assert.equal(calls.answerTool[0]?.decision.allow, true);
-  assert.equal(grants.get(session.id)?.consumed, true);
+  assert.equal(grants.get(AGENT.id)?.consumed, true);
 
   // Second "bash": the once-grant is spent.
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-2" });
@@ -231,7 +231,7 @@ test("a secondary participant's turn cannot mutate even while an owner grant is 
   await control.sendInput(session.id, "please edit the config", "colleague-2");
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-1" });
   assert.equal(calls.answerTool[0]?.decision.allow, false, "a non-owner turn can't mutate, grant or not");
-  assert.equal(grants.get(session.id)?.consumed ?? false, false, "and the owner's grant is NOT burned by it");
+  assert.equal(grants.get(AGENT.id)?.consumed ?? false, false, "and the owner's grant is NOT burned by it");
 
   // The OWNER's own turn still mutates under that grant.
   await control.sendInput(session.id, "yes, edit it", AGENT.ownerSub);
@@ -255,11 +255,11 @@ test("a \"once\" grant survives an intervening READ tool call — only the MUTAT
 
   await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" }); // read: grant untouched
   assert.equal(calls.answerTool[0]?.decision.allow, true);
-  assert.equal(grants.get(session.id)?.consumed, undefined);
+  assert.equal(grants.get(AGENT.id)?.consumed, undefined);
 
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-2" }); // mutate: consumes it
   assert.equal(calls.answerTool[1]?.decision.allow, true);
-  assert.equal(grants.get(session.id)?.consumed, true);
+  assert.equal(grants.get(AGENT.id)?.consumed, true);
 
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-3" }); // now spent
   assert.equal(calls.answerTool[2]?.decision.allow, false);
@@ -285,9 +285,78 @@ test("a \"turn\"-scoped grant authorizes mutation only within its matching turn,
   assert.equal(calls.answerTool[2]?.decision.allow, true); // same turn again — a turn grant is reusable
 });
 
-test("an output event broadcasts agent_output, and every tool_request also broadcasts a tool_decision", async () => {
+test("an execute grant survives a session RESPAWN — a new session for the same agent honors the mode", async () => {
+  // The reported bug: the owner sets a mode, the coding session is reaped + respawns with a NEW id,
+  // and the mode is silently lost (it lived on the dead session). Grants are keyed to the AGENT now,
+  // so the new session inherits it.
   const { store } = makeFakeSessionStore();
-  const { runner, emit } = makeFakeRunner();
+  const { runner, calls, emit } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const control = makeControlPlane({ sessions: store, runner, getAgent });
+
+  const s1 = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  await control.grantExecute({ sessionId: s1.id, byUser: AGENT.ownerSub, scope: "always" });
+  await emit(s1.id, { type: "exit", code: 0 }); // reaped
+
+  const s2 = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  assert.notEqual(s2.id, s1.id);
+  await emit(s2.id, { type: "tool_request", tool: "bash", requestId: "req-1" });
+  assert.equal(calls.answerTool.at(-1)?.decision.allow, true); // the new session mutates under the grant
+});
+
+test("granting via a STALE session id still reaches the live session (agent-keyed grant)", async () => {
+  // The exact "UI stops affecting the gate" case: the client holds a stale session id after a
+  // respawn and grants against it. Because grantExecute resolves the (persisted) session's agent,
+  // the grant lands on the agent and the LIVE session honors it.
+  const { store } = makeFakeSessionStore();
+  const { runner, calls, emit } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const control = makeControlPlane({ sessions: store, runner, getAgent });
+
+  const stale = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  await emit(stale.id, { type: "exit", code: 0 });
+  const live = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+
+  // Grant against the STALE (ended) session id — as a lagging UI would.
+  const granted = await control.grantExecute({ sessionId: stale.id, byUser: AGENT.ownerSub, scope: "always" });
+  assert.equal(granted.allow, true);
+  await emit(live.id, { type: "tool_request", tool: "bash", requestId: "req-1" });
+  assert.equal(calls.answerTool.at(-1)?.decision.allow, true); // the live session sees the grant
+});
+
+test("restartAgent stops the running session and spawns a fresh one, broadcasting the new id", async () => {
+  // Live model/reasoning change: pi's config is fixed at spawn, so applying it restarts the session.
+  const { store } = makeFakeSessionStore();
+  const { runner, calls, emit } = makeFakeRunner();
+  void emit;
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const { broadcast, events } = makeFakeBroadcast();
+  const control = makeControlPlane({ sessions: store, runner, getAgent, broadcast });
+
+  const s1 = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+  const next = await control.restartAgent(AGENT);
+  assert.ok(next);
+  assert.notEqual(next!.id, s1.id);
+  assert.ok(calls.stop.includes(s1.id)); // the old session's runner was stopped
+  assert.equal((await control.getSession(s1.id))?.status, "ended");
+  // The new session id is broadcast so clients rebind off the now-ended old one.
+  assert.ok(events.some((e) => {
+    const p = e.payload as { type: string; sessionId?: string };
+    return p.type === "agent_session" && p.sessionId === next!.id;
+  }));
+});
+
+test("restartAgent returns null when nothing is running (the change applies on the next spawn)", async () => {
+  const { store } = makeFakeSessionStore();
+  const { runner } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const control = makeControlPlane({ sessions: store, runner, getAgent });
+  assert.equal(await control.restartAgent(AGENT), null);
+});
+
+test("output broadcasts agent_output; an AUTO-ALLOWED read is not broadcast, but denials + mutations are", async () => {
+  const { store } = makeFakeSessionStore();
+  const { runner, emit, calls } = makeFakeRunner();
   const getAgent = makeFakeGetAgent([AGENT]);
   const { broadcast, events } = makeFakeBroadcast();
   const control = makeControlPlane({ sessions: store, runner, getAgent, broadcast });
@@ -300,19 +369,58 @@ test("an output event broadcasts agent_output, and every tool_request also broad
     payload: { type: "agent_output", sessionId: session.id, text: "hello from the agent" },
   });
 
-  // Read tools need at least plan mode now (default is no-execution), so grant it so grep is allowed.
+  // Plan mode: a read is AUTO-allowed. It is still ANSWERED to the runner (allow), but its verdict
+  // is NOT broadcast as a tool_decision — reads round-trip through the gate now (pi-runner no longer
+  // skips them), so broadcasting each routine ls/grep would spam the transcript. Only its output
+  // tile shows. (grantExecute itself broadcasts an execute_mode event; that's expected + separate.)
   await control.grantExecute({ sessionId: session.id, byUser: AGENT.ownerSub, scope: "plan" });
   await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" });
-  assert.deepEqual(events[1], {
-    channelId: "chan-1",
-    payload: { type: "tool_decision", sessionId: session.id, tool: "grep", allow: true, reason: "read-only tool (plan mode)" },
+  assert.equal(calls.answerTool.at(-1)?.decision.allow, true); // the runner still got its answer
+  const grepChip = events.find((e) => {
+    const p = e.payload as { type: string; tool?: string };
+    return p.type === "tool_decision" && p.tool === "grep";
   });
+  assert.equal(grepChip, undefined); // no tool_decision chip for the auto-allowed read
 
+  // A DENIED tool (mutate with no execute grant) DOES broadcast — auditable, not hidden.
   await emit(session.id, { type: "tool_request", tool: "bash", requestId: "req-2" });
-  const denyPayload = events[2]?.payload as { type: string; allow: boolean; tool: string };
-  assert.equal(denyPayload.type, "tool_decision");
-  assert.equal(denyPayload.tool, "bash");
-  assert.equal(denyPayload.allow, false); // deny decisions are broadcast too — auditable, not hidden
+  const bashChip = events.find((e) => {
+    const p = e.payload as { type: string; tool?: string };
+    return p.type === "tool_decision" && p.tool === "bash";
+  })?.payload as { allow: boolean } | undefined;
+  assert.equal(bashChip?.allow, false);
+});
+
+test("a DENIED read (no-execution mode) IS broadcast — the agent tried and was blocked", async () => {
+  const { store } = makeFakeSessionStore();
+  const { runner, emit } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const { broadcast, events } = makeFakeBroadcast();
+  const control = makeControlPlane({ sessions: store, runner, getAgent, broadcast });
+  const session = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+
+  // No grant → no-execution mode. Even a read is denied, and that denial surfaces (unlike an allow).
+  await emit(session.id, { type: "tool_request", tool: "grep", requestId: "req-1" });
+  const payload = events[0]?.payload as { type: string; tool: string; allow: boolean };
+  assert.equal(payload.type, "tool_decision");
+  assert.equal(payload.tool, "grep");
+  assert.equal(payload.allow, false);
+});
+
+test("an activity event broadcasts agent_thinking (the channel's thinking indicator)", async () => {
+  const { store } = makeFakeSessionStore();
+  const { runner, emit } = makeFakeRunner();
+  const getAgent = makeFakeGetAgent([AGENT]);
+  const { broadcast, events } = makeFakeBroadcast();
+  const control = makeControlPlane({ sessions: store, runner, getAgent, broadcast });
+  const session = await control.spawn({ agent: AGENT, channelId: "chan-1", hostType: "local" });
+
+  await emit(session.id, { type: "activity", active: true });
+  await emit(session.id, { type: "activity", active: false });
+  assert.deepEqual(events, [
+    { channelId: "chan-1", payload: { type: "agent_thinking", sessionId: session.id, active: true } },
+    { channelId: "chan-1", payload: { type: "agent_thinking", sessionId: session.id, active: false } },
+  ]);
 });
 
 test("status/exit events update session state; exit broadcasts session_ended and further events are ignored", async () => {

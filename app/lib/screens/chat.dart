@@ -107,19 +107,19 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showArchived = false;
   bool _sortByUnread = false;
   final Set<String> _endedSessionIds = {};
-  // Per-session execute mode, tracked live so the coding strip shows whether the agent may make
-  // changes: set when the owner picks a mode; a `once` grant reverts to no-execution on the first
-  // mutating allow (tool_decision), `plan`/`continual` stay until changed, session end resets.
-  final Map<String, ExecuteMode> _executeModeBySession = {};
+  // Execute mode per CHANNEL (i.e. per the channel's coding agent), tracked live so the coding strip
+  // shows whether the agent may make changes. Keyed by channel — NOT session — because the backend
+  // grant is keyed to the agent and survives session respawns; a session-keyed badge went stale the
+  // moment the session was reaped + respawned (a new id), which is why the control "stopped working."
+  // Set optimistically when the owner picks a mode, then reconciled by the authoritative
+  // `execute_mode` broadcast (which also fires when a `once` grant is consumed → back to none).
+  final Map<String, ExecuteMode> _executeModeByChannel = {};
 
-  // Mirrors the backend gate's read-only tool allowlist (src/agent/gate.ts READONLY_TOOLS) so the
-  // client disarms a `once` badge only when a MUTATING tool was allowed — a read doesn't consume a
-  // once grant. The server is the source of truth; this just keeps the badge honest.
-  static const Set<String> _readOnlyTools = {
-    'read', 'view', 'cat', 'open', 'ls', 'list', 'grep', 'search',
-    'find', 'glob', 'tree', 'stat', 'diff', 'show',
-  };
-  bool _isReadOnlyTool(String tool) => _readOnlyTools.contains(tool.trim().toLowerCase());
+  // Whether the channel's coding agent is currently working a turn (pi agent_start→agent_settled),
+  // driven by the `agent_thinking` broadcast — shows a "thinking…" indicator on the coding strip.
+  // Cleared the moment the agent's reply lands (or the session ends), so a silent turn (the agent
+  // chose not to reply) doesn't leave it stuck on.
+  final Map<String, bool> _agentThinkingByChannel = {};
 
   // The seen-users directory (sub -> user), for DM peer names + the DM picker.
   Map<String, User> _usersBySub = {};
@@ -718,24 +718,29 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         case WsAgentOutputEvent(:final sessionId, :final text):
           if (isOpen) _append(channelId, AgentOutputEntry(sessionId: sessionId, text: text));
+          _agentThinkingByChannel[channelId] = false; // the reply landed — stop "thinking…"
         case WsToolDecisionEvent(:final tool, :final allow, :final reason):
           if (isOpen) _append(channelId, ToolDecisionEntry(tool: tool, allow: allow, reason: reason));
-          // A `once` grant authorizes exactly one MUTATING call — the first mutate allow consumes
-          // it, dropping back to no-execution. `continual`/`plan` stay until the owner changes them.
-          // (Reads under a `once` grant don't consume it — the backend only consumes on a mutation —
-          // so keep the badge as `once` on a read allow.)
-          if (allow &&
-              _executeModeBySession[_sessionIdByChannel[channelId]] == ExecuteMode.once &&
-              !_isReadOnlyTool(tool)) {
-            _executeModeBySession[_sessionIdByChannel[channelId]!] = ExecuteMode.none;
-          }
+          // The `once`→`none` downgrade is no longer inferred from a tool_decision here: the backend
+          // consumes the grant and broadcasts an authoritative `execute_mode` (none), handled below.
+        case WsExecuteModeEvent(:final mode):
+          // Authoritative badge sync from the backend grant (agent-keyed), so the coding strip stays
+          // correct across respawns / other tabs / a consumed `once`.
+          _executeModeByChannel[channelId] = mode;
+        case WsAgentThinkingEvent(:final active):
+          _agentThinkingByChannel[channelId] = active;
+        case WsAgentSessionEvent(:final sessionId):
+          // The agent's session was restarted (e.g. a live model change) — rebind to the new id so
+          // the coding strip + grant calls target the live session, not the ended old one.
+          _sessionIdByChannel[channelId] = sessionId;
+          _endedSessionIds.remove(sessionId);
         case WsSessionEndedEvent():
           if (isOpen) {
             final sessionId = _sessionIdByChannel[channelId];
-            if (sessionId != null) {
-              _endedSessionIds.add(sessionId);
-              _executeModeBySession.remove(sessionId);
-            }
+            if (sessionId != null) _endedSessionIds.add(sessionId);
+            _agentThinkingByChannel[channelId] = false;
+            // NB: do NOT clear the execute mode — the grant is keyed to the agent and persists across
+            // the respawn, so the owner's chosen mode carries over to the next session.
             _append(channelId, const SystemEntry('Session ended'));
           }
         case WsUserJoinedEvent():
@@ -1383,14 +1388,21 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (!mounted) return;
-    final choice = await showCodingAgentDialog(context, environments: envs);
+    final choice = await showCodingAgentDialog(
+      context,
+      environments: envs,
+      models: [for (final m in _models) m.id],
+    );
     if (choice == null || !mounted) return;
-    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace);
+    await _createAgent(AgentKind.coding, choice.name, choice.launchEnv, choice.workspace,
+        model: choice.model, reasoning: choice.reasoning);
   }
 
-  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv, [String? workspace]) async {
+  Future<void> _createAgent(AgentKind kind, String name, String? launchEnv,
+      [String? workspace, String? model, bool? reasoning]) async {
     try {
-      final result = await widget.api.createAgent(kind: kind, name: name, launchEnv: launchEnv, workspace: workspace);
+      final result = await widget.api.createAgent(
+          kind: kind, name: name, launchEnv: launchEnv, workspace: workspace, model: model, reasoning: reasoning);
       if (!mounted) return;
       setState(() {
         _agentKindByChannel[result.channel.id] = kind;
@@ -1755,11 +1767,16 @@ class _ChatScreenState extends State<ChatScreen> {
         key: ValueKey(selected.id),
         sessionId: sessionId,
         sessionEnded: _endedSessionIds.contains(sessionId),
+        thinking: _agentThinkingByChannel[selected.id] ?? false,
         canGrant: selected.owned,
-        executeMode: _executeModeBySession[sessionId] ?? ExecuteMode.none,
+        // Badge follows the channel-keyed mode (agent-keyed grant on the backend), so it stays
+        // correct across session respawns rather than tracking a session id that goes stale.
+        executeMode: _executeModeByChannel[selected.id] ?? ExecuteMode.none,
         onSetMode: (mode) async {
-          // Map each mode to a grant scope, or revoke for no-execution; reflect it on an allowed
-          // verdict. plan/once/always are grants; none clears the grant (back to no tools).
+          // Map each mode to a grant scope, or revoke for no-execution. The grant call still passes
+          // the session id — the backend resolves it to the agent (even a stale/ended id) — so the
+          // grant lands on the agent and the live gate honors it. Set the badge optimistically; the
+          // `execute_mode` broadcast reconciles it authoritatively.
           final result = switch (mode) {
             ExecuteMode.none => await widget.api.revokeExecute(sessionId),
             ExecuteMode.plan => await widget.api.grantExecute(sessionId, scope: 'plan'),
@@ -1767,7 +1784,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ExecuteMode.continual => await widget.api.grantExecute(sessionId, scope: 'always'),
           };
           if (result.allow && mounted) {
-            setState(() => _executeModeBySession[sessionId] = mode);
+            setState(() => _executeModeByChannel[selected.id] = mode);
           }
           return result;
         },
@@ -2092,7 +2109,10 @@ class _ChannelHeader extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           ChannelKindBadge(kind: channel.kind, agentKind: agentKind),
-          if (agentKind == AgentKind.assistant &&
+          // The model picker is offered for BOTH assistant and coding agents. For a coding agent,
+          // changing the model restarts its pi session live (backend: PATCH /agents → restartAgent),
+          // since pi's model is fixed at spawn.
+          if ((agentKind == AgentKind.assistant || agentKind == AgentKind.coding) &&
               onModelChanged != null &&
               models.isNotEmpty) ...[
             const SizedBox(width: 12),

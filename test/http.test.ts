@@ -53,7 +53,7 @@ const channelsById = new Map<string, FakeChannel>();
 // channelId -> set of memberRefs (users by sub, agents by id) — populated by addMember, read by
 // isMember. This is the membership-tracking approach the /agents tests below reuse.
 const channelMembers = new Map<string, Set<string>>();
-const agentsByOwner = new Map<string, Array<{ id: string; ownerSub: string; kind: string; name?: string; model?: string; createdAt: string }>>();
+const agentsByOwner = new Map<string, Array<{ id: string; ownerSub: string; kind: string; name?: string; model?: string; reasoning?: boolean; createdAt: string }>>();
 
 // channelId -> messages, seq order (1-based per channel, mirrors MemoryStore) — real enough to
 // back GET .../messages, GET .../threads/:parentId (filtered by parentId), and unreadCount
@@ -290,7 +290,7 @@ const store = {
     const w = outboundById.get(id);
     if (w) { w.lastStatus = status; w.lastError = error ?? undefined; w.lastDeliveryAt = new Date().toISOString(); }
   },
-  async createAgent(input: { ownerSub: string; kind: string; name?: string; model?: string }) {
+  async createAgent(input: { ownerSub: string; kind: string; name?: string; model?: string; reasoning?: boolean }) {
     const agent = { id: `agent-${nextAgentId++}`, ...input, createdAt: new Date().toISOString() };
     const list = agentsByOwner.get(input.ownerSub) ?? [];
     list.push(agent);
@@ -309,11 +309,12 @@ const store = {
     }
     return null;
   },
-  async updateAgentModel(id: string, model: string) {
+  async updateAgent(id: string, patch: { model?: string; reasoning?: boolean }) {
     for (const list of agentsByOwner.values()) {
       const a = list.find((x) => x.id === id);
       if (a) {
-        a.model = model;
+        if (patch.model !== undefined) a.model = patch.model;
+        if (patch.reasoning !== undefined) a.reasoning = patch.reasoning;
         return a;
       }
     }
@@ -370,6 +371,7 @@ const controlCalls = {
   revokeExecute: [] as unknown[],
   sendInput: [] as unknown[],
   getSession: [] as unknown[],
+  restartAgent: [] as unknown[],
 };
 
 const control: AgentControl = {
@@ -400,6 +402,10 @@ const control: AgentControl = {
   },
   async liveSession(channelId) {
     return channelId === fakeSession.channelId ? fakeSession : null;
+  },
+  async restartAgent(agent) {
+    controlCalls.restartAgent.push(agent.id);
+    return fakeSession;
   },
 };
 
@@ -1083,7 +1089,9 @@ test("posting a message in a coding channel forwards it to pi as a JSON envelope
   assert.equal(forwarded[0]!.sessionId, fakeSession.id);
   // Delivered as a JSON envelope naming the sender + their edit authority (pi is primed for this
   // shape at spawn). user-1 owns the agent, so authorized is true.
-  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build", authorized: true });
+  // `addressed` is true because the channel has a single human member (a 1:1 with the agent), so a
+  // reply is always natural — the agent isn't expected to stay silent here.
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "Alice One", message: "run the build", authorized: true, addressed: true });
 });
 
 test("the envelope's authorized flag is false for a non-owner sender (only the owner may trigger edits)", async () => {
@@ -1104,7 +1112,33 @@ test("the envelope's authorized flag is false for a non-owner sender (only the o
   await new Promise((r) => setTimeout(r, 30));
   const forwarded = controlCalls.sendInput.slice(before).map((c) => c as { sessionId: string; text: string });
   assert.equal(forwarded.length, 1);
-  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "user-2", message: "please edit the config", authorized: false });
+  assert.deepEqual(JSON.parse(forwarded[0]!.text), { from: "user-2", message: "please edit the config", authorized: false, addressed: true });
+});
+
+test("in a MULTI-human channel the agent is 'addressed' only when named/@mentioned", async () => {
+  const coder = await store.createAgent({ ownerSub: "user-1", kind: "coding", name: "Builder3" });
+  const chId = "coding-ch-multi";
+  knownChannelIds.add(chId);
+  await store.addMember({ channelId: chId, memberRef: coder.id, memberType: "agent", role: "member" });
+  await store.addMember({ channelId: chId, memberRef: "user-1", memberType: "user", role: "member" });
+  await store.addMember({ channelId: chId, memberRef: "user-2", memberType: "user", role: "member" });
+
+  async function envelopeFor(content: string): Promise<{ addressed: boolean }> {
+    const before = controlCalls.sendInput.length;
+    await fetch(`${controlBaseUrl}/channels/${chId}/messages`, {
+      method: "POST",
+      headers: { authorization: "Bearer good2", "content-type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    return JSON.parse((controlCalls.sendInput.slice(before)[0] as { text: string }).text);
+  }
+
+  // Two humans + no mention → not addressed (the agent decides for itself / stays silent).
+  assert.equal((await envelopeFor("what did everyone think of the demo?")).addressed, false);
+  // Named / @mentioned → addressed.
+  assert.equal((await envelopeFor("hey Builder3, can you run the tests?")).addressed, true);
+  assert.equal((await envelopeFor("@builder3 status?")).addressed, true);
 });
 
 test("POST /sessions/:id/input is 403 for a caller who isn't a participant in the session's channel", async () => {

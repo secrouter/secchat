@@ -819,6 +819,30 @@ final class WsSessionEndedEvent extends WsEvent {
   const WsSessionEndedEvent({required super.channelId});
 }
 
+/// The agent's execute mode changed on the backend (the owner granted/revoked, or a `once` grant was
+/// consumed). Keyed to the AGENT, so it's authoritative across session respawns — the coding strip's
+/// badge follows this rather than tracking a session id that goes stale.
+final class WsExecuteModeEvent extends WsEvent {
+  const WsExecuteModeEvent({required this.agentId, required this.mode, required super.channelId});
+  final String agentId;
+  final ExecuteMode mode;
+}
+
+/// The coding agent started/stopped working a turn (pi agent_start/agent_settled) — drives the
+/// channel's "thinking…" indicator. Ephemeral; never a stored message.
+final class WsAgentThinkingEvent extends WsEvent {
+  const WsAgentThinkingEvent({required this.sessionId, required this.active, required super.channelId});
+  final String sessionId;
+  final bool active;
+}
+
+/// The channel's coding agent got a NEW session id (e.g. after a live model/reasoning change
+/// restarted it). Clients rebind their coding-strip + input routing to this id.
+final class WsAgentSessionEvent extends WsEvent {
+  const WsAgentSessionEvent({required this.sessionId, required super.channelId});
+  final String sessionId;
+}
+
 /// A reaction was added/removed on a message — lets every viewer's chips update live.
 final class WsReactionEvent extends WsEvent {
   const WsReactionEvent({
@@ -961,6 +985,28 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'session_ended':
       return WsSessionEndedEvent(channelId: channelId);
+    case 'agent_thinking':
+      return WsAgentThinkingEvent(
+        sessionId: json['sessionId'] as String? ?? '',
+        active: json['active'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'agent_session':
+      return WsAgentSessionEvent(
+        sessionId: json['sessionId'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'execute_mode':
+      return WsExecuteModeEvent(
+        agentId: json['agentId'] as String? ?? '',
+        mode: switch (json['mode']) {
+          'plan' => ExecuteMode.plan,
+          'once' => ExecuteMode.once,
+          'continual' => ExecuteMode.continual,
+          _ => ExecuteMode.none,
+        },
+        channelId: channelId,
+      );
     case 'reaction':
       return WsReactionEvent(
         op: json['op'] as String? ?? 'add',

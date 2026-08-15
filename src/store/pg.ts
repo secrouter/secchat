@@ -155,6 +155,7 @@ interface AgentRow {
   kind: string;
   name: string | null;
   model: string | null;
+  reasoning: boolean | null;
   workspace: string | null;
   launch_env: string | null;
   created_at: Date;
@@ -277,7 +278,7 @@ interface SessionRow {
 }
 
 interface GrantRow {
-  session_id: string;
+  agent_id: string;
   granted_by: string;
   scope: string;
   turn_id: string | null;
@@ -337,6 +338,7 @@ function rowToAgent(row: AgentRow): Agent {
     kind: row.kind as AgentKind,
     name: row.name ?? undefined,
     model: row.model ?? undefined,
+    reasoning: row.reasoning ?? undefined,
     workspace: row.workspace ?? undefined,
     launchEnv: (row.launch_env as Agent["launchEnv"]) ?? undefined,
     createdAt: iso(row.created_at),
@@ -457,7 +459,7 @@ function rowToSession(row: SessionRow): AgentSession {
 
 function rowToGrant(row: GrantRow): ExecuteGrant {
   return compact({
-    sessionId: row.session_id,
+    agentId: row.agent_id,
     grantedBy: row.granted_by,
     scope: row.scope as ExecuteGrant["scope"],
     turnId: row.turn_id ?? undefined,
@@ -695,25 +697,39 @@ export class PgStore implements Store, SessionStore {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     await this.#pool.query(
-      `INSERT INTO agents (id, owner_sub, kind, name, model, workspace, launch_env, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.workspace ?? null, input.launchEnv ?? null, createdAt],
+      `INSERT INTO agents (id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.reasoning ?? null, input.workspace ?? null, input.launchEnv ?? null, createdAt],
     );
-    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, workspace: input.workspace, launchEnv: input.launchEnv, createdAt });
+    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, reasoning: input.reasoning, workspace: input.workspace, launchEnv: input.launchEnv, createdAt });
   }
 
   async getAgent(id: Id): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE id = $1`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents WHERE id = $1`,
       [id],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
   }
 
-  async updateAgentModel(id: Id, model: string): Promise<Agent | null> {
+  async updateAgent(id: Id, patch: { model?: string; reasoning?: boolean }): Promise<Agent | null> {
+    const sets: string[] = [];
+    const vals: unknown[] = [id];
+    if (patch.model !== undefined) {
+      vals.push(patch.model);
+      sets.push(`model = $${vals.length}`);
+    }
+    if (patch.reasoning !== undefined) {
+      vals.push(patch.reasoning);
+      sets.push(`reasoning = $${vals.length}`);
+    }
+    const cols = "id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at";
+    if (sets.length === 0) {
+      const { rows } = await this.#pool.query<AgentRow>(`SELECT ${cols} FROM agents WHERE id = $1`, [id]);
+      return rows[0] ? rowToAgent(rows[0]) : null;
+    }
     const { rows } = await this.#pool.query<AgentRow>(
-      `UPDATE agents SET model = $2 WHERE id = $1
-       RETURNING id, owner_sub, kind, name, model, workspace, launch_env, created_at`,
-      [id, model],
+      `UPDATE agents SET ${sets.join(", ")} WHERE id = $1 RETURNING ${cols}`,
+      vals,
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
   }
@@ -721,7 +737,7 @@ export class PgStore implements Store, SessionStore {
   /** Owner's agents, creation order (ins_seq). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
       [ownerSub],
     );
     return rows.map(rowToAgent);
@@ -730,7 +746,7 @@ export class PgStore implements Store, SessionStore {
   /** Every agent, creation order, regardless of owner — for the admin / audit-review console. */
   async listAllAgents(): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, workspace, launch_env, created_at FROM agents ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents ORDER BY ins_seq`,
     );
     return rows.map(rowToAgent);
   }
@@ -1531,31 +1547,31 @@ export class PgStore implements Store, SessionStore {
 
   async addGrant(grant: ExecuteGrant): Promise<void> {
     await this.#pool.query(
-      `INSERT INTO execute_grants (session_id, granted_by, scope, turn_id, granted_at, consumed)
+      `INSERT INTO execute_grants (agent_id, granted_by, scope, turn_id, granted_at, consumed)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [grant.sessionId, grant.grantedBy, grant.scope, grant.turnId ?? null, grant.grantedAt, grant.consumed ?? false],
+      [grant.agentId, grant.grantedBy, grant.scope, grant.turnId ?? null, grant.grantedAt, grant.consumed ?? false],
     );
   }
 
   /** The most-recently-added (highest `id` — see 0002_parity.sql), not-yet-consumed grant for this
-   * session — i.e. what agent/gate.ts's evaluateTool() should be checking right now — or undefined
-   * if none. */
-  async activeGrant(sessionId: Id): Promise<ExecuteGrant | undefined> {
+   * AGENT — i.e. what agent/gate.ts's evaluateTool() should be checking right now — or undefined if
+   * none. Keyed to the agent so it survives session respawns (0016_grant_by_agent.sql). */
+  async activeGrant(agentId: Id): Promise<ExecuteGrant | undefined> {
     const { rows } = await this.#pool.query<GrantRow>(
-      `SELECT session_id, granted_by, scope, turn_id, granted_at, consumed
-       FROM execute_grants WHERE session_id = $1 AND consumed = false ORDER BY id DESC LIMIT 1`,
-      [sessionId],
+      `SELECT agent_id, granted_by, scope, turn_id, granted_at, consumed
+       FROM execute_grants WHERE agent_id = $1 AND consumed = false ORDER BY id DESC LIMIT 1`,
+      [agentId],
     );
     return rows[0] ? rowToGrant(rows[0]) : undefined;
   }
 
   /** Marks the current active grant consumed (tombstone, not delete — mirrors redactMessage's
    * approach to Message rows). No-op if there is no active grant. */
-  async consumeGrant(sessionId: Id): Promise<void> {
+  async consumeGrant(agentId: Id): Promise<void> {
     await this.#pool.query(
       `UPDATE execute_grants SET consumed = true
-       WHERE id = (SELECT id FROM execute_grants WHERE session_id = $1 AND consumed = false ORDER BY id DESC LIMIT 1)`,
-      [sessionId],
+       WHERE id = (SELECT id FROM execute_grants WHERE agent_id = $1 AND consumed = false ORDER BY id DESC LIMIT 1)`,
+      [agentId],
     );
   }
 
