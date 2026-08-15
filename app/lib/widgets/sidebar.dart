@@ -217,6 +217,9 @@ class ChatSidebar extends StatelessWidget {
       present: present,
       onTap: () => onSelect(channel),
       onArchive: onArchive == null ? null : () => onArchive!(channel, !channel.archived),
+      // Touch has no hover: in the compact/drawer layout the archive control must be always
+      // visible (the MouseRegion reveal never fires on a phone).
+      alwaysShowActions: compact,
     );
 
     // A DM peer's online state → the rail dot.
@@ -423,6 +426,7 @@ class _ChannelListItem extends StatefulWidget {
     required this.onTap,
     this.onArchive,
     this.present = false,
+    this.alwaysShowActions = false,
   });
 
   final Channel channel;
@@ -437,6 +441,10 @@ class _ChannelListItem extends StatefulWidget {
 
   /// A DM peer who's online — shows a small presence dot on the channel icon.
   final bool present;
+
+  /// Show the archive control without hover — the compact/drawer (touch) layout, where the
+  /// MouseRegion reveal never fires. Desktop keeps the tidy hover-reveal.
+  final bool alwaysShowActions;
 
   @override
   State<_ChannelListItem> createState() => _ChannelListItemState();
@@ -454,7 +462,7 @@ class _ChannelListItemState extends State<_ChannelListItem> {
     final present = widget.present;
     // An archived item is dimmed; its archive control is the "restore" direction.
     final archived = channel.archived;
-    final showArchiveBtn = widget.onArchive != null && (_hovering || archived);
+    final showArchiveBtn = widget.onArchive != null && (_hovering || archived || widget.alwaysShowActions);
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),

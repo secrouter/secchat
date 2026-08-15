@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../formatting.dart';
 import '../marking.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 import 'emoji_picker.dart';
 import 'empty_state.dart';
@@ -827,13 +828,15 @@ class _ReactionChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Roomier on touch: vertical padding grows on compact so the chip is a plausible thumb target.
+    final compact = isCompact(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(999),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 8, vertical: compact ? 6 : 3),
           decoration: BoxDecoration(
             color: mine ? AppColors.accentSoft : AppColors.surfaceAlt,
             border: Border.all(
@@ -898,7 +901,10 @@ class _AddReactionButtonState extends State<_AddReactionButton> {
         onTap: () => controller.isOpen ? controller.close() : controller.open(),
         borderRadius: BorderRadius.circular(999),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompact(context) ? 10 : 6,
+            vertical: isCompact(context) ? 6 : 3,
+          ),
           decoration: BoxDecoration(
             border: Border.all(color: AppColors.border),
             borderRadius: BorderRadius.circular(999),
@@ -959,13 +965,15 @@ class _ThreadChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasReplies = replyCount > 0;
+    final compact = isCompact(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(999),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          // Reply/thread is a primary affordance — needs a real thumb target on touch.
+          padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 6, vertical: compact ? 6 : 2),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1007,12 +1015,16 @@ class _MessageMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Touch needs a real hit area: 22pt is fine for a pointer, hopeless for a thumb. On compact the
+    // box grows toward the 44pt Material minimum (the icon stays small — only the target grows).
+    final compact = isCompact(context);
     return SizedBox(
-      height: 22,
+      height: compact ? 36 : 22,
+      width: compact ? 36 : null,
       child: PopupMenuButton<String>(
         tooltip: 'Message actions',
         padding: EdgeInsets.zero,
-        iconSize: 15,
+        iconSize: compact ? 18 : 15,
         position: PopupMenuPosition.under,
         icon: const Icon(Icons.more_horiz, color: AppColors.textFaint),
         color: AppColors.surfaceRaised,
@@ -1262,18 +1274,23 @@ class _RevealButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Revealing masked classified content is a REQUIRED action for elevated messages — give it a
+    // real touch target on compact (and say "tap", not "click", where there's no mouse).
+    final compact = isCompact(context);
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(4),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        padding: EdgeInsets.symmetric(vertical: compact ? 8 : 3),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(revealed ? Icons.visibility_off_outlined : Icons.lock_outline, size: 14, color: AppColors.textMuted),
             const SizedBox(width: 6),
             Text(
-              revealed ? 'Hide' : '${marking.toUpperCase()} content — click to reveal',
+              revealed
+                  ? 'Hide'
+                  : '${marking.toUpperCase()} content — ${compact ? 'tap' : 'click'} to reveal',
               style: AppFonts.mono(fontSize: 11.5, color: AppColors.textMuted),
             ),
           ],

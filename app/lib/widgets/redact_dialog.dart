@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../responsive.dart';
 import '../theme.dart';
 import 'brand_icon.dart';
 
@@ -56,7 +57,7 @@ class _RedactDialogState extends State<_RedactDialog> {
         ],
       ),
       content: SizedBox(
-        width: 420,
+        width: dialogWidth(context, 420),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,

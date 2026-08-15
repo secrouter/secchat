@@ -684,7 +684,7 @@ void main() {
 
     // A new channel now exists server-side and I've been added to it → live membership event.
     fake.channels = [...fake.channels, const Channel(id: 'c9', kind: ChannelKind.human, name: 'incident-room')];
-    fake.emitWs(const WsMembershipEvent(op: 'add', memberRef: 'dev.alice', role: 'member', channelId: 'c9'));
+    fake.emitWs(const WsMembershipEvent(op: 'add', memberRef: 'dev.alice', role: 'member', channelId: 'c9', by: 'dev.admin'));
     await pumpSettled(tester);
 
     expect(find.text('incident-room'), findsWidgets); // appeared without a manual reload

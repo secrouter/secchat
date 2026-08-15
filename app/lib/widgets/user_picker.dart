@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../formatting.dart';
 import '../models.dart';
+import '../responsive.dart';
 import '../theme.dart';
 
 /// Shows the directory as a searchable picker and resolves to the chosen
@@ -70,7 +71,7 @@ class _UserPickerDialogState extends State<_UserPickerDialog> {
         ),
       ),
       content: SizedBox(
-        width: 420,
+        width: dialogWidth(context, 420),
         height: 430,
         child: Column(
           children: [
