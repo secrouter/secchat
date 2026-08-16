@@ -80,6 +80,69 @@ class CallButton extends StatelessWidget {
   }
 }
 
+/// The self-DM header's solo-record button (voice-memo UX): starts a one-leg
+/// relayed recording of just your own mic (`call_solo_start`) with no peer
+/// involved. Unlike [CallButton] this is NOT presence-gated -- you're always
+/// reachable to yourself -- it only disables while a call/memo is already in
+/// progress anywhere in the app (the same single-flight rule).
+class SoloRecordButton extends StatelessWidget {
+  const SoloRecordButton({super.key, required this.controller, required this.channelId});
+
+  final CallController controller;
+  final String channelId;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final busy = controller.snapshot.phase != CallPhase.idle;
+        return PopupMenuButton<bool>(
+          enabled: !busy,
+          tooltip: busy ? 'Already on a call' : 'Record a voice memo',
+          icon: Icon(
+            Icons.mic_none,
+            size: 17,
+            color: busy ? AppColors.textFaint : AppColors.textMuted,
+          ),
+          color: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+            side: const BorderSide(color: AppColors.border),
+          ),
+          // The popup's `bool` value is `enroll` — whether to also save this
+          // recording as a voiceprint. `wantRecording` is always true here:
+          // there's no point to a solo memo the server doesn't record.
+          onSelected: (enroll) => controller.startSoloRecord(
+            channelId: channelId,
+            wantRecording: true,
+            enroll: enroll,
+          ),
+          itemBuilder: (_) => [
+            const PopupMenuItem<bool>(
+              value: false,
+              child: _CallMenuRow(
+                icon: Icons.fiber_manual_record,
+                iconColor: AppColors.bad,
+                label: 'Record memo',
+                detail: 'Transcribed into this chat',
+              ),
+            ),
+            const PopupMenuItem<bool>(
+              value: true,
+              child: _CallMenuRow(
+                icon: Icons.fingerprint,
+                label: 'Record & save my voiceprint',
+                detail: 'Also enrolls your voice for ID',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _CallMenuRow extends StatelessWidget {
   const _CallMenuRow({
     required this.icon,

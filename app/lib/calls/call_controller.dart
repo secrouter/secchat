@@ -44,6 +44,14 @@ enum CallPhase {
   /// Media is flowing.
   active,
 
+  /// A self-DM voice memo is being recorded (`call_solo_start` ->
+  /// `call_accept(solo: true)` -> the relayed offer path, same as `active`
+  /// but one-leg and never a peer/2-party call): the ● REC overlay with its
+  /// Stop button is up. Covers both negotiating and actually recording --
+  /// unlike the peer flow there's no separate callee to distinguish a
+  /// "ringing" sub-phase for.
+  recordingMemo,
+
   /// The call just ended -- shown briefly so the reason (missed/declined/
   /// hung up/disconnected) registers, then [CallController.dismiss] returns
   /// to idle.
@@ -209,6 +217,18 @@ abstract class CallController extends ChangeNotifier {
     required bool wantRecording,
   });
 
+  /// Start recording a self-DM voice memo in [channelId] (`call_solo_start`)
+  /// -- a one-leg relayed recording of just this connection's mic, no peer
+  /// involved. [wantRecording] mirrors [startCall]'s ask (mediad records
+  /// regardless in practice, but the frame carries it for symmetry with the
+  /// 2-party contract); [enroll] additionally asks the server to save this
+  /// recording as the caller's voiceprint enrollment.
+  Future<void> startSoloRecord({
+    required String channelId,
+    required bool wantRecording,
+    bool enroll = false,
+  });
+
   /// Answer a ringing INBOUND call (`call_accept`). [consent] is the
   /// recording-consent decision.
   Future<void> accept({required bool consent});
@@ -304,6 +324,25 @@ class WebrtcCallController extends CallController {
       ),
     );
     api.sendCallInvite(channelId, wantRecording: wantRecording);
+  }
+
+  @override
+  Future<void> startSoloRecord({
+    required String channelId,
+    required bool wantRecording,
+    bool enroll = false,
+  }) async {
+    if (_snapshot.phase != CallPhase.idle) return; // already on a call/memo — the UI gates this too
+    _acceptConfirmed = false;
+    _emit(
+      CallSnapshot(
+        phase: CallPhase.recordingMemo,
+        channelId: channelId,
+        amCaller: true,
+        wantRecording: wantRecording,
+      ),
+    );
+    api.sendCallSoloStart(channelId, wantRecording: wantRecording, enroll: enroll);
   }
 
   @override
@@ -409,8 +448,12 @@ class WebrtcCallController extends CallController {
     switch (event) {
       case WsCallInviteEvent(:final channelId, :final from, :final wantRecording):
         _onInvite(channelId, from, wantRecording);
-      case WsCallAcceptEvent(:final channelId, :final consent, :final mode):
-        _onAccept(channelId, consent, mode);
+      case WsCallAcceptEvent(:final channelId, :final consent, :final mode, :final solo):
+        if (solo) {
+          _onSoloAccept(channelId, mode);
+        } else {
+          _onAccept(channelId, consent, mode);
+        }
       case WsCallTakenEvent(:final channelId):
         _onTaken(channelId);
       case WsCallSdpEvent(:final channelId, :final sdpType, :final sdp):
@@ -495,6 +538,19 @@ class WebrtcCallController extends CallController {
     unawaited(_beginMedia());
   }
 
+  /// The server's confirmation that THIS connection's `call_solo_start` took
+  /// hold (`call_accept(solo: true)`, always `mode: relayed` -- there's no
+  /// peer to negotiate p2p with). [startSoloRecord] already put us in
+  /// [CallPhase.recordingMemo]; just record the confirmed mode and drive
+  /// [_beginMedia] down the SAME relayed offer path a 2-party call uses (its
+  /// `mode == CallMode.relayed` branch doesn't care who's on the other end).
+  void _onSoloAccept(String channelId, CallMode mode) {
+    if (_snapshot.channelId != channelId || _snapshot.phase != CallPhase.recordingMemo) return;
+    _acceptConfirmed = true;
+    _emit(_snapshot.copyWith(mode: mode));
+    unawaited(_beginMedia());
+  }
+
   void _onTaken(String channelId) {
     if (_snapshot.channelId != channelId) return;
     // Normal case: still on the ring screen, never accepted (or a different
@@ -544,6 +600,11 @@ class WebrtcCallController extends CallController {
       'not_ringing' => 'That call is no longer ringing',
       'mediad_broker_failed' => 'Call setup failed',
       'frame_too_large' => 'Call signaling error',
+      // `call_solo_start` (self-DM voice memo) codes -- registry.ts's `startSolo`.
+      'not_dm' => 'Voice memos are only available in a DM',
+      'not_member' => 'You are not a member of this channel',
+      'not_self_dm' => 'Voice memos are only available in your own notes',
+      'recording_unavailable' => 'The recording service is unavailable',
       _ => 'Call error',
     };
     return detail == null ? '$friendly ($error)' : '$friendly: $detail ($error)';
@@ -701,8 +762,14 @@ class WebrtcCallController extends CallController {
   }
 
   void _markActive() {
-    if (_snapshot.phase != CallPhase.connecting) return;
-    _emit(_snapshot.copyWith(phase: CallPhase.active, connectedAt: DateTime.now()));
+    if (_snapshot.phase == CallPhase.connecting) {
+      _emit(_snapshot.copyWith(phase: CallPhase.active, connectedAt: DateTime.now()));
+    } else if (_snapshot.phase == CallPhase.recordingMemo && _snapshot.connectedAt == null) {
+      // No separate "recording" sub-phase to advance to (see [CallPhase.recordingMemo]'s doc) --
+      // just start the ● REC overlay's duration clock, same signal the 2-party path uses to flip
+      // connecting -> active.
+      _emit(_snapshot.copyWith(connectedAt: DateTime.now()));
+    }
   }
 
   /// A local-only failure (mic permission denied, negotiation error,
@@ -716,7 +783,13 @@ class WebrtcCallController extends CallController {
   void _fail(String message) {
     final channelId = _snapshot.channelId;
     if (channelId != null &&
-        (_snapshot.phase == CallPhase.connecting || _snapshot.phase == CallPhase.active)) {
+        (_snapshot.phase == CallPhase.connecting ||
+            _snapshot.phase == CallPhase.active ||
+            // A solo memo's registry entry goes "active" server-side synchronously with
+            // `call_solo_start` (registry.ts's `startSolo`), before our `call_accept(solo:
+            // true)` echo even lands — so a local failure here (e.g. mic denied) already
+            // needs to tell the server, just like the 2-party connecting/active cases above.
+            _snapshot.phase == CallPhase.recordingMemo)) {
       api.sendCallEnd(channelId);
     }
     _endLocally(CallEndReason.failed, errorMessage: message);

@@ -111,6 +111,11 @@ abstract class ApiClient {
   /// so calling this for an existing DM just returns it.
   Future<Channel> createDm(String userSub);
 
+  /// Opens — or reuses — the caller's own self-DM ("notes to self", `POST
+  /// /self-dm`): a `kind: dm` channel with a SINGLE member (you), home to
+  /// solo voice memos. Idempotent: always the same channel for this user.
+  Future<Channel> openSelfDm();
+
   Future<List<Message>> getMessages(String channelId);
 
   /// A cursor page of a channel's messages: the most recent [limit] (ascending),
@@ -340,6 +345,13 @@ abstract class ApiClient {
   /// Hang up / end the call in [channelId] (`call_end`).
   void sendCallEnd(String channelId);
 
+  /// Start a solo voice-memo recording in [channelId] (`call_solo_start`,
+  /// self-DM only): the server starts a one-leg relayed recording of just
+  /// this connection's mic and replies with a `call_accept` echo carrying
+  /// `solo: true`. [enroll] optionally asks the server to also save this
+  /// recording as the caller's voiceprint enrollment.
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll});
+
   /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
   /// arrive as `presence` WS events.
   Future<List<String>> getPresence();
@@ -566,6 +578,10 @@ class HttpApiClient implements ApiClient {
   Future<Channel> createDm(String userSub) async => Channel.fromJson(
     await _post('/dm', {'user': userSub}) as Map<String, dynamic>,
   );
+
+  @override
+  Future<Channel> openSelfDm() async =>
+      Channel.fromJson(await _post('/self-dm') as Map<String, dynamic>);
 
   @override
   Future<List<Message>> getMessages(String channelId) async {
@@ -972,6 +988,16 @@ class HttpApiClient implements ApiClient {
   @override
   void sendCallEnd(String channelId) {
     _sendCallFrame({'type': 'call_end', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll}) {
+    _sendCallFrame({
+      'type': 'call_solo_start',
+      'channelId': channelId,
+      'wantRecording': wantRecording,
+      if (enroll != null) 'enroll': enroll,
+    });
   }
 
   @override

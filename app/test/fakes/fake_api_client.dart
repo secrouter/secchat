@@ -63,6 +63,11 @@ class FakeApiClient implements ApiClient {
   /// Every `createDm` call, in order, as the target user sub.
   final List<String> createDmCalls = [];
 
+  /// Incremented on each `openSelfDm` call. The self-DM channel returned is
+  /// idempotent, like [createDm] -- the same one every time.
+  int openSelfDmCalls = 0;
+  Channel? _selfDm;
+
   /// Every `grantExecute` call, in order.
   final List<String> grantExecuteCalls = [];
 
@@ -316,6 +321,7 @@ class FakeApiClient implements ApiClient {
   final List<({String channelId, String candidate, String? sdpMid, int? sdpMLineIndex})>
   callCandidateCalls = [];
   final List<String> callEndCalls = [];
+  final List<({String channelId, bool wantRecording, bool? enroll})> callSoloStartCalls = [];
 
   @override
   void sendCallInvite(String channelId, {required bool wantRecording}) =>
@@ -344,6 +350,10 @@ class FakeApiClient implements ApiClient {
 
   @override
   void sendCallEnd(String channelId) => callEndCalls.add(channelId);
+
+  @override
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll}) =>
+      callSoloStartCalls.add((channelId: channelId, wantRecording: wantRecording, enroll: enroll));
 
   @override
   Future<List<String>> getPresence() async {
@@ -647,6 +657,23 @@ class FakeApiClient implements ApiClient {
       members: [me.sub, userSub],
     );
     _dmByPeer[userSub] = channel;
+    channels = [...channels, channel];
+    return channel;
+  }
+
+  @override
+  Future<Channel> openSelfDm() async {
+    _maybeThrow('openSelfDm');
+    openSelfDmCalls++;
+    final existing = _selfDm;
+    if (existing != null) return existing;
+    final channel = Channel(
+      id: 'self-dm-1',
+      kind: ChannelKind.dm,
+      name: '',
+      members: [me.sub],
+    );
+    _selfDm = channel;
     channels = [...channels, channel];
     return channel;
   }

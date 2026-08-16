@@ -237,6 +237,12 @@ class Channel {
     return null;
   }
 
+  /// True for the caller's own self-DM ("notes to self", `POST /self-dm`) --
+  /// a `kind: dm` channel with a single member (you), so [peer] resolves to
+  /// null. This is the gate the solo-record button and its rail label key
+  /// off of (voice-memo UX).
+  bool isSelfDm(String me) => kind == ChannelKind.dm && peer(me) == null;
+
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
     id: json['id'] as String,
     kind: ChannelKind.fromWire(json['kind'] as String?),
@@ -1020,14 +1026,21 @@ final class WsCallInviteEvent extends WsEvent {
 /// `mode` may read `p2p` even though `consent` is true -- the mediad-down
 /// downgrade case (voice-contracts.md §1.2, plan §2.3) -- the UI must treat
 /// that as "recording unavailable", not silently drop the notice.
+///
+/// [solo] is set on the confirmation echo to a `call_solo_start` (self-DM
+/// voice memo): there's no callee to consent, `mode` is always `relayed`, and
+/// [WebrtcCallController] routes it to the solo-record flow instead of the
+/// normal caller/callee accept handling.
 final class WsCallAcceptEvent extends WsEvent {
   const WsCallAcceptEvent({
     required this.consent,
     required this.mode,
+    this.solo = false,
     required super.channelId,
   });
   final bool consent;
   final CallMode mode;
+  final bool solo;
 }
 
 /// A different tab already answered this ringing call -- dismiss the local
@@ -1237,6 +1250,7 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsCallAcceptEvent(
         consent: json['consent'] as bool? ?? false,
         mode: CallMode.fromWire(json['mode'] as String?),
+        solo: json['solo'] as bool? ?? false,
         channelId: channelId,
       );
     case 'call_taken':

@@ -1386,13 +1386,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Opens — or creates — the caller's own self-DM ("notes to self", `POST
+  /// /self-dm`), the home for solo voice memos, and selects it like any DM.
+  Future<void> _handleOpenSelfDm() async {
+    try {
+      final channel = await widget.api.openSelfDm();
+      if (!mounted) return;
+      setState(() {
+        if (!_channels.any((c) => c.id == channel.id)) {
+          _channels = [..._channels, channel];
+        }
+      });
+      await _selectChannel(channel);
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
   /// The header/title for [channel]: a DM shows the other participant's name
   /// (from the directory), everything else shows its channel name.
   String _channelTitle(Channel channel) {
     if (channel.kind == ChannelKind.dm) {
       final peer = channel.peer(widget.principal.sub);
       if (peer != null) return _usersBySub[peer]?.label ?? peer;
-      return channel.name.isEmpty ? 'Direct message' : channel.name;
+      return channel.name.isEmpty ? 'Notes to self' : channel.name;
     }
     return channel.name.isEmpty ? '(unnamed)' : channel.name;
   }
@@ -1489,6 +1506,7 @@ class _ChatScreenState extends State<ChatScreen> {
       },
       onNewChannel: _handleNewChannel,
       onNewDm: _handleNewDm,
+      onOpenSelfDm: _handleOpenSelfDm,
       onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
       onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
       onArchive: _archiveChannel,
@@ -1702,13 +1720,17 @@ class _ChatScreenState extends State<ChatScreen> {
     return '$kind · $n ${n == 1 ? 'member' : 'members'}';
   }
 
-  /// The DM header's call button (voice-calls-plan.md §3.3), or null for a
-  /// non-DM channel. Presence-aware: [CallButton] itself disables when the
-  /// peer is offline or a call is already in progress.
+  /// The DM header's call control (voice-calls-plan.md §3.3), or null for a
+  /// non-DM channel. A normal 2-party DM gets the presence-aware [CallButton];
+  /// the caller's own self-DM ([Channel.isSelfDm] -- a `dm` channel with no
+  /// peer) gets [SoloRecordButton] instead, which starts a solo voice-memo
+  /// recording rather than ringing anyone.
   Widget? _callButtonFor(Channel channel) {
     if (channel.kind != ChannelKind.dm) return null;
     final peer = channel.peer(widget.principal.sub);
-    if (peer == null) return null;
+    if (peer == null) {
+      return SoloRecordButton(controller: _callController, channelId: channel.id);
+    }
     return CallButton(
       controller: _callController,
       channelId: channel.id,

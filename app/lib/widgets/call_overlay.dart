@@ -60,6 +60,13 @@ class CallOverlay extends StatelessWidget {
                   labelForSub: labelForSub,
                 ),
               ),
+            if (snap.phase == CallPhase.recordingMemo)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _MemoRecordingBar(controller: controller),
+              ),
             if (snap.phase == CallPhase.ended)
               Positioned(
                 left: 0,
@@ -426,6 +433,99 @@ class _CallBarState extends State<_CallBar> {
   }
 }
 
+/// Minimal in-progress bar for a self-DM voice memo ([CallPhase.recordingMemo]):
+/// just the ● REC indicator, elapsed duration, and a Stop button (`call_end`)
+/// -- no peer name, no mute, no remote-audio UI (there's no peer to mute for
+/// or hear back from; [MediaSession] records server-side and sends nothing
+/// back, per [WebrtcCallController.buildRemoteAudioSink]'s `isLive` gate).
+class _MemoRecordingBar extends StatefulWidget {
+  const _MemoRecordingBar({required this.controller});
+
+  final CallController controller;
+
+  @override
+  State<_MemoRecordingBar> createState() => _MemoRecordingBarState();
+}
+
+class _MemoRecordingBarState extends State<_MemoRecordingBar> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    // Same per-second tick as [_CallBarState] -- the duration display needs
+    // to advance even though the controller only notifies on state changes.
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final snap = widget.controller.snapshot;
+    final compact = isCompact(context);
+    final elapsed = snap.connectedAt == null
+        ? null
+        : DateTime.now().difference(snap.connectedAt!);
+
+    return Material(
+      color: AppColors.surfaceRaised,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 12 : 20,
+            vertical: 10,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: AppColors.bad,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Recording voice memo…',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.text,
+                  ),
+                ),
+              ),
+              if (elapsed != null) ...[
+                Text(
+                  _fmtDuration(elapsed),
+                  style: AppFonts.mono(fontSize: 12, color: AppColors.textFaint),
+                ),
+                const SizedBox(width: 10),
+              ],
+              TextButton.icon(
+                onPressed: widget.controller.hangUp,
+                style: TextButton.styleFrom(foregroundColor: AppColors.bad),
+                icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                label: const Text('Stop'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A brief "call ended" / "missed call" / failure banner shown once, then
 /// dismissed (tap or [CallController.dismiss]).
 class _CallEndedBanner extends StatelessWidget {
@@ -459,6 +559,10 @@ class _CallEndedBanner extends StatelessWidget {
                   child: Text(
                     failed && snap.errorMessage != null
                         ? snap.errorMessage!
+                        // A solo memo has no peer (voice-memo UX) -- drop the " — <peer>" suffix
+                        // rather than showing it dangling empty.
+                        : peer.isEmpty
+                        ? _endReasonLabel(snap.endReason)
                         : '${_endReasonLabel(snap.endReason)} — $peer',
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

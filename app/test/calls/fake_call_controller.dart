@@ -20,6 +20,7 @@ class FakeCallController extends CallController {
   }
 
   final List<({String channelId, String peerSub, bool wantRecording})> startCalls = [];
+  final List<({String channelId, bool wantRecording, bool enroll})> startSoloRecordCalls = [];
   final List<bool> acceptCalls = [];
   int declineOrCancelCalls = 0;
   int hangUpCalls = 0;
@@ -38,6 +39,15 @@ class FakeCallController extends CallController {
     required bool wantRecording,
   }) async {
     startCalls.add((channelId: channelId, peerSub: peerSub, wantRecording: wantRecording));
+  }
+
+  @override
+  Future<void> startSoloRecord({
+    required String channelId,
+    required bool wantRecording,
+    bool enroll = false,
+  }) async {
+    startSoloRecordCalls.add((channelId: channelId, wantRecording: wantRecording, enroll: enroll));
   }
 
   @override
