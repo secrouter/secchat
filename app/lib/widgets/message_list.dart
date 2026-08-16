@@ -435,8 +435,11 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A "system" message (voice-call transcripts, voice-calls-plan.md §8 O4) has no human/agent
+    // sub to resolve through the directory, so it shares the agent byline treatment below.
     final isAgent = message.authorType == AuthorType.agent;
-    final authorColor = isAgent || isOwn ? AppColors.accent : AppColors.text;
+    final isServicePrincipal = isAgent || message.authorType == AuthorType.system;
+    final authorColor = isServicePrincipal || isOwn ? AppColors.accent : AppColors.text;
     final promptedBy = message.promptedBy;
 
     // Your own messages sit on the right in a filled bubble (avatar on the
@@ -454,10 +457,10 @@ class _MessageBubble extends StatelessWidget {
           children: [
             Flexible(
               child: Text(
-                // An agent's ref isn't in the user directory, so its byline uses the agent's own
-                // display name (carried on the message) and falls back to the ref only if unset;
-                // a human's sub resolves through the directory.
-                isAgent
+                // An agent's (or the system principal's) ref isn't in the user directory, so its
+                // byline uses its own display name (carried on the message) and falls back to the
+                // ref only if unset; a human's sub resolves through the directory.
+                isServicePrincipal
                     ? (message.displayName?.isNotEmpty == true ? message.displayName! : message.authorRef)
                     : labelForSub(message.authorRef),
                 overflow: TextOverflow.ellipsis,

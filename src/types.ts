@@ -45,7 +45,11 @@ export interface AuthGateway {
 
 export type ChannelKind = "human" | "agent" | "dm";
 export type MemberType = "user" | "agent";
-export type AuthorType = "user" | "agent";
+/** `"system"` (voice-calls plan §8 O4) is the ONE deliberate type-model extension for calls: the
+ * service principal that authors a call transcript (both participants are named IN the body, not
+ * via authorRef — see `governedCallAppend`, governance/append.ts). Never a channel member/author a
+ * human or agent picks; only the transcript-post path uses it. */
+export type AuthorType = "user" | "agent" | "system";
 export type AgentKind = "assistant" | "coding";
 
 export interface Channel {
@@ -347,6 +351,158 @@ export interface OutboundWebhook {
   lastDeliveryAt?: string;
 }
 
+// ── Voice calls: 1:1 DM calls (docs/plans/voice-calls-plan.md, v3.1) ─────────────────────────────
+// DMs only (D5). One active call per DM channel, tracked server-side by CallRegistry
+// (src/calls/registry.ts). `mode` is fixed at ACCEPT time (§2.1 — the O5 deferral: no mid-call
+// P2P<->relay migration) and `recording` mirrors secchat-mediad's ACTUAL writer state (§2.3 — so
+// ● REC is truthful by construction, never a client-side guess). See db/migrations/0019_calls.sql
+// for the durable schema and docs/plans/voice-contracts.md for the non-TS (Go/Dart/deploy) wire
+// contract these types summarize on the TS side.
+
+/** CallRegistry's live view of a call (§2.1). NOT a `calls` row field — a ringing call that's
+ * declined/missed/glare-lost never gets a durable row (only the audited `call.*` events record
+ * it); a row exists from `active` onward (see {@link CallRow}). */
+export type CallState = "ringing" | "active" | "ended";
+
+/** Fixed at accept time (§2.1). `"p2p"`: pure client<->client DTLS-SRTP, the server never sees
+ * media — always the mode when consent is false (D4). `"relayed"`: both legs connect to
+ * secchat-mediad, which records — only when the callee grants recording consent (D3). */
+export type CallMode = "p2p" | "relayed";
+
+/** secchat-mediad's ACTUAL recording-writer state for the call (§2.3), reported to the backend and
+ * broadcast to both UIs. `"none"` for the entire duration of a p2p call (mediad is never involved)
+ * and before a relayed call's recording writer has actually started. */
+export type CallRecordingState = "none" | "on";
+
+/** caller -> server: start a call in a DM. The server validates DM membership + single-flight (one
+ * call per channel, one per user), audits `call.start`, then re-broadcasts as
+ * {@link CallInviteBroadcast} to every one of the callee's live connections (all tabs ring). */
+export interface CallInviteFrame {
+  type: "call_invite";
+  channelId: Id;
+  wantRecording: boolean;
+}
+/** server -> callee (every live connection). */
+export interface CallInviteBroadcast {
+  type: "call_invite";
+  channelId: Id;
+  from: string; // caller's Principal.sub
+  wantRecording: boolean;
+}
+
+/** callee -> server: the FIRST `call_accept` on a ringing call wins and is bound to that ONE
+ * connection (§2.1's connection-scoped routing — pins the audited consent to the tab the human
+ * actually used); the rest of the callee's connections get {@link CallTakenFrame}. `consent` (D3),
+ * not `wantRecording`, decides the call's `mode` — false always yields p2p, even when the caller
+ * asked to record. */
+export interface CallAcceptFrame {
+  type: "call_accept";
+  channelId: Id;
+  consent: boolean;
+}
+/** server -> the caller's bound connection: the call is now `active` and `mode` is fixed. */
+export interface CallAcceptedFrame {
+  type: "call_accept";
+  channelId: Id;
+  consent: boolean;
+  mode: CallMode;
+}
+
+/** server -> every callee connection that did NOT win the `call_accept` race (multi-tab ring). */
+export interface CallTakenFrame {
+  type: "call_taken";
+  channelId: Id;
+}
+
+/** Either bound connection -> server -> the other: SDP offer/answer relay (§2.1/§2.2).
+ * `mode: "p2p"` — a dumb client<->client relay (the user-to-user covert-channel path bounded by
+ * per-frame size + rate caps, §2.1/§4). `mode: "relayed"` — the backend TERMINATES this client's
+ * SDP and brokers it against secchat-mediad's control API (MediadClient.offerLeg, a single-response
+ * non-trickle exchange, §2.3); the client still only ever sees `call_sdp` frames, never mediad's
+ * URL/token. */
+export interface CallSdpFrame {
+  type: "call_sdp";
+  channelId: Id;
+  sdpType: "offer" | "answer";
+  sdp: string;
+}
+
+/** p2p mode only — relayed mode's mediad exchange is non-trickle (§2.2), so no candidate trickling
+ * ever crosses the backend for a relayed call. Either bound connection -> server -> the other,
+ * size/rate-capped like {@link CallSdpFrame}. */
+export interface CallCandidateFrame {
+  type: "call_candidate";
+  channelId: Id;
+  candidate: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+}
+
+/** Either side -> server -> the other: hang up. Also the server's OWN signal when a bound
+ * connection drops (the `untrackConnection` teardown hook, §2.1) — `byDisconnect` distinguishes an
+ * explicit hangup from a socket-drop teardown for the UI's messaging. */
+export interface CallEndFrame {
+  type: "call_end";
+  channelId: Id;
+  byDisconnect?: boolean;
+}
+
+/** server -> both DM members: the ringing call's timeout (default 45s, §2.1) expired unanswered.
+ * The LIVE signal so an open ring screen dismisses itself immediately; companion to the
+ * content-free `call.start`/audit trail and the `call_missed` chat line the server posts into the
+ * DM (a normal message, not this frame). */
+export interface CallMissedFrame {
+  type: "call_missed";
+  channelId: Id;
+}
+
+/** server -> both bound connections: mediad's ACTUAL recording-writer state changed (§2.3 — the
+ * truthful ● REC signal, mirrored onto the `calls` row via `Store.setCallRecording`). p2p calls
+ * never emit this (mediad is never involved, `recording` stays `"none"` for their whole duration).
+ * See docs/plans/voice-contracts.md §1.2 for the exact wire shape + when the server sends it
+ * (piggybacked on the offer/answer broker round trip rather than a separate poll loop). */
+export interface CallRecordingFrame {
+  type: "call_recording";
+  channelId: Id;
+  recording: CallRecordingState;
+}
+
+/** The durable record of a call (db/migrations/0019_calls.sql), from `active` onward — a ringing
+ * call that's declined/missed/glare-lost never gets one (only the audited `call.*` events + a
+ * `call_missed`/decline chat line record it). `consent`/`mode` are fixed at creation and never
+ * change (§2.1 O5 deferral). `recordingAttachmentId`/`transcriptMessageId` are set as the §2.4
+ * post-call pipeline progresses (server-side attachment ingest, then the governed transcript post)
+ * — both unset forever for an unrecorded (`mode: "p2p"`) call. */
+export interface CallRow {
+  id: Id;
+  channelId: Id;
+  caller: string; // Principal.sub
+  callee: string; // Principal.sub
+  startedAt: string; // ISO-8601 UTC — when the call went `active` (first call_accept)
+  endedAt?: string; // ISO-8601 UTC — set on call_end / bound-connection-drop teardown
+  consent: boolean; // the callee's recording-consent outcome (D3/D4)
+  mode: CallMode;
+  recording: CallRecordingState; // mirrors mediad's actual writer state (§2.3); "none" for p2p
+  recordingAttachmentId?: Id; // set once the server-side-assembled mixed recording is ingested
+  transcriptMessageId?: Id; // set once governedCallAppend posts the merged transcript
+  /** mediad's own session id (docs/plans/voice-contracts.md §2.1's `POST /sessions` response),
+   * persisted right after `MediadClient.createSession` succeeds in `CallRegistry.accept()` (§2.4 v3.1
+   * REQUIRED #5 — the "relocated durability item"). Unset for a `mode: "p2p"` call (no mediad
+   * session ever exists) and for a relayed call whose `createSession` itself failed (the mid-accept
+   * downgrade to p2p, §2.3). This is what lets a startup-reconciliation sweep
+   * (mediad-client.ts's `reconcileUnclaimedSessions`) match an ended-but-unclaimed `calls` row back
+   * to its on-disk session directory WITHOUT guessing — the gap the v3.1 review flagged. */
+  mediadSessionId?: string;
+}
+
+export interface CreateCallInput {
+  channelId: Id;
+  caller: string;
+  callee: string;
+  consent: boolean;
+  mode: CallMode;
+}
+
 export interface AppendAuditInput {
   actor: string;
   action: string;
@@ -495,6 +651,35 @@ export interface Store {
   getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null>;
   deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean>; // revoke; false if not in this channel
   recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void>; // stamp last*
+
+  // Calls (1:1 DM voice calls — db/migrations/0019_calls.sql; see the "Voice calls" section above).
+  // CallRegistry (src/calls/registry.ts) owns the live ringing/active state machine; these persist
+  // the durable record from `active` onward and back §2.4's post-call pipeline.
+  /** Create the durable row for a call that just went `active` (first `call_accept`) — `consent`/
+   * `mode` are fixed here and never change. `startedAt` is stamped now (server clock). */
+  createCall(input: CreateCallInput): Promise<CallRow>;
+  /** Stamp `endedAt` (call_end, or the bound-connection-drop teardown). Idempotent-in-spirit is the
+   * caller's job (CallRegistry ends a call at most once); implementations may fail closed on an
+   * already-ended row, matching redactMessage's one-way-tombstone style. */
+  endCall(id: Id, endedAt: string): Promise<CallRow>;
+  getCall(id: Id): Promise<CallRow | null>;
+  /** Mirror mediad's actual recording-writer state onto the row (§2.3) — read by a reconnecting
+   * client's ● REC and stamped into the eventual transcript header, so both stay truthful across a
+   * backend restart (not just a live broadcast). */
+  setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow>;
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment) — called once, right after `MediadClient.createSession` succeeds in `accept()`. */
+  setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow>;
+  /** Claim the server-side-assembled mixed recording as this call's attachment (§2.4 ingest step,
+   * after blobs.write + addAttachment — this just links the attachment id onto the call row). */
+  setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow>;
+  /** Record the posted transcript message id (§2.4's final step, after governedCallAppend). */
+  setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow>;
+  /** Ended calls with no `recordingAttachmentId` yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5). The caller (mediad-client.ts's `reconcileUnclaimedSessions`) further
+   * filters to rows whose mediad session directory still exists on the shared volume; an unrecorded
+   * (`mode: "p2p"`) call has no mediad session and is naturally never actionable here. */
+  listUnclaimedEndedCalls(): Promise<CallRow[]>;
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

@@ -34,10 +34,20 @@ enum ChannelKind {
 
 enum AuthorType {
   user,
-  agent;
+  agent,
 
-  static AuthorType fromWire(String? raw) =>
-      raw == 'agent' ? AuthorType.agent : AuthorType.user;
+  /// The service principal that posts governed content on nobody's behalf --
+  /// today, exactly the voice-call transcript (voice-calls-plan.md §8 O4,
+  /// §2.4: `governedCallAppend` authors as `"system"`). Rendered like an
+  /// agent message (accent byline, `displayName`-first label) since there's
+  /// no human `authorRef` to resolve through the directory.
+  system;
+
+  static AuthorType fromWire(String? raw) => switch (raw) {
+    'agent' => AuthorType.agent,
+    'system' => AuthorType.system,
+    _ => AuthorType.user,
+  };
 }
 
 /// The two agent kinds the backend accepts from `POST /agents`.
@@ -68,6 +78,7 @@ class Principal {
     this.email,
     this.marking = MarkingPolicy.fallback,
     this.serverIsAdmin,
+    this.callStunUrls = const [],
   });
 
   final String sub;
@@ -90,6 +101,12 @@ class Principal {
   /// the banners, the composer's marking picker, and local rank comparisons.
   final MarkingPolicy marking;
 
+  /// STUN server URL(s) for voice calls' p2p ICE gathering (`GET /me`'s
+  /// `callStunUrls`, `SECCHAT_CALL_STUN` -- voice-calls-plan.md A3/§2.5,
+  /// finding #4). Empty ⇒ no STUN configured for this deployment; a p2p call
+  /// then relies entirely on host/peer-reflexive candidates.
+  final List<String> callStunUrls;
+
   bool get isAdmin => serverIsAdmin ?? groups.contains('secchat-admins');
 
   /// A human label for the top bar etc.: the display name, else the email, else
@@ -111,6 +128,9 @@ class Principal {
         ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
         : MarkingPolicy.fallback,
     serverIsAdmin: json['isAdmin'] as bool?,
+    callStunUrls: (json['callStunUrls'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => e.toString())
+        .toList(),
   );
 }
 
@@ -962,6 +982,133 @@ final class WsUserJoinedEvent extends WsEvent {
   const WsUserJoinedEvent() : super(channelId: '');
 }
 
+// ── Voice calls (docs/plans/voice-contracts.md §1) ──────────────────────
+//
+// `call_*` frames ride the SAME authenticated WS hub (no new connection) --
+// see [ApiClient.subscribeAll] + the `sendCall*` helpers below. Every frame
+// carries `channelId` (the DM the call belongs to), matching the rest of the
+// hub's frame shape. This section MUST stay in sync with
+// docs/plans/voice-contracts.md §1 -- change one, change the other.
+
+/// The recording-consent-fixed transport mode for an accepted call
+/// (voice-contracts.md §1.2 `call_accept`'s `mode`). Fixed for the life of
+/// the call -- no mid-call renegotiation (plan O5).
+enum CallMode {
+  p2p,
+  relayed;
+
+  static CallMode fromWire(String? raw) => raw == 'relayed' ? CallMode.relayed : CallMode.p2p;
+}
+
+/// Someone is calling (or being told they're being called) in [channelId].
+/// Outbound (client → server) this is the caller's invite (`wantRecording`,
+/// no `from`); inbound (server → callee, all tabs) it also carries `from`
+/// (the caller's sub). See voice-contracts.md §1.2 `call_invite`.
+final class WsCallInviteEvent extends WsEvent {
+  const WsCallInviteEvent({
+    required this.from,
+    required this.wantRecording,
+    required super.channelId,
+  });
+  final String from;
+  final bool wantRecording;
+}
+
+/// The callee's connection accepted the ringing call (`consent` is the
+/// recording-consent decision, independent of the caller's `wantRecording` --
+/// D3/D4). Delivered to the caller's bound connection with `mode` now fixed;
+/// `mode` may read `p2p` even though `consent` is true -- the mediad-down
+/// downgrade case (voice-contracts.md §1.2, plan §2.3) -- the UI must treat
+/// that as "recording unavailable", not silently drop the notice.
+final class WsCallAcceptEvent extends WsEvent {
+  const WsCallAcceptEvent({
+    required this.consent,
+    required this.mode,
+    required super.channelId,
+  });
+  final bool consent;
+  final CallMode mode;
+}
+
+/// A different tab already answered this ringing call -- dismiss the local
+/// ring screen (voice-contracts.md §1.2 `call_taken`).
+final class WsCallTakenEvent extends WsEvent {
+  const WsCallTakenEvent({required super.channelId});
+}
+
+/// An SDP offer/answer, forwarded verbatim in p2p mode or terminated at
+/// mediad in relayed mode (voice-contracts.md §1.2/§2.2 `call_sdp`).
+final class WsCallSdpEvent extends WsEvent {
+  const WsCallSdpEvent({
+    required this.sdpType,
+    required this.sdp,
+    required super.channelId,
+  });
+  final String sdpType; // 'offer' | 'answer'
+  final String sdp;
+}
+
+/// A trickled ICE candidate -- **p2p mode only** (voice-contracts.md §1.2
+/// `call_candidate`); never sent/expected in relayed mode (mediad's exchange
+/// is non-trickle). `sdpMid`/`sdpMLineIndex` may be null (the WebRTC spec's
+/// own candidate-completion sentinel) -- forward as-is, don't coerce.
+final class WsCallCandidateEvent extends WsEvent {
+  const WsCallCandidateEvent({
+    required this.candidate,
+    required this.sdpMid,
+    required this.sdpMLineIndex,
+    required super.channelId,
+  });
+  final String candidate;
+  final String? sdpMid;
+  final int? sdpMLineIndex;
+}
+
+/// The call ended -- either side hung up, or a bound connection dropped
+/// (`byDisconnect: true`, voice-contracts.md §1.2 `call_end`).
+final class WsCallEndEvent extends WsEvent {
+  const WsCallEndEvent({required this.byDisconnect, required super.channelId});
+  final bool byDisconnect;
+}
+
+/// The ringing call's 45s timeout expired unanswered -- dismiss any open ring
+/// screen immediately (voice-contracts.md §1.2 `call_missed`). The durable
+/// record is the `call_missed` chat line posted separately, not this frame.
+final class WsCallMissedEvent extends WsEvent {
+  const WsCallMissedEvent({required super.channelId});
+}
+
+/// mediad's ACTUAL recording-writer state changed -- the truthful ● REC push
+/// (voice-contracts.md §1.2 `call_recording`, plan §2.3/finding #7). Sent to
+/// both bound connections; never emitted for a p2p call (mediad is never
+/// involved -- `recording` stays `"none"` for its whole duration).
+final class WsCallRecordingEvent extends WsEvent {
+  const WsCallRecordingEvent({required this.recording, required super.channelId});
+  final bool recording;
+}
+
+/// A `call_*` frame this connection sent was rejected -- sent to the ONE
+/// connection that sent it, never broadcast (`src/ws/hub.ts`'s
+/// `sendCallError`; voice-contracts.md §1.3 only mandates "a WS-level error
+/// frame", so `{type:'call_error',channelId,error,detail?}` is that
+/// implementation's own wire shape, matched here). `error` is the stable
+/// machine-readable code (`src/calls/registry.ts`'s `CallSignalError.code` /
+/// the hub's own `*_failed` codes) -- e.g. `user_busy`, `glare_lost`,
+/// `call_active`, `not_ringing`, `mediad_broker_failed`, `frame_too_large`,
+/// `invite_failed`, `accept_failed`. A rejected invite leaves the caller
+/// parked ringing; a rejected accept/relay leaves a side parked connecting
+/// with the mic already open -- both MUST be unstuck by the call
+/// controller's handler for this event (see `calls/call_controller.dart`).
+final class WsCallErrorEvent extends WsEvent {
+  const WsCallErrorEvent({
+    required this.error,
+    required this.detail,
+    required super.channelId,
+  });
+  final String error;
+  final String? detail;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients. Every frame carries a top-level
@@ -1080,6 +1227,51 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'user_joined':
       return const WsUserJoinedEvent();
+    case 'call_invite':
+      return WsCallInviteEvent(
+        from: json['from'] as String? ?? '',
+        wantRecording: json['wantRecording'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'call_accept':
+      return WsCallAcceptEvent(
+        consent: json['consent'] as bool? ?? false,
+        mode: CallMode.fromWire(json['mode'] as String?),
+        channelId: channelId,
+      );
+    case 'call_taken':
+      return WsCallTakenEvent(channelId: channelId);
+    case 'call_sdp':
+      return WsCallSdpEvent(
+        sdpType: json['sdpType'] as String? ?? 'offer',
+        sdp: json['sdp'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_candidate':
+      return WsCallCandidateEvent(
+        candidate: json['candidate'] as String? ?? '',
+        sdpMid: json['sdpMid'] as String?,
+        sdpMLineIndex: (json['sdpMLineIndex'] as num?)?.toInt(),
+        channelId: channelId,
+      );
+    case 'call_end':
+      return WsCallEndEvent(
+        byDisconnect: json['byDisconnect'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'call_missed':
+      return WsCallMissedEvent(channelId: channelId);
+    case 'call_recording':
+      return WsCallRecordingEvent(
+        recording: json['recording'] == 'on',
+        channelId: channelId,
+      );
+    case 'call_error':
+      return WsCallErrorEvent(
+        error: json['error'] as String? ?? 'call_error',
+        detail: json['detail'] as String?,
+        channelId: channelId,
+      );
     default:
       return null;
   }

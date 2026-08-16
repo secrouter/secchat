@@ -312,6 +312,34 @@ abstract class ApiClient {
   /// no-op if the socket isn't open). Debounce calls at the call site.
   void sendTyping(String channelId);
 
+  // ── Voice calls (voice-contracts.md §1) ──────────────────────────────
+  //
+  // All ride the SAME `subscribeAll` socket [sendTyping] uses -- best-effort,
+  // no-op if that socket isn't open. [CallController] is responsible for
+  // opening `subscribeAll` (directly or via the app's existing global
+  // subscription) before calling any of these.
+
+  /// Start a call in [channelId] (`call_invite`, caller → server).
+  void sendCallInvite(String channelId, {required bool wantRecording});
+
+  /// Answer a ringing call (`call_accept`, callee → server). [consent] is the
+  /// recording-consent decision -- independent of the caller's `wantRecording`.
+  void sendCallAccept(String channelId, {required bool consent});
+
+  /// Forward an SDP offer/answer (`call_sdp`).
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp});
+
+  /// Forward a trickled ICE candidate -- **p2p mode only** (`call_candidate`).
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  });
+
+  /// Hang up / end the call in [channelId] (`call_end`).
+  void sendCallEnd(String channelId);
+
   /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
   /// arrive as `presence` WS events.
   Future<List<String>> getPresence();
@@ -889,6 +917,61 @@ class HttpApiClient implements ApiClient {
     } catch (_) {
       // Best-effort: a closed/closing socket just drops the ephemeral signal.
     }
+  }
+
+  /// Best-effort send on the global socket, matching [sendTyping]'s posture:
+  /// a closed/closing socket just drops the frame rather than throwing.
+  void _sendCallFrame(Map<String, dynamic> frame) {
+    try {
+      _globalSocket?.sink.add(jsonEncode(frame));
+    } catch (_) {
+      // See [sendTyping].
+    }
+  }
+
+  @override
+  void sendCallInvite(String channelId, {required bool wantRecording}) {
+    _sendCallFrame({
+      'type': 'call_invite',
+      'channelId': channelId,
+      'wantRecording': wantRecording,
+    });
+  }
+
+  @override
+  void sendCallAccept(String channelId, {required bool consent}) {
+    _sendCallFrame({'type': 'call_accept', 'channelId': channelId, 'consent': consent});
+  }
+
+  @override
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp}) {
+    _sendCallFrame({
+      'type': 'call_sdp',
+      'channelId': channelId,
+      'sdpType': sdpType,
+      'sdp': sdp,
+    });
+  }
+
+  @override
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) {
+    _sendCallFrame({
+      'type': 'call_candidate',
+      'channelId': channelId,
+      'candidate': candidate,
+      'sdpMid': sdpMid,
+      'sdpMLineIndex': sdpMLineIndex,
+    });
+  }
+
+  @override
+  void sendCallEnd(String channelId) {
+    _sendCallFrame({'type': 'call_end', 'channelId': channelId});
   }
 
   @override

@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
+import type { CallRegistry } from "../calls/registry.ts";
 import type { AdminOverview, Agent, AgentControl, AgentKind, Attachment, AuthGateway, Channel, ChannelKind, LlmClient, Member, Message, OutboundEvent, OutboundWebhook, Principal, Reaction, Store, User, UserSshKey, VerifyToken, Webhook } from "../types.ts";
 import { OUTBOUND_EVENTS } from "../types.ts";
 import type { OutboundDispatcher } from "../webhooks/outbound.ts";
@@ -364,6 +365,13 @@ function buildRouter(
   poolTasks?: PoolTasks,
   outbound?: OutboundDispatcher,
   outboundAllowedHosts: readonly string[] = [],
+  /** Voice calls' server-side state machine (calls/registry.ts, docs/plans/voice-calls-plan.md
+   * §3.1) — backs `GET /calls/:id` below. Unset ⇒ that route 501s (calls not configured), same
+   * pattern as `control`/`admin` elsewhere in this file. */
+  calls?: CallRegistry,
+  /** STUN server(s) for p2p ICE gathering (config.callStun) — carried on `GET /me` (finding #4).
+   * Empty/unset ⇒ the client runs with zero ICE servers configured. */
+  callStun: readonly string[] = [],
 ): Router<Handler> {
   const router = new Router<Handler>();
 
@@ -435,6 +443,10 @@ function buildRouter(
         // The enabled CUI categories (optional caveats) the client offers on the marking picker.
         categories: marking.caveats.map((c) => ({ code: c.code, name: c.name, level: c.level })),
       },
+      // STUN server(s) for voice calls' p2p ICE gathering (SECCHAT_CALL_STUN, finding #4) — the
+      // natural fit per app/lib/calls/media_session.dart's own TODO, mirroring how `marking` already
+      // rides this same response. Empty ⇒ no STUN configured; the client runs with zero ICE servers.
+      callStunUrls: callStun,
     });
   });
 
@@ -1953,6 +1965,46 @@ function buildRouter(
     res.end(html);
   });
 
+  // ── Voice calls (docs/plans/voice-calls-plan.md §2.1/§3.1) ───────────────────────────────────
+  // `:id` is the DM CHANNEL id, not a call row id — matches how a reconnecting client actually
+  // knows what to ask for (the DM it's in, not an internal call id it may never have seen if the
+  // page reloaded mid-ring). Returns the LIVE (ringing/active) call, if any — the durable CallRow
+  // history (past, ended calls) already lives in the channel's ordinary message history (the
+  // call_missed / decline lines + the eventual transcript post), so this route doesn't duplicate
+  // that; it exists purely so a client that reloads mid-call can rejoin the signaling state instead
+  // of being stuck with no way to learn a call is still ringing/active for its DM. No recording
+  // upload endpoint exists anywhere in this file — recording never transits the client (§2.3: mediad
+  // records server-side; the client only ever offers/answers SDP over the existing WS hub).
+  router.add("GET", "/calls/:id", async ({ res, params, principal }) => {
+    if (!calls) {
+      sendJson(res, 501, { error: "calls_not_configured" });
+      return;
+    }
+    const channelId = params.id!;
+    if (!(await store.isMember(channelId, principal.sub))) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const live = calls.getActiveCall(channelId);
+    if (!live) {
+      sendJson(res, 404, { error: "no_active_call" });
+      return;
+    }
+    // Project away server-internal bookkeeping (bound connection ids, mediad's session/leg
+    // correlation ids, the ringing deadline) — a reconnecting CLIENT needs the call's signaling
+    // state, never mediad's URL/token/session id (§2.3 — clients hold no mediad credentials at all).
+    sendJson(res, 200, {
+      channelId: live.channelId,
+      caller: live.caller,
+      callee: live.callee,
+      state: live.state,
+      wantRecording: live.wantRecording,
+      mode: live.mode,
+      consent: live.consent,
+      callId: live.callId,
+    });
+  });
+
   return router;
 }
 
@@ -2155,11 +2207,18 @@ export function createHttpServer(deps: {
   /** The `/agent-llm/v1` proxy's SecRouter target + service-token resolver (see AgentLlmDeps).
    * Unset ⇒ `/agent-llm/v1/*` isn't specially handled (falls through to the normal pipeline). */
   agentLlm?: AgentLlmDeps;
+  /** Voice calls' server-side state machine (calls/registry.ts, docs/plans/voice-calls-plan.md) —
+   * backs `GET /calls/:id`. */
+  calls?: CallRegistry;
+  /** STUN server(s) offered to clients for p2p ICE gathering (config.callStun,
+   * `SECCHAT_CALL_STUN`) — exposed on `GET /me` (finding #4). Empty/unset ⇒ the client runs with
+   * zero ICE servers configured. */
+  callStun?: readonly string[];
 }): Server {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.poolTasks, deps.outbound, deps.outboundAllowedHosts);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.poolTasks, deps.outbound, deps.outboundAllowedHosts, deps.calls, deps.callStun);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

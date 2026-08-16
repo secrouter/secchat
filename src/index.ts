@@ -11,6 +11,9 @@ import { renderConsole } from "./admin/console.ts";
 import { makeControlPlane } from "./agent/control.ts";
 import { startReaper } from "./agent/reaper.ts";
 import { governedAgentAppend } from "./governance/append.ts";
+import { makeCallRegistry } from "./calls/registry.ts";
+import { makeMediadClient } from "./calls/mediad-client.ts";
+import { makeTranscribeClient } from "./transcribe/client.ts";
 import { makeInteractiveRunner } from "./agent/interactive-runner.ts";
 import { makePiRunner } from "./agent/pi-runner.ts";
 import { makeAuthGateway } from "./auth/bff.ts";
@@ -159,6 +162,79 @@ const notify = (sub: string, payload: unknown) => hub?.deliverToUser(sub, payloa
 // Presence roster (who's online) — reads the hub's live connection set for GET /presence; the live
 // online/offline transitions ride the hub's own `presence` broadcasts.
 const presence = () => hub?.onlineSubs() ?? [];
+// Connection-scoped send (the voice-calls signaling primitive, ws/hub.ts's sendToConnection) — same
+// lazy-resolution trick as broadcast/notify/presence above, needed for the same reason: hub doesn't
+// exist yet at this point in the file.
+const sendToConnection = (connId: string, payload: unknown) => hub?.sendToConnection(connId, payload) ?? false;
+
+// The attachments byte store — shared by the HTTP upload/download routes below AND voice calls'
+// server-side ingest (a mediad-assembled recording is claimed as an attachment without ever
+// transiting the client HTTP upload route, §2.4/A5), so it's constructed once here rather than once
+// per consumer.
+const blobs = new FsBlobStore(config.uploadsDir);
+
+// Voice calls (docs/plans/voice-calls-plan.md). `mediad`/`transcribe` clients are undefined, not
+// omitted, when unconfigured — see calls/registry.ts's CallRegistryDeps doc comments for what each
+// absence means at call time (recording unavailable but calling still works; recorded calls post
+// audio without a transcript). ONE `transcribeClient` instance, shared between the live pipeline
+// (callRegistry, below) and the crash-recovery sweep (mediadClient's `transcription`, right below):
+// transcribe/client.ts's retry/concurrency limiter (WHISPER_MAX_CONCURRENCY parity) is per-instance,
+// so two separate clients would let a live call's transcription and a startup reconciliation sweep
+// each independently believe they own the concurrency budget.
+const transcribeClient = config.transcribeUrl ? makeTranscribeClient({ baseUrl: config.transcribeUrl }) : undefined;
+if (config.mediad && !config.transcribeUrl) console.error("▸ voice calls: SECCHAT_TRANSCRIBE_URL unset — recorded calls will post audio without a transcript");
+const mediadClient = config.mediad
+  ? makeMediadClient({
+      baseUrl: config.mediad.url,
+      token: config.mediad.token,
+      // Post-call pipeline wiring (§2.4/finding #5): the shared recordings volume this process can
+      // read/write (SECCHAT_MEDIAD_RECORDINGS_DIR — secdeploy mounts it at
+      // /var/lib/secchat/recordings) + the attachments byte store + Store.addAttachment, so
+      // reconcileUnclaimedSessions can actually ingest a reconciled call's recording (not just log
+      // candidates). Also threads the narrow reconcile-store slice, `pendingRecording` (so the
+      // ingested attachment is actually CLAIMED onto a chat line — v3.1 REQUIRED "the artifact is
+      // never invisible", same as the live pipeline below), and (when configured) the transcription
+      // deps so a reconciled call gets a transcript too, mirroring the live pipeline.
+      recordingsDir: config.mediad.recordingsDir,
+      blobs,
+      addAttachment: (input) => store.addAttachment(input),
+      reconcileStore: {
+        listUnclaimedEndedCalls: () => store.listUnclaimedEndedCalls(),
+        setCallRecordingAttachment: (id, attachmentId) => store.setCallRecordingAttachment(id, attachmentId),
+      },
+      pendingRecording: { store, marking: config.marking, broadcast },
+      transcription: transcribeClient
+        ? { store, transcribe: transcribeClient, marking: config.marking, dlp: config.dlp, broadcast }
+        : undefined,
+    })
+  : undefined;
+console.error(config.mediad ? `▸ voice calls: mediad configured (${config.mediad.url})` : "▸ voice calls: mediad NOT configured — recording unavailable (SECCHAT_MEDIAD_URL/_TOKEN unset)");
+if (config.mediad && !config.mediad.recordingsDir) console.error("▸ voice calls: SECCHAT_MEDIAD_RECORDINGS_DIR unset — a recorded call's mixed file will never be ingested as an attachment");
+const callRegistry = makeCallRegistry({
+  store,
+  send: sendToConnection,
+  deliverToUser: notify,
+  now: () => Date.now(),
+  mediad: mediadClient,
+  transcribe: transcribeClient,
+  marking: config.marking,
+  dlp: config.dlp,
+  broadcast,
+  // Same post-call-pipeline wiring the mediad client above got, for the LIVE path (calls/registry.ts's
+  // runPostCallPipeline) rather than the crash-recovery sweep.
+  recordingsDir: config.mediad?.recordingsDir,
+  blobs,
+  addAttachment: (input) => store.addAttachment(input),
+});
+// Startup reconciliation (§2.4 v3.1 REQUIRED #5): finalized-but-unclaimed mediad sessions from a
+// backend crash between finalize and ingest. `.catch()` here is load-bearing — a startup sweep
+// failing must never crash the boot sequence it's protecting (mirrors the pool/pool-tasks reconcile
+// intervals' own best-effort error swallowing below).
+if (mediadClient) {
+  void mediadClient.reconcileUnclaimedSessions().catch((err) => {
+    console.error("▸ voice calls: startup reconciliation failed:", err instanceof Error ? err.message : err);
+  });
+}
 // Coding-agent control plane (Sprint 5: the real pi runner). The execute-gate (plan-mode default,
 // owner-authorized mutation) is fully real either way — selectRunner() only decides what's on the
 // other end of the Runner port: the real pi CLI when it's usable, else the interactive demo stub
@@ -312,7 +388,7 @@ const server = createHttpServer({
   // Subscribe a creator's live socket to a brand-new channel/agent/DM immediately (see the
   // subscribeAll snapshot note in ws/hub.ts) — lazy like `broadcast`, since hub is created after.
   subscribe: (sub, channelId) => hub?.subscribe(sub, channelId),
-  attachments: { blobs: new FsBlobStore(config.uploadsDir), maxUploadBytes: config.maxUploadBytes },
+  attachments: { blobs, maxUploadBytes: config.maxUploadBytes },
   // Per-user git SSH identities (POST/GET/DELETE /me/ssh-key). Present only when a master key is
   // configured; unset ⇒ those routes 503 (feature off).
   ssh: config.secretKey ? { secretKey: config.secretKey, knownHosts: config.gitKnownHosts } : undefined,
@@ -335,6 +411,13 @@ const server = createHttpServer({
     secrouterUrl: config.secrouterUrl,
     getServiceToken: secrouterTokenProvider ? () => secrouterTokenProvider.get() : undefined,
   },
+  // Voice calls (see the construction + doc comment above) — threaded through so a future
+  // `GET /calls/:id` route finds it via buildRouter's `calls` param without editing this file.
+  calls: callRegistry,
+  // STUN server(s) for p2p ICE gathering (SECCHAT_CALL_STUN) — exposed on `GET /me` so the client
+  // learns the deployment's configured STUN URL(s) without a dedicated route (finding #4; matches
+  // how `marking` already rides that same response). Empty ⇒ the client runs with zero ICE servers.
+  callStun: config.callStun,
 });
 hub = attachWsHub(server, {
   verifyToken,
@@ -347,6 +430,10 @@ hub = attachWsHub(server, {
     }
     return mine;
   },
+  // Voice calls (see the construction + doc comment above) — threaded through so the signaling
+  // implementer's `call_*` frame handling in ws/hub.ts finds it via `deps.calls` without editing
+  // this file.
+  calls: callRegistry,
 });
 // Runner daemons attach here (a separate `/runner` protocol; the client hub above skips that path).
 const runnerHub = attachRunnerHub(server, {

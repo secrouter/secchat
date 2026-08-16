@@ -65,8 +65,12 @@ import type {
   Attachment,
   AuditEvent,
   AuthorType,
+  CallMode,
+  CallRecordingState,
+  CallRow,
   Channel,
   ChannelKind,
+  CreateCallInput,
   ExecuteGrant,
   Id,
   Member,
@@ -254,6 +258,23 @@ interface OutboundWebhookRow {
   last_delivery_at: Date | null;
 }
 
+/** Row shape for the `calls` table — named `CallsRow` (not `CallRow`) to avoid colliding with
+ * src/types.ts's `CallRow` (the mapped domain shape `rowToCall` below returns). */
+interface CallsRow {
+  id: string;
+  channel_id: string;
+  caller: string;
+  callee: string;
+  started_at: Date;
+  ended_at: Date | null;
+  consent: boolean;
+  mode: string;
+  recording: string;
+  recording_attachment_id: string | null;
+  transcript_message_id: string | null;
+  mediad_session_id: string | null;
+}
+
 interface AuditRow {
   id: string;
   seq: number;
@@ -430,6 +451,23 @@ function rowToOutboundWebhook(row: OutboundWebhookRow): OutboundWebhook {
     lastError: row.last_error ?? undefined,
     lastDeliveryAt: row.last_delivery_at ? iso(row.last_delivery_at) : undefined,
   }) as OutboundWebhook;
+}
+
+function rowToCall(row: CallsRow): CallRow {
+  return compact({
+    id: row.id,
+    channelId: row.channel_id,
+    caller: row.caller,
+    callee: row.callee,
+    startedAt: iso(row.started_at),
+    endedAt: row.ended_at ? iso(row.ended_at) : undefined,
+    consent: row.consent,
+    mode: row.mode as CallMode,
+    recording: row.recording as CallRecordingState,
+    recordingAttachmentId: row.recording_attachment_id ?? undefined,
+    transcriptMessageId: row.transcript_message_id ?? undefined,
+    mediadSessionId: row.mediad_session_id ?? undefined,
+  }) as CallRow;
 }
 
 function rowToAuditEvent(row: AuditRow): AuditEvent {
@@ -1362,6 +1400,109 @@ export class PgStore implements Store, SessionStore {
       `UPDATE outbound_webhooks SET last_status = $2, last_error = $3, last_delivery_at = $4 WHERE id = $1`,
       [id, status, error, new Date().toISOString()],
     );
+  }
+
+  // ── Calls (1:1 DM voice calls — db/migrations/0019_calls.sql) ────────────────────────────────
+
+  async createCall(input: CreateCallInput): Promise<CallRow> {
+    const id = randomUUID();
+    const startedAt = new Date().toISOString();
+    await this.#pool.query(
+      `INSERT INTO calls (id, channel_id, caller, callee, started_at, consent, mode, recording)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'none')`,
+      [id, input.channelId, input.caller, input.callee, startedAt, input.consent, input.mode],
+    );
+    return compact({
+      id,
+      channelId: input.channelId,
+      caller: input.caller,
+      callee: input.callee,
+      startedAt,
+      consent: input.consent,
+      mode: input.mode,
+      recording: "none" as CallRecordingState,
+    });
+  }
+
+  /** Fails closed on an unknown call (matches redactMessage/renewLease's guard style). */
+  async endCall(id: Id, endedAt: string): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET ended_at = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, endedAt],
+    );
+    if (!rows[0]) throw new Error(`PgStore.endCall: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async getCall(id: Id): Promise<CallRow | null> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `SELECT id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+              recording_attachment_id, transcript_message_id, mediad_session_id
+         FROM calls WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? rowToCall(rows[0]) : null;
+  }
+
+  async setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET recording = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, recording],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallRecording: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment); db/migrations/0020_calls_mediad_session_id.sql. */
+  async setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET mediad_session_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, mediadSessionId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallMediadSessionId: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET recording_attachment_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, attachmentId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallRecordingAttachment: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET transcript_message_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, messageId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallTranscriptMessage: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  /** Ended calls with no recording attachment yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5); backed by calls_unclaimed_ended_idx. The caller further filters to
+   * `mode: "relayed"` rows with a `mediadSessionId` (a p2p call is never a candidate — no mediad
+   * session ever existed) and matches directly against that session id, no guessing needed. */
+  async listUnclaimedEndedCalls(): Promise<CallRow[]> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `SELECT id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+              recording_attachment_id, transcript_message_id, mediad_session_id
+         FROM calls WHERE ended_at IS NOT NULL AND recording_attachment_id IS NULL`,
+    );
+    return rows.map(rowToCall);
   }
 
   /** Purges plaintext, stamps the tombstone, and appends the audit event — all in ONE transaction

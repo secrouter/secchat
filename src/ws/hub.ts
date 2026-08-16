@@ -19,9 +19,16 @@
 //    silently ignored rather than erroring the connection.
 //  - No offline queueing: `subscribe()` only affects connections that are already open for
 //    that `sub`. A client must (re)send its subscriptions after reconnecting.
+//  - Every connection carries an opaque `id` (independent of its `sub`) so `sendToConnection` can
+//    target exactly one — needed once a `sub` may have several live tabs but a stateful exchange
+//    (a voice call, docs/plans/voice-calls-plan.md §2.1) must stay pinned to the one the human
+//    actually used. `deps.calls` is that feature's wiring point: constructed in index.ts and
+//    threaded through here already, but not yet consumed — see its own doc comment below.
 
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
+import { CallSignalError, type CallRegistry, type LiveCall } from "../calls/registry.ts";
 import type { AuthGateway, Principal, VerifyToken } from "../types.ts";
 import {
   computeAcceptKey,
@@ -34,12 +41,37 @@ import {
 } from "./frame.ts";
 
 /** One live upgraded socket. A `sub` may have more than one (multiple tabs/devices) — both
- * `connectionsBySub` and `channelSubscriptions` below are keyed by connection, not by sub. */
+ * `connectionsBySub` and `channelSubscriptions` below are keyed by connection, not by sub. `id` is
+ * this connection's opaque handle for `sendToConnection` (voice calls' connection-scoped routing,
+ * docs/plans/voice-calls-plan.md §2.1 — a call is bound to exactly one connection per side, not to
+ * a `sub`, so multi-tab ring/first-accept-wins can be pinned to the tab the human actually used). */
 interface Connection {
+  id: string;
   socket: Duplex;
   sub: string;
   channels: Set<string>;
+  /** How many `call_candidate` frames this connection has sent, ever — the rate/volume cap below
+   * (§2.1/§4's "candidate frames per call... rate-capped"). Simplest sound bound: a WS connection's
+   * lifetime roughly brackets one call attempt in practice (a fresh tab/reconnect gets a fresh
+   * connection id), and ICE gathering produces at most a few dozen candidates per call — nowhere
+   * near the cap below. */
+  callCandidateCount?: number;
 }
+
+/** call_* payload bounds (§2.1/§4, voice-contracts.md §1.3): in p2p mode, `call_sdp`/`call_candidate`
+ * are a user-to-user content path the server relays without inspecting — outside DLP/marking/chain
+ * governance by construction, so bounded rather than trusted. 32 KiB is "far below the hub's general
+ * 16 MiB frame ceiling" per the plan. A frame over the cap is dropped; a connection that blows past
+ * the candidate-count cap is treated as hostile/broken and destroyed — the same posture frame.ts's
+ * FrameDecoder already takes for an oversized frame. */
+const MAX_CALL_FRAME_BYTES = 32 * 1024;
+const MAX_CALL_CANDIDATES_PER_CONNECTION = 500;
+
+/** How often ws/hub.ts sweeps for expired ringing calls (calls/registry.ts's `checkRingingTimeouts`
+ * is the pure check; this interval is the "something stateful drives it" half — mirrors
+ * agent/reaper.ts's `startReaper` shape). Well under the 45s default ringing timeout so a missed
+ * call's `call_missed` signal + chat line land promptly. */
+const RINGING_SWEEP_INTERVAL_MS = 2_000;
 
 export interface Hub {
   /** Subscribe every live connection for `sub` to `channelId`. No-op if `sub` has no open
@@ -56,6 +88,12 @@ export interface Hub {
   /** The subs with at least one live connection right now — the presence roster (seeds GET /presence
    * before the live connect/disconnect events take over). */
   onlineSubs(): string[];
+  /** Push `payload` to exactly ONE connection by its opaque id (see the `Connection.id` doc
+   * comment) — the primitive voice calls need for connection-scoped routing (§2.1), distinct from
+   * `broadcast` (channel-wide) and `deliverToUser` (every connection of one principal). Returns
+   * whether that connection was still live to receive it; false (no throw) for an unknown/gone id,
+   * matching broadcast/deliverToUser's "no-op if gone" shape. */
+  sendToConnection(connId: string, payload: unknown): boolean;
   /** Close every open connection and detach from the server's `"upgrade"` event. */
   close(): void;
 }
@@ -73,14 +111,25 @@ export function attachWsHub(
      * for. Injected (not a Store import) to keep this module store-agnostic. Unset ⇒ subscribeAll is
      * a no-op and only per-channel `subscribe` works. */
     channelsForSub?: (sub: string) => Promise<string[]>;
+    /** Voice calls' server-side state machine (calls/registry.ts, docs/plans/voice-calls-plan.md
+     * §2.1). Unset ⇒ every `call_*` frame is silently ignored (see `handleCallFrame`'s first line)
+     * and no ringing-timeout sweep runs — same "feature just isn't there" posture as `control`/
+     * `admin` elsewhere in this codebase when their dep is unset. */
+    calls?: CallRegistry;
+    /** Overrides `RINGING_SWEEP_INTERVAL_MS` (default 2s) — test-only knob, same spirit as
+     * agent/reaper.ts's `startReaper({intervalMs})`, so a ringing-timeout test isn't stuck waiting
+     * on a real 2s wall-clock tick. */
+    ringingSweepIntervalMs?: number;
   },
 ): Hub {
   const connections = new Set<Connection>();
+  const connectionsById = new Map<string, Connection>(); // connection id -> connection (sendToConnection)
   const connectionsBySub = new Map<string, Set<Connection>>(); // principal.sub -> its sockets
   const channelSubscriptions = new Map<string, Set<Connection>>(); // channelId -> subscribers
 
   function trackConnection(conn: Connection): void {
     connections.add(conn);
+    connectionsById.set(conn.id, conn);
     let bySub = connectionsBySub.get(conn.sub);
     const firstForSub = !bySub || bySub.size === 0; // this connection brings the principal online
     if (!bySub) {
@@ -92,7 +141,13 @@ export function attachWsHub(
   }
 
   function untrackConnection(conn: Connection): void {
+    // Voice calls (§2.1): tear down any call bound to this connection — an active call losing its
+    // only connection on that side, or a ringing call losing its caller connection. No-op if this
+    // connection was never bound to anything live (every non-winning ringing tab, most calls).
+    deps.calls?.untrackConnection(conn.id);
+
     connections.delete(conn);
+    connectionsById.delete(conn.id);
 
     const bySub = connectionsBySub.get(conn.sub);
     if (bySub) {
@@ -175,6 +230,104 @@ export function attachWsHub(
       if (conn.channels.has(channelId)) {
         broadcast(channelId, { type: "typing", channelId, userSub: conn.sub });
       }
+    } else if (typeof type === "string" && type.startsWith("call_")) {
+      // Voice calls (docs/plans/voice-calls-plan.md §2.1; docs/plans/voice-contracts.md §1). Mirrors
+      // the typing frame's anti-spoof posture above (never trust a client-asserted identity beyond
+      // `conn.sub`/`conn.id`) — every validation beyond "is this well-formed JSON" is CallRegistry's
+      // job (DM membership, single-flight, connection binding); this hub only decodes the frame,
+      // applies the size/rate caps below, and routes the fan-out CallRegistry can't do itself
+      // (multi-connection-per-sub — see calls/registry.ts's `invite`/`checkRingingTimeouts` doc
+      // comments for why).
+      // Caught here (not left as a bare `void`, unlike subscribeAll above which never throws
+      // internally): CallRegistry.invite/accept already catch their own expected rejections into a
+      // `call_error` frame, but `end`/`relay` can still surface a genuine internal error (e.g. a
+      // store I/O failure) — an unhandled rejection here would otherwise be silent/crash-prone.
+      handleCallFrame(conn, msg as Record<string, unknown>, type).catch((err) => {
+        console.error("ws/hub: call_* frame handling failed:", err instanceof Error ? err.message : err);
+      });
+    }
+  }
+
+  /** Send a `call_error` frame back to the ONE connection that sent a bad/rejected call_* frame —
+   * never broadcast, never to the other party (voice-contracts.md doesn't prescribe a wire shape
+   * for this; §1.3 just says "a WS-level error frame", so this is this implementation's own). */
+  function sendCallError(conn: Connection, channelId: string | undefined, error: string, detail?: string): void {
+    sendToConnection(conn.id, { type: "call_error", channelId, error, ...(detail ? { detail } : {}) });
+  }
+
+  async function handleCallFrame(conn: Connection, msg: Record<string, unknown>, type: string): Promise<void> {
+    if (!deps.calls) return; // voice calls not configured for this deployment — ignore, like any unrecognized message
+    const calls = deps.calls;
+    const channelId = typeof msg.channelId === "string" ? msg.channelId : undefined;
+    if (!channelId) return; // every call_* frame carries channelId (voice-contracts.md §1.2) — malformed, drop
+
+    if (type === "call_invite") {
+      if (typeof msg.wantRecording !== "boolean") return;
+      let live: LiveCall;
+      try {
+        live = await calls.invite({ channelId, callerConnId: conn.id, caller: conn.sub, wantRecording: msg.wantRecording });
+      } catch (err) {
+        sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "invite_failed", err instanceof Error ? err.message : undefined);
+        return;
+      }
+      // Ring EVERY live connection for the callee's sub (all tabs) — the hub is the one place with
+      // multi-connection-per-sub visibility (calls/registry.ts deliberately doesn't have it).
+      deliverToUser(live.callee, { type: "call_invite", channelId, from: live.caller, wantRecording: live.wantRecording });
+      return;
+    }
+
+    if (type === "call_accept") {
+      if (typeof msg.consent !== "boolean") return;
+      let result: LiveCall | "taken" | "not_ringing";
+      try {
+        result = await calls.accept({ channelId, connId: conn.id, consent: msg.consent });
+      } catch (err) {
+        sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "accept_failed", err instanceof Error ? err.message : undefined);
+        return;
+      }
+      if (result === "not_ringing") {
+        sendCallError(conn, channelId, "not_ringing");
+      } else if (result === "taken") {
+        sendToConnection(conn.id, { type: "call_taken", channelId });
+      }
+      // A win already sent both bound connections their `call_accept` confirmation from inside
+      // CallRegistry.accept() (it has the connection-scoped `send` primitive too) — nothing more to
+      // do here.
+      return;
+    }
+
+    if (type === "call_sdp") {
+      if ((msg.sdpType !== "offer" && msg.sdpType !== "answer") || typeof msg.sdp !== "string") return;
+      if (Buffer.byteLength(msg.sdp, "utf8") > MAX_CALL_FRAME_BYTES) {
+        sendCallError(conn, channelId, "frame_too_large");
+        return;
+      }
+      await calls.relay({ channelId, fromConnId: conn.id, frame: { type: "call_sdp", channelId, sdpType: msg.sdpType, sdp: msg.sdp } });
+      return;
+    }
+
+    if (type === "call_candidate") {
+      conn.callCandidateCount = (conn.callCandidateCount ?? 0) + 1;
+      if (conn.callCandidateCount > MAX_CALL_CANDIDATES_PER_CONNECTION) {
+        // Hostile/broken peer — same posture frame.ts's FrameDecoder takes on an oversized frame.
+        conn.socket.destroy();
+        return;
+      }
+      if (typeof msg.candidate !== "string" || Buffer.byteLength(msg.candidate, "utf8") > MAX_CALL_FRAME_BYTES) return;
+      // `sdpMid`/`sdpMLineIndex` may legitimately be `null` (the WebRTC spec's candidate-completion
+      // sentinel, voice-contracts.md §1.2) — forwarded as-is, never coerced.
+      const sdpMid = msg.sdpMid === null || typeof msg.sdpMid === "string" ? msg.sdpMid : undefined;
+      const sdpMLineIndex = msg.sdpMLineIndex === null || typeof msg.sdpMLineIndex === "number" ? msg.sdpMLineIndex : undefined;
+      await calls.relay({
+        channelId,
+        fromConnId: conn.id,
+        frame: { type: "call_candidate", channelId, candidate: msg.candidate, sdpMid, sdpMLineIndex },
+      });
+      return;
+    }
+
+    if (type === "call_end") {
+      await calls.end({ channelId, connId: conn.id, sub: conn.sub, reason: "hangup" });
     }
   }
 
@@ -222,7 +375,7 @@ export function attachWsHub(
     ];
     socket.write(responseLines.join("\r\n"));
 
-    const conn: Connection = { socket, sub: principal.sub, channels: new Set() };
+    const conn: Connection = { id: randomUUID(), socket, sub: principal.sub, channels: new Set() };
     trackConnection(conn);
 
     // Per-connection decoder: carries partial frames across "data" events + reassembles
@@ -252,6 +405,29 @@ export function attachWsHub(
     void handleUpgrade(req, socket, head).catch(() => socket.destroy());
   }
   server.on("upgrade", onUpgrade);
+
+  // Voice calls' ringing-timeout sweep (§2.1) — CallRegistry.checkRingingTimeouts() is the pure
+  // check (mirrors agent/reaper.ts's split); this interval is what drives it. A failing sweep is
+  // swallowed so it can never take down the loop, same posture agent/reaper.ts's startReaper takes.
+  // unref'd so a running hub never by itself keeps the process alive.
+  let ringingSweepTimer: ReturnType<typeof setInterval> | undefined;
+  if (deps.calls) {
+    const calls = deps.calls;
+    ringingSweepTimer = setInterval(() => {
+      calls
+        .checkRingingTimeouts()
+        .then((missed) => {
+          for (const m of missed) {
+            deliverToUser(m.caller, { type: "call_missed", channelId: m.channelId });
+            deliverToUser(m.callee, { type: "call_missed", channelId: m.channelId });
+          }
+        })
+        .catch(() => {
+          // one bad sweep must not kill the interval loop
+        });
+    }, deps.ringingSweepIntervalMs ?? RINGING_SWEEP_INTERVAL_MS);
+    ringingSweepTimer.unref?.();
+  }
 
   /** Subscribe a SINGLE connection to a channel (the shared primitive for both entry points). */
   function subscribeConn(conn: Connection, channelId: string): void {
@@ -318,8 +494,22 @@ export function attachWsHub(
     }
   }
 
+  /** See the Hub interface doc comment. Unlike broadcast/deliverToUser this targets exactly ONE
+   * connection by its opaque id — voice calls' connection-scoped routing (§2.1). */
+  function sendToConnection(connId: string, payload: unknown): boolean {
+    const conn = connectionsById.get(connId);
+    if (!conn) return false;
+    try {
+      conn.socket.write(encodeTextFrame(JSON.stringify(payload)));
+      return true;
+    } catch {
+      return false; // a dead socket here just means close/error hasn't fired yet — not a throw
+    }
+  }
+
   function close(): void {
     server.off("upgrade", onUpgrade);
+    if (ringingSweepTimer) clearInterval(ringingSweepTimer);
     for (const conn of connections) {
       try {
         conn.socket.write(encodeCloseFrame());
@@ -329,6 +519,7 @@ export function attachWsHub(
       conn.socket.destroy();
     }
     connections.clear();
+    connectionsById.clear();
     connectionsBySub.clear();
     channelSubscriptions.clear();
   }
@@ -337,5 +528,5 @@ export function attachWsHub(
     return [...connectionsBySub.keys()];
   }
 
-  return { subscribe, broadcast, deliverToUser, onlineSubs, close };
+  return { subscribe, broadcast, deliverToUser, onlineSubs, sendToConnection, close };
 }

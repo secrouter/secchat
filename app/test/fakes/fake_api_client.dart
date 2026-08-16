@@ -308,6 +308,43 @@ class FakeApiClient implements ApiClient {
   @override
   void sendTyping(String channelId) => typingCalls.add(channelId);
 
+  /// Every `call_*` frame sent, in order, as `(type, channelId, ...)` -- one
+  /// list per frame kind, matching [typingCalls]'s pattern.
+  final List<({String channelId, bool wantRecording})> callInviteCalls = [];
+  final List<({String channelId, bool consent})> callAcceptCalls = [];
+  final List<({String channelId, String sdpType, String sdp})> callSdpCalls = [];
+  final List<({String channelId, String candidate, String? sdpMid, int? sdpMLineIndex})>
+  callCandidateCalls = [];
+  final List<String> callEndCalls = [];
+
+  @override
+  void sendCallInvite(String channelId, {required bool wantRecording}) =>
+      callInviteCalls.add((channelId: channelId, wantRecording: wantRecording));
+
+  @override
+  void sendCallAccept(String channelId, {required bool consent}) =>
+      callAcceptCalls.add((channelId: channelId, consent: consent));
+
+  @override
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp}) =>
+      callSdpCalls.add((channelId: channelId, sdpType: sdpType, sdp: sdp));
+
+  @override
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) => callCandidateCalls.add((
+    channelId: channelId,
+    candidate: candidate,
+    sdpMid: sdpMid,
+    sdpMLineIndex: sdpMLineIndex,
+  ));
+
+  @override
+  void sendCallEnd(String channelId) => callEndCalls.add(channelId);
+
   @override
   Future<List<String>> getPresence() async {
     _maybeThrow('getPresence');

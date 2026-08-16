@@ -57,7 +57,10 @@ import type {
   AppendMessageInput,
   Attachment,
   AuditEvent,
+  CallRecordingState,
+  CallRow,
   Channel,
+  CreateCallInput,
   ExecuteGrant,
   Id,
   Member,
@@ -633,6 +636,9 @@ export class MemoryStore implements Store, SessionStore {
 
   #outboundById = new Map<Id, OutboundWebhook>();
 
+  // ── Calls (1:1 DM voice calls — db/migrations/0019_calls.sql) ────────────────────────────────
+  #callsById = new Map<Id, CallRow>();
+
   async createOutboundWebhook(input: {
     channelId: Id;
     url: string;
@@ -679,6 +685,70 @@ export class MemoryStore implements Store, SessionStore {
     hook.lastStatus = status;
     hook.lastError = error ?? undefined;
     hook.lastDeliveryAt = new Date().toISOString();
+  }
+
+  async createCall(input: CreateCallInput): Promise<CallRow> {
+    const call: CallRow = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      caller: input.caller,
+      callee: input.callee,
+      startedAt: new Date().toISOString(),
+      consent: input.consent,
+      mode: input.mode,
+      recording: "none",
+    };
+    this.#callsById.set(call.id, call);
+    return call;
+  }
+
+  /** Fails closed on an unknown call (matches redactMessage/setSessionStatus's guard style). */
+  async endCall(id: Id, endedAt: string): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.endCall: unknown call ${id}`);
+    call.endedAt = endedAt;
+    return call;
+  }
+
+  async getCall(id: Id): Promise<CallRow | null> {
+    return this.#callsById.get(id) ?? null;
+  }
+
+  async setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallRecording: unknown call ${id}`);
+    call.recording = recording;
+    return call;
+  }
+
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment); db/migrations/0020_calls_mediad_session_id.sql. */
+  async setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallMediadSessionId: unknown call ${id}`);
+    call.mediadSessionId = mediadSessionId;
+    return call;
+  }
+
+  async setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallRecordingAttachment: unknown call ${id}`);
+    call.recordingAttachmentId = attachmentId;
+    return call;
+  }
+
+  async setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallTranscriptMessage: unknown call ${id}`);
+    call.transcriptMessageId = messageId;
+    return call;
+  }
+
+  /** Ended calls with no recording attachment yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5); the caller further filters to rows whose mediad session dir still
+   * exists on the shared volume (mediad-client.ts's reconcileUnclaimedSessions). */
+  async listUnclaimedEndedCalls(): Promise<CallRow[]> {
+    return [...this.#callsById.values()].filter((c) => c.endedAt && !c.recordingAttachmentId);
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a
