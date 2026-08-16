@@ -438,6 +438,9 @@ test("reconcileUnclaimedSessions: `pendingRecording` + `transcription` both conf
             const text = job.legId === LEG_CALLER_ID ? "hey are you free" : "yes go ahead";
             return { task: "transcribe", language: "en", duration: 5, text, words: [], segments: [{ start: 0.5, end: 2, text }] };
           },
+          async enrollVoiceprint() {
+            throw new Error("not fixtured: reconciliation's crash-recovery sweep doesn't enroll voiceprints");
+          },
         },
       },
     });

@@ -217,6 +217,11 @@ const callRegistry = makeCallRegistry({
   now: () => Date.now(),
   mediad: mediadClient,
   transcribe: transcribeClient,
+  // Opt-in voiceprint enrollment (solo memo flow's `enroll:true`) — a thin closure over the SAME
+  // `transcribeClient` instance above, never a second client (same one-instance-per-concurrency-
+  // budget reasoning as `transcribeClient`'s own header comment); unset (enrollment silently
+  // skipped) whenever transcription itself isn't configured.
+  enrollVoiceprint: transcribeClient ? (input) => transcribeClient.enrollVoiceprint(input) : undefined,
   marking: config.marking,
   dlp: config.dlp,
   broadcast,

@@ -281,8 +281,11 @@ export function attachWsHub(
       // straight to an active relayed one-leg call; the caller then drives the SAME relayed-mode
       // offer path (call_sdp) and hangs up with call_end, exactly like a 2-party relayed call.
       const wantRecording = typeof msg.wantRecording === "boolean" ? msg.wantRecording : true;
+      // Opt-in voiceprint enrollment (default false — enrolling a speaker's voice is a deliberate
+      // choice, never a side effect of just recording a memo).
+      const enroll = typeof msg.enroll === "boolean" ? msg.enroll : false;
       try {
-        await calls.startSolo({ channelId, connId: conn.id, sub: conn.sub, wantRecording });
+        await calls.startSolo({ channelId, connId: conn.id, sub: conn.sub, wantRecording, enroll });
       } catch (err) {
         sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "solo_failed", err instanceof Error ? err.message : undefined);
         return;

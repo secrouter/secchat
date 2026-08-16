@@ -111,6 +111,13 @@ export interface CallRegistryDeps {
   recordingsDir?: string;
   blobs?: BlobStore;
   addAttachment?: (input: AddAttachmentInput) => Promise<Attachment>;
+  /** OPTIONAL — present only when SecRecorder is configured (mirrors `transcribe`'s condition;
+   * index.ts constructs this as a thin closure over the same `TranscribeClient` instance, never a
+   * second one — see transcribe/client.ts's `enrollVoiceprint`). Backs the solo memo flow's opt-in
+   * `enroll:true` path (`runPostCallPipeline`, below) — unset just means enrollment is silently
+   * skipped there (same "absence = feature unavailable, never a hard error" posture as `mediad`/
+   * `transcribe`). */
+  enrollVoiceprint?: (input: { name: string; filePath: string }) => Promise<void>;
 }
 
 /** CallRegistry's live view of one call — the ringing/active bookkeeping that exists only while
@@ -133,6 +140,10 @@ export interface LiveCall {
    * `startSolo`; it goes straight to `active` (no ring/accept/glare), records a single leg, and the
    * post-call pipeline transcribes just that leg. `callee` equals `caller` for a solo call. */
   solo?: boolean;
+  /** Opt-in voiceprint enrollment for a solo memo (§ solo self-DM voice memos) — set by `startSolo`
+   * from the `call_solo_start` frame's `enroll` field (default false), read by `end()` when it kicks
+   * off the post-call pipeline. Meaningless (never read) for a non-solo call. */
+  enroll?: boolean;
   callId?: Id; // the durable CallRow's id, once created at accept
   /** `deps.now()` value at which an unanswered ring auto-expires (§2.1) — set at invite, cleared
    * (irrelevant) once accepted. */
@@ -168,8 +179,11 @@ export interface CallRegistry {
    * via `call_end`, at which point the standard post-call pipeline transcribes the single leg into
    * the DM. Requires mediad (there is no p2p fallback — a memo with no server-side recording is
    * pointless); throws {@link CallSignalError} if mediad is unavailable, the channel isn't a
-   * self-DM, or a call is already active there. */
-  startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean }): Promise<LiveCall>;
+   * self-DM, or a call is already active there. `enroll` (default false) is the opt-in voiceprint
+   * enrollment flag: when true AND transcription succeeds, the post-call pipeline enrolls the
+   * caller's voiceprint from this memo's own audio (`runPostCallPipeline`) — never blocks or
+   * fails the memo itself if enrollment isn't configured or errors. */
+  startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean; enroll?: boolean }): Promise<LiveCall>;
 
   /** callee -> accept: the FIRST call against a given ringing call wins (pinned to `connId`);
    * later calls resolve `"taken"` so the caller sends `CallTakenFrame` back down that connection.
@@ -307,8 +321,8 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     return live;
   }
 
-  async function startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean }): Promise<LiveCall> {
-    const { channelId, connId, sub, wantRecording } = input;
+  async function startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean; enroll?: boolean }): Promise<LiveCall> {
+    const { channelId, connId, sub, wantRecording, enroll } = input;
 
     const channel = await deps.store.getChannel(channelId);
     if (!channel || channel.kind !== "dm") throw new CallSignalError("not_dm", "solo recording is DM-only");
@@ -342,6 +356,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       state: "active",
       wantRecording,
       solo: true,
+      enroll: enroll === true,
       mode: "relayed",
       consent: true,
       callerConnId: connId,
@@ -579,6 +594,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
         callee: live.callee,
         mediadSessionId: live.mediadSessionId,
         solo: live.solo,
+        enroll: live.enroll,
       }).catch((err) => {
         console.error(`calls/registry: post-call pipeline failed for call ${live.callId}:`, describeError(err));
       });
@@ -635,6 +651,9 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     mediadSessionId: string;
     /** A solo self-DM memo — one leg (the caller) instead of two. */
     solo?: boolean;
+    /** Solo-memo-only opt-in voiceprint enrollment flag — see `LiveCall.enroll`'s doc comment.
+     * Ignored when `solo` isn't set. */
+    enroll?: boolean;
   }
 
   /** Server-side attachment ingest (sha256 -> BlobStore.write -> Store.addAttachment, uploadedBy =
@@ -780,6 +799,25 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       // NOTE: governedCallAppend already audits `call.transcribed` itself (governance/append.ts) —
       // not duplicated here.
       await editPendingIfClaimed(call, pendingMessageId, "🎙️ Recording stored.");
+
+      // Opt-in voiceprint enrollment (solo memos only, `enroll:true`): best-effort, same
+      // failure-isolation posture as the rest of this pipeline — an enrollment failure must never
+      // crash the pipeline or take the transcript down with it (the transcript has already posted
+      // by this point either way). MUST run before `deleteSessionDir` below — that's what deletes
+      // the very leg file this reads.
+      if (call.solo && call.enroll && deps.enrollVoiceprint) {
+        try {
+          // `users[0]` is always the caller's `getUser` result (legFiles[0]/legSpecs[0] is always
+          // the caller leg, solo or not — see legSpecs above), so this reuses the lookup already
+          // done for the transcript's speaker labels rather than a second `store.getUser` call.
+          const callerName = users[0]?.displayName || call.caller;
+          await deps.enrollVoiceprint({ name: callerName, filePath: join(sessionDir, legFiles[0]!.file!.path) });
+          await deps.store.appendAudit({ actor: "system", action: "call.voiceprint_enrolled", target: call.callId });
+        } catch (err) {
+          await deps.store.appendAudit({ actor: "system", action: "call.voiceprint_enroll_failed", target: call.callId, detail: describeError(err) });
+        }
+      }
+
       // Retention (§4/finding #8): "raw per-leg files are deleted after successful transcription" —
       // only reached once the transcript has actually posted; left in place on every earlier
       // return/catch above so a retry/reconciliation sweep always still has raw audio to work with.

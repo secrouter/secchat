@@ -507,6 +507,12 @@ function fakeTranscribe(byLegId: Record<string, TranscribeResult>): TranscribeCl
       if (!result) throw new Error(`fakeTranscribe: no fixture for leg ${job.legId}`);
       return result;
     },
+    async enrollVoiceprint() {
+      // Unused by any test that builds a `TranscribeClient` through this helper — voiceprint
+      // enrollment tests wire their own `enrollVoiceprint` directly on `CallRegistryDeps` instead
+      // (see makeCallRegistry's `enrollVoiceprint` dep, distinct from this client's method).
+      throw new Error("fakeTranscribe: enrollVoiceprint not fixtured");
+    },
   };
 }
 
@@ -568,6 +574,9 @@ test("relayed call end-to-end: recording ingested as an attachment, per-leg tran
           const result = transcribeByPath[job.legId];
           if (!result) throw new Error(`no fixture for ${job.legId}`);
           return result;
+        },
+        async enrollVoiceprint() {
+          throw new Error("not fixtured: this is a 2-party call, enrollment is solo-only");
         },
       },
       marking: MARKING,
@@ -700,6 +709,9 @@ test("solo self-DM voice memo end-to-end: one leg recorded, transcribed, and pos
           if (!r) throw new Error(`no fixture for ${job.legId}`);
           return r;
         },
+        async enrollVoiceprint() {
+          throw new Error("not fixtured: this test doesn't opt into enrollment");
+        },
       },
       marking: MARKING,
       broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
@@ -761,6 +773,119 @@ test("solo self-DM voice memo end-to-end: one leg recorded, transcribed, and pos
     assert.ok(audit.some((e) => e.action === "call.transcribed"));
   } finally {
     await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
+/** Shared setup for the two opt-in voiceprint enrollment tests below: an active, relayed, one-leg
+ * solo memo (mirrors the "solo self-DM voice memo end-to-end" test above), with a fake
+ * `enrollVoiceprint` dep that just records its calls instead of doing anything real. `enroll`
+ * controls the `call_solo_start`-equivalent `startSolo` input. */
+async function setupSoloEnrollCall(recordingsDir: string, opts: { enroll?: boolean }) {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: "ws-1", kind: "dm", createdBy: "alice" });
+  await store.addMember({ channelId: channel.id, memberRef: "alice", memberType: "user", role: "owner" });
+  await store.upsertUser({ sub: "alice", displayName: "Alice Ng", groups: [] });
+
+  const mediad = fakeMediad({ healthy: true });
+  const originalCreateSession = mediad.createSession.bind(mediad);
+  mediad.createSession = async (input) => {
+    const res = await originalCreateSession(input);
+    await mkdir(join(recordingsDir, res.sessionId), { recursive: true });
+    await writeFile(join(recordingsDir, res.sessionId, "leg.ogg"), "fake-solo-audio");
+    await writeFile(join(recordingsDir, res.sessionId, "mixed.m4a"), "fake-mixed-audio");
+    return res;
+  };
+
+  const blobs = new MemoryBlobStore();
+  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+  const { send } = makeSend();
+  const { deliverToUser } = makeDeliverToUser();
+  const enrollCalls: Array<{ name: string; filePath: string }> = [];
+
+  const registry = makeCallRegistry({
+    store,
+    send,
+    deliverToUser,
+    now: () => Date.now(),
+    mediad,
+    transcribe: {
+      async transcribeLeg() {
+        return {
+          task: "transcribe",
+          language: "en",
+          duration: 4,
+          text: "note to self buy milk",
+          words: [],
+          segments: [{ start: 0.2, end: 2, text: "note to self buy milk" }],
+        };
+      },
+      async enrollVoiceprint() {
+        throw new Error("not fixtured: enrollment goes through CallRegistryDeps.enrollVoiceprint, not this client method");
+      },
+    },
+    enrollVoiceprint: async (input) => {
+      enrollCalls.push(input);
+    },
+    marking: MARKING,
+    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+    recordingsDir,
+    blobs,
+    addAttachment: (input) => store.addAttachment(input),
+  });
+
+  const live = await registry.startSolo({ channelId: channel.id, connId: "a", sub: "alice", wantRecording: true, enroll: opts.enroll });
+  mediad.endSession = async (sessionId) => ({
+    sessionId,
+    files: [
+      { legId: live.legCaller, path: "leg.ogg", startOffsetMs: 0, durationMs: 4000 },
+      { path: "mixed.m4a", startOffsetMs: 0, durationMs: 4000 },
+    ],
+    truncated: false,
+  });
+
+  await registry.end({ channelId: channel.id, connId: "a", reason: "hangup" });
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+    const row = await store.getCall(live.callId!);
+    if (row?.transcriptMessageId) break;
+  }
+  const row = await store.getCall(live.callId!);
+  assert.ok(row?.transcriptMessageId, "the transcript posted (a precondition for the enrollment step to even run)");
+
+  return { store, live, enrollCalls, recordingsDir };
+}
+
+test("solo memo with enroll:true invokes enrollVoiceprint with the caller's display name and leg file path", async () => {
+  const recordingsDir = await mkdtemp(join(tmpdir(), "secchat-solo-enroll-test-"));
+  try {
+    const { store, live, enrollCalls } = await setupSoloEnrollCall(recordingsDir, { enroll: true });
+
+    assert.equal(enrollCalls.length, 1, "enrollVoiceprint was invoked exactly once");
+    assert.equal(enrollCalls[0]!.name, "Alice Ng", "the caller's display name (Store.getUser) is used");
+    assert.equal(enrollCalls[0]!.filePath, join(recordingsDir, live.mediadSessionId!, "leg.ogg"), "the caller leg's on-disk path is used");
+
+    const audit = await store.listAudit();
+    assert.ok(audit.some((e) => e.action === "call.voiceprint_enrolled"), "success is audited");
+    assert.ok(!audit.some((e) => e.action === "call.voiceprint_enroll_failed"));
+  } finally {
+    await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
+test("solo memo with enroll:false (or absent) does NOT invoke enrollVoiceprint", async () => {
+  const recordingsDirFalse = await mkdtemp(join(tmpdir(), "secchat-solo-noenroll-test-"));
+  const recordingsDirAbsent = await mkdtemp(join(tmpdir(), "secchat-solo-noenroll-test-"));
+  try {
+    const { enrollCalls: enrollCallsFalse, store: storeFalse } = await setupSoloEnrollCall(recordingsDirFalse, { enroll: false });
+    assert.equal(enrollCallsFalse.length, 0, "enroll:false never calls enrollVoiceprint");
+    assert.ok(!(await storeFalse.listAudit()).some((e) => e.action.startsWith("call.voiceprint_")));
+
+    const { enrollCalls: enrollCallsAbsent, store: storeAbsent } = await setupSoloEnrollCall(recordingsDirAbsent, {});
+    assert.equal(enrollCallsAbsent.length, 0, "an absent enroll flag defaults to false, never calls enrollVoiceprint");
+    assert.ok(!(await storeAbsent.listAudit()).some((e) => e.action.startsWith("call.voiceprint_")));
+  } finally {
+    await rm(recordingsDirFalse, { recursive: true, force: true });
+    await rm(recordingsDirAbsent, { recursive: true, force: true });
   }
 });
 
@@ -874,6 +999,9 @@ test("transcription exhausted (poison audio): a visible failure line replaces th
       transcribe: {
         async transcribeLeg() {
           throw new Error("poison audio: decoder rejected the file");
+        },
+        async enrollVoiceprint() {
+          throw new Error("not fixtured: transcription fails before enrollment would ever run");
         },
       },
     });

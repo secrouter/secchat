@@ -89,12 +89,29 @@ export interface TranscribeLegJob {
   diarize?: boolean;
 }
 
+/** One opt-in voiceprint enrollment — the solo self-DM memo flow's `enroll:true` path
+ * (calls/registry.ts's `runPostCallPipeline`). */
+export interface EnrollVoiceprintJob {
+  /** The speaker's display name (`Store.getUser(...).displayName`, falling back to their sub) —
+   * SecRecorder's own speaker registry is keyed by this name, not a secchat user id. */
+  name: string;
+  /** The sample audio's on-disk path (same shared-recordings-volume convention as
+   * `TranscribeLegJob.filePath`) — the caller's leg file, read BEFORE the session directory is
+   * deleted (calls/registry.ts's `deleteSessionDir`). */
+  filePath: string;
+}
+
 export interface TranscribeClient {
   /** POST one leg's (or, in mixed mode, the whole call's) audio file to SecRecorder. Retries with
    * backoff on a network error or 5xx/429; queued per `maxConcurrency`. Never partially succeeds —
    * either the full `TranscribeResult` comes back or the promise rejects (the caller's
    * failure-isolation path, §2.4, posts a "transcription pending"/failure line and may retry later). */
   transcribeLeg(job: TranscribeLegJob): Promise<TranscribeResult>;
+  /** POST one sample audio file to SecRecorder's `POST /v1/speakers/from-audio` — enrolls the
+   * dominant speaker's voiceprint under `name` so a later `identify=true` transcription can match
+   * them. Same retry/backoff/concurrency posture as `transcribeLeg` (5xx/429 retryable, other 4xx
+   * permanent); resolves once enrolled, the 201 response body carries nothing the caller needs. */
+  enrollVoiceprint(job: EnrollVoiceprintJob): Promise<void>;
 }
 
 /** Thrown by `transcribeLeg` on a non-2xx SecRecorder response (see docs/plans/voice-contracts.md
@@ -179,6 +196,31 @@ export function makeTranscribeClient(deps: TranscribeClientDeps): TranscribeClie
     return (await res.json()) as TranscribeResult;
   }
 
+  /** One HTTP attempt at enrollment — multipart POST, mirrors `postOnce` above (same
+   * multipart/TLS/error-classification shape, different endpoint + form fields). */
+  async function postEnrollOnce(job: EnrollVoiceprintJob): Promise<void> {
+    const bytes = await readFile(job.filePath);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: "audio/ogg" }), basename(job.filePath));
+    form.append("name", job.name);
+
+    let res: Response;
+    try {
+      res = await fetchImpl(`${baseUrl}/v1/speakers/from-audio`, { method: "POST", body: form });
+    } catch (err) {
+      throw new TranscribeError(0, err instanceof Error ? err.message : String(err), true);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      const retryable = res.status >= 500 || res.status === 429;
+      throw new TranscribeError(res.status, detail || `SecRecorder HTTP ${res.status}`, retryable);
+    }
+    // 201 JSON body ({id, name, samples, speakers_in_sample, ...}) — nothing the caller needs;
+    // success is signaled by resolving at all. Drained (not just ignored) so a slow/odd body
+    // doesn't leave the response stream dangling.
+    await res.json().catch(() => undefined);
+  }
+
   return {
     async transcribeLeg(job: TranscribeLegJob): Promise<TranscribeResult> {
       return limiter(async () => {
@@ -194,6 +236,20 @@ export function makeTranscribeClient(deps: TranscribeClientDeps): TranscribeClie
         // Unreachable (the loop above always returns or throws on its last attempt) — satisfies
         // TS's control-flow analysis without an `as never` cast.
         throw new TranscribeError(0, "transcribeLeg: exhausted retries", false);
+      });
+    },
+    async enrollVoiceprint(job: EnrollVoiceprintJob): Promise<void> {
+      return limiter(async () => {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            return await postEnrollOnce(job);
+          } catch (err) {
+            const retryable = err instanceof TranscribeError ? err.retryable : true;
+            if (!retryable || attempt === maxAttempts) throw err;
+            await sleep(backoffMs * 2 ** (attempt - 1));
+          }
+        }
+        throw new TranscribeError(0, "enrollVoiceprint: exhausted retries", false);
       });
     },
   };
