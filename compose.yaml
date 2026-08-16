@@ -45,6 +45,11 @@ services:
     extra_hosts:
       - "secsso.sec.internal:host-gateway"
       - "secrouter.sec.internal:host-gateway"
+      # Voice-call transcription (SECCHAT_TRANSCRIBE_URL) posts recorded legs to SecRecorder,
+      # another secproxy-fronted FQDN — same host-gateway path as the two above. Without this the
+      # backend's transcribe fetch fails ENOTFOUND and every recorded call sticks on "transcription
+      # pending". Harmless when voice is off (an unused host alias).
+      - "secrecorder.sec.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
