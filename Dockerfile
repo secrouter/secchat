@@ -50,12 +50,45 @@ COPY --from=flutter-web /src/app/build/web ./app/build/web
 # ownership, so without this the mount would be root-owned and every upload would EACCES.
 RUN mkdir -p /var/lib/secchat/uploads && chown node:node /var/lib/secchat/uploads
 
+# TEST-INSTANCE: install the pi coding-agent CLI so SecChat's server-hosted runner spawns REAL pi
+# (not the echo stub), pointed at SecRouter (→ the local MLX models via SecLLM). The lean prod
+# image omits pi (a runner pool provides it); this bakes it in for the eval.
+#
+# LeanCTX rides along: pi-lean-ctx (the context-compression extension the runner loads via -e, per
+# secagent's launch contract) installed in the SAME npm tree as pi so its peer imports resolve,
+# plus lean-ctx-bin (the binary the extension shells out to). Pinned to match secagent's
+# LEANCTX_VERSION. The runner loads the extension only when SECCHAT_PI_LEANCTX_EXTENSION points at
+# it (set below) — never a host-wide pi wrap.
+RUN npm install -g @earendil-works/pi-coding-agent pi-lean-ctx@3.9.18 lean-ctx-bin@3.9.18
+
+# TEST-INSTANCE: secagent's pi extension (tools-only; self-contained, imports only node:child_process).
+# The runner loads it via an explicit `-e` (see pi-runner.ts / SECAGENT_PI_EXTENSION) alongside the
+# execute-gate. NOTE: its tools shell out to the `secagent` CLI, which is NOT installed in this image
+# — the extension loads + registers tools, but those CLI-backed tools need secagent present to run.
+COPY pi-extensions ./pi-extensions
+
 # Run as the image's built-in non-root user rather than root.
 USER node
 
 # Must bind all interfaces inside the container — compose/SecDeploy publish the port from the
 # host side.
-ENV SECCHAT_HOST=0.0.0.0
+ENV SECCHAT_HOST=0.0.0.0 \
+    SECCHAT_PI_RUNNER=1 \
+    SECCHAT_PI_ALLOW_EGRESS=1 \
+    PI_BASE_URL=https://secrouter.sec.internal/v1 \
+    PI_MODEL=secllm/balanced \
+    PI_API_KEY=unused \
+    SECAGENT_PI_EXTENSION=/app/pi-extensions/secagent.ts \
+    SECCHAT_PI_LEANCTX_EXTENSION=/usr/local/lib/node_modules/pi-lean-ctx/extensions/index.ts \
+    LEAN_CTX_PI_MODE=additive \
+    LEAN_CTX_PI_ENABLE_MCP=0 \
+    LEAN_CTX_PROXY_HISTORY_MODE=cache-aware \
+    LEAN_CTX_TELEMETRY=0 \
+    LEAN_CTX_NO_TELEMETRY=1 \
+    LEAN_CTX_NO_UPDATE_CHECK=1 \
+    LEAN_CTX_HARDEN=1 \
+    LEAN_CTX_NO_PERSIST=1 \
+    LEAN_CTX_EPHEMERAL=1
 
 EXPOSE 47010
 

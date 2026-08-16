@@ -29,6 +29,11 @@ RUN if [ "$INSTALL_PI" = "1" ]; then npm install -g "$PI_PACKAGE" || echo "pi in
 COPY src ./src
 COPY tsconfig.json ./
 
+# TEST-INSTANCE: secagent's pi extension (analysis_run + affordance tools) — loaded by the pod's pi
+# when the pod spec sets SECAGENT_PI_EXTENSION (see SECCHAT_POOL_PI_EXTENSION). Copied from the
+# secagent checkout into pi-extensions/ (a local, uncommitted mirror — same as the main Dockerfile).
+COPY pi-extensions ./pi-extensions
+
 # Non-root, matching the backend image.
 USER node
 

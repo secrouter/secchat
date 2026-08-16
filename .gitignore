@@ -16,3 +16,7 @@ coverage/
 
 # build caches (e.g. the downloaded node for scripts/bundle-macos-runnerd.sh)
 .cache/
+
+# deploy-time secrets + generated overrides (extracted/regenerated per deploy — never commit)
+pool-sa/
+compose.override.yaml
