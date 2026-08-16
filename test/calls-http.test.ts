@@ -27,6 +27,9 @@ function fakeCallsWith(live: LiveCall | undefined): CallRegistry {
     async invite() {
       throw new Error("not used by this test");
     },
+    async startSolo() {
+      throw new Error("not used by this test");
+    },
     async accept() {
       throw new Error("not used by this test");
     },

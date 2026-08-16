@@ -129,6 +129,10 @@ export interface LiveCall {
   calleeConnId?: string;
   mode?: CallMode; // fixed once accepted; unset while ringing
   consent?: boolean; // fixed once accepted; unset while ringing
+  /** A solo self-DM voice memo (one participant, one leg) rather than a 2-party call. Set by
+   * `startSolo`; it goes straight to `active` (no ring/accept/glare), records a single leg, and the
+   * post-call pipeline transcribes just that leg. `callee` equals `caller` for a solo call. */
+  solo?: boolean;
   callId?: Id; // the durable CallRow's id, once created at accept
   /** `deps.now()` value at which an unanswered ring auto-expires (§2.1) — set at invite, cleared
    * (irrelevant) once accepted. */
@@ -156,6 +160,16 @@ export interface CallRegistry {
    * `SendToConnection`'s doc comment). Throws {@link CallSignalError} on a validation/policy
    * rejection (not a member, channel isn't a DM, already busy, glare loss). */
   invite(input: { channelId: Id; callerConnId: string; caller: string; wantRecording: boolean }): Promise<LiveCall>;
+
+  /** Solo self-DM voice memo: the caller records THEMSELVES in a DM whose only user member is
+   * them. Unlike `invite`/`accept`, there is no peer to ring and no consent to negotiate (you're
+   * recording yourself) — this goes straight to an `active`, `relayed`, single-leg call bound to
+   * `connId`, then the client offers its one leg via the normal `call_sdp` relay path and hangs up
+   * via `call_end`, at which point the standard post-call pipeline transcribes the single leg into
+   * the DM. Requires mediad (there is no p2p fallback — a memo with no server-side recording is
+   * pointless); throws {@link CallSignalError} if mediad is unavailable, the channel isn't a
+   * self-DM, or a call is already active there. */
+  startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean }): Promise<LiveCall>;
 
   /** callee -> accept: the FIRST call against a given ringing call wins (pinned to `connId`);
    * later calls resolve `"taken"` so the caller sends `CallTakenFrame` back down that connection.
@@ -290,6 +304,62 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     busyBySub.set(callee, channelId);
 
     await deps.store.appendAudit({ actor: caller, action: "call.start", target: channelId });
+    return live;
+  }
+
+  async function startSolo(input: { channelId: Id; connId: string; sub: string; wantRecording: boolean }): Promise<LiveCall> {
+    const { channelId, connId, sub, wantRecording } = input;
+
+    const channel = await deps.store.getChannel(channelId);
+    if (!channel || channel.kind !== "dm") throw new CallSignalError("not_dm", "solo recording is DM-only");
+    const members = (await deps.store.listMembers(channelId)).filter((m) => m.memberType === "user").map((m) => m.memberRef);
+    if (!members.includes(sub)) throw new CallSignalError("not_member", "you are not a member of this DM");
+    // Guard against a solo record in a 2-party DM — that's a normal call. Solo is only for a
+    // self-DM (the single user member is you).
+    if (members.some((m) => m !== sub)) throw new CallSignalError("not_self_dm", "solo recording is only for a self-DM");
+
+    if (liveCalls.get(channelId)) throw new CallSignalError("call_active", "a recording is already active for this channel");
+    const busy = busyBySub.get(sub);
+    if (busy && busy !== channelId) throw new CallSignalError("user_busy", "you're already in a call");
+
+    // No p2p fallback: a memo with no server-side recording records nothing, so fail loud rather
+    // than silently downgrade the way a 2-party call does (§2.3's fail-open-CALLING doesn't apply —
+    // there's no live conversation to keep alive, only a recording that either happens or doesn't).
+    if (!deps.mediad) throw new CallSignalError("recording_unavailable", "server-side recording is not configured");
+    const healthy = await deps.mediad.health().catch(() => false);
+    if (!healthy) throw new CallSignalError("recording_unavailable", "the recording service is unavailable");
+    let session: { sessionId: string };
+    try {
+      session = await deps.mediad.createSession({ callId: channelId, legs: [{ legId: LEG_CALLER_ID, sub }] });
+    } catch (err) {
+      throw new CallSignalError("recording_unavailable", `could not start a recording session: ${describeError(err)}`);
+    }
+
+    const live: LiveCall = {
+      channelId,
+      caller: sub,
+      callee: sub, // self — a solo memo is a call with one party
+      state: "active",
+      wantRecording,
+      solo: true,
+      mode: "relayed",
+      consent: true,
+      callerConnId: connId,
+      mediadSessionId: session.sessionId,
+      legCaller: LEG_CALLER_ID,
+    };
+    liveCalls.set(channelId, live);
+    connToChannel.set(connId, channelId);
+    busyBySub.set(sub, channelId);
+
+    const row = await deps.store.createCall({ channelId, caller: sub, callee: sub, consent: true, mode: "relayed" });
+    live.callId = row.id;
+    try {
+      await deps.store.setCallMediadSessionId(row.id, session.sessionId);
+    } catch (err) {
+      console.error(`calls/registry: setCallMediadSessionId failed for solo call ${row.id}:`, describeError(err));
+    }
+    await deps.store.appendAudit({ actor: sub, action: "call.start", target: channelId, detail: "solo" });
     return live;
   }
 
@@ -508,6 +578,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
         caller: live.caller,
         callee: live.callee,
         mediadSessionId: live.mediadSessionId,
+        solo: live.solo,
       }).catch((err) => {
         console.error(`calls/registry: post-call pipeline failed for call ${live.callId}:`, describeError(err));
       });
@@ -562,6 +633,8 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     caller: string;
     callee: string;
     mediadSessionId: string;
+    /** A solo self-DM memo — one leg (the caller) instead of two. */
+    solo?: boolean;
   }
 
   /** Server-side attachment ingest (sha256 -> BlobStore.write -> Store.addAttachment, uploadedBy =
@@ -571,7 +644,11 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
    * line, below, rather than leaving it unclaimed until (if ever) a transcript posts. */
   async function ingestMixedFile(call: PostCallInput, manifest: MediadFinalizeManifest): Promise<Attachment | undefined> {
     if (!deps.recordingsDir || !deps.blobs || !deps.addAttachment) return undefined;
-    const mixed = manifest.files.find((f) => !f.legId);
+    // The mixed playback file (legId absent). For a solo memo, if mediad's mix step didn't emit one
+    // (e.g. ffmpeg amix declined a single input), fall back to the sole per-leg file so the memo
+    // still gets a playable attachment.
+    const mixed = manifest.files.find((f) => !f.legId)
+      ?? (call.solo ? manifest.files.find((f) => f.legId === LEG_CALLER_ID) : undefined);
     if (!mixed) return undefined;
     const bytes = await readFile(join(deps.recordingsDir, call.mediadSessionId, mixed.path));
     const sha256 = sha256Hex(bytes);
@@ -649,9 +726,12 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
 
     if (!deps.transcribe) return; // SecRecorder not configured — the pending line already says "unavailable"
 
-    const callerFile = manifest.files.find((f) => f.legId === LEG_CALLER_ID);
-    const calleeFile = manifest.files.find((f) => f.legId === LEG_CALLEE_ID);
-    if (!callerFile || !calleeFile) {
+    // The legs to transcribe: a solo memo has just the caller's leg; a 2-party call has both.
+    const legSpecs = call.solo
+      ? [{ legId: LEG_CALLER_ID, sub: call.caller }]
+      : [{ legId: LEG_CALLER_ID, sub: call.caller }, { legId: LEG_CALLEE_ID, sub: call.callee }];
+    const legFiles = legSpecs.map((l) => ({ ...l, file: manifest.files.find((f) => f.legId === l.legId) }));
+    if (legFiles.some((l) => !l.file)) {
       await deps.store.appendAudit({ actor: "system", action: "call.transcribe_failed", target: call.callId, detail: "manifest missing a leg file" });
       await editPendingIfClaimed(call, pendingMessageId, "🎙️ Recording stored — transcription failed (missing leg audio).");
       return;
@@ -665,18 +745,19 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       return;
     }
     const recordingsDir = deps.recordingsDir; // hoisted past the guard above so it stays narrowed non-undefined below
+    const transcribe = deps.transcribe; // ditto — checked non-null at the top of this block
     const sessionDir = join(recordingsDir, call.mediadSessionId);
 
     try {
-      const [callerResult, calleeResult] = await Promise.all([
-        deps.transcribe.transcribeLeg({ legId: LEG_CALLER_ID, filePath: join(sessionDir, callerFile.path) }),
-        deps.transcribe.transcribeLeg({ legId: LEG_CALLEE_ID, filePath: join(sessionDir, calleeFile.path) }),
-      ]);
-      const [callerUser, calleeUser] = await Promise.all([deps.store.getUser(call.caller), deps.store.getUser(call.callee)]);
-      const legs: LegTranscript[] = [
-        { speaker: callerUser?.displayName || call.caller, startOffsetMs: callerFile.startOffsetMs, result: callerResult },
-        { speaker: calleeUser?.displayName || call.callee, startOffsetMs: calleeFile.startOffsetMs, result: calleeResult },
-      ];
+      const results = await Promise.all(
+        legFiles.map((l) => transcribe.transcribeLeg({ legId: l.legId, filePath: join(sessionDir, l.file!.path) })),
+      );
+      const users = await Promise.all(legFiles.map((l) => deps.store.getUser(l.sub)));
+      const legs: LegTranscript[] = legFiles.map((l, i) => ({
+        speaker: users[i]?.displayName || l.sub,
+        startOffsetMs: l.file!.startOffsetMs,
+        result: results[i]!,
+      }));
       const turns: MergedTurn[] = mergeTranscripts(legs);
       const row = await deps.store.getCall(call.callId);
       const header: TranscriptHeaderInput = {
@@ -718,7 +799,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     return sharedEditPendingIfClaimed(pendingRecordingDeps, call, pendingMessageId, content);
   }
 
-  return { invite, accept, relay, end, untrackConnection, getActiveCall, checkRingingTimeouts };
+  return { invite, startSolo, accept, relay, end, untrackConnection, getActiveCall, checkRingingTimeouts };
 }
 
 function describeError(err: unknown): string {

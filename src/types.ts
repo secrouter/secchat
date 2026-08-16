@@ -553,6 +553,9 @@ export interface Store {
   /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
    * or null. Used to keep POST /dm idempotent (one DM per pair, never a duplicate). */
   findDmChannel(subA: string, subB: string): Promise<Channel | null>;
+  /** The user's self-DM ("notes to self") — a `kind:"dm"` channel whose only user member is `sub`
+   * (distinct from a 2-party DM, which `findDmChannel` matches). Backs the solo voice-memo flow. */
+  findSelfDmChannel(sub: string): Promise<Channel | null>;
 
   createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent>;
   getAgent(id: Id): Promise<Agent | null>;

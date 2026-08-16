@@ -276,6 +276,24 @@ export function attachWsHub(
       return;
     }
 
+    if (type === "call_solo_start") {
+      // Solo self-DM voice memo: no ring, no consent negotiation (you're recording yourself). Goes
+      // straight to an active relayed one-leg call; the caller then drives the SAME relayed-mode
+      // offer path (call_sdp) and hangs up with call_end, exactly like a 2-party relayed call.
+      const wantRecording = typeof msg.wantRecording === "boolean" ? msg.wantRecording : true;
+      try {
+        await calls.startSolo({ channelId, connId: conn.id, sub: conn.sub, wantRecording });
+      } catch (err) {
+        sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "solo_failed", err instanceof Error ? err.message : undefined);
+        return;
+      }
+      // Mirror the `call_accept` confirmation a 2-party relayed call sends its caller, so the app's
+      // existing relayed-mode offer path can drive the memo unchanged (`solo:true` lets the UI skip
+      // any remote-audio/peer rendering).
+      sendToConnection(conn.id, { type: "call_accept", channelId, mode: "relayed", solo: true });
+      return;
+    }
+
     if (type === "call_accept") {
       if (typeof msg.consent !== "boolean") return;
       let result: LiveCall | "taken" | "not_ringing";

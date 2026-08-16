@@ -663,6 +663,107 @@ test("relayed call end-to-end: recording ingested as an attachment, per-leg tran
   }
 });
 
+test("solo self-DM voice memo end-to-end: one leg recorded, transcribed, and posted into the self-DM", async () => {
+  const recordingsDir = await mkdtemp(join(tmpdir(), "secchat-solo-test-"));
+  try {
+    const store = new MemoryStore();
+    // A self-DM: a kind:"dm" channel with a SINGLE user member (alice).
+    const channel = await store.createChannel({ workspaceId: "ws-1", kind: "dm", createdBy: "alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "alice", memberType: "user", role: "owner" });
+    await store.upsertUser({ sub: "alice", displayName: "Alice Ng", groups: [] });
+
+    const mediad = fakeMediad({ healthy: true });
+    const originalCreateSession = mediad.createSession.bind(mediad);
+    mediad.createSession = async (input) => {
+      const res = await originalCreateSession(input);
+      await mkdir(join(recordingsDir, res.sessionId), { recursive: true });
+      await writeFile(join(recordingsDir, res.sessionId, "leg.ogg"), "fake-solo-audio");
+      await writeFile(join(recordingsDir, res.sessionId, "mixed.m4a"), "fake-mixed-audio");
+      return res;
+    };
+
+    const blobs = new MemoryBlobStore();
+    const transcribeByLeg: Record<string, TranscribeResult> = {};
+    const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+    const { send } = makeSend();
+    const { deliverToUser } = makeDeliverToUser();
+
+    const registry = makeCallRegistry({
+      store,
+      send,
+      deliverToUser,
+      now: () => Date.now(),
+      mediad,
+      transcribe: {
+        async transcribeLeg(job) {
+          const r = transcribeByLeg[job.legId];
+          if (!r) throw new Error(`no fixture for ${job.legId}`);
+          return r;
+        },
+      },
+      marking: MARKING,
+      broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+      recordingsDir,
+      blobs,
+      addAttachment: (input) => store.addAttachment(input),
+    });
+
+    // No ring/accept — straight to an active, relayed, ONE-leg call.
+    const live = await registry.startSolo({ channelId: channel.id, connId: "a", sub: "alice", wantRecording: true });
+    assert.equal(live.mode, "relayed");
+    assert.equal(live.solo, true);
+    assert.equal(live.caller, "alice");
+    assert.equal(live.callee, "alice"); // self
+    assert.equal(mediad.createSessionCalls.length, 1);
+    assert.equal(mediad.createSessionCalls[0]!.legs.length, 1, "a solo memo creates a ONE-leg session");
+    assert.equal(mediad.createSessionCalls[0]!.legs[0]!.sub, "alice");
+
+    mediad.endSession = async (sessionId) => ({
+      sessionId,
+      files: [
+        { legId: live.legCaller, path: "leg.ogg", startOffsetMs: 0, durationMs: 4000 },
+        { path: "mixed.m4a", startOffsetMs: 0, durationMs: 4000 },
+      ],
+      truncated: false,
+    });
+    transcribeByLeg[live.legCaller!] = {
+      task: "transcribe",
+      language: "en",
+      duration: 4,
+      text: "note to self buy milk",
+      words: [],
+      segments: [{ start: 0.2, end: 2, text: "note to self buy milk" }],
+    };
+
+    await registry.end({ channelId: channel.id, connId: "a", reason: "hangup" });
+    for (let i = 0; i < 50; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      const row = await store.getCall(live.callId!);
+      if (row?.transcriptMessageId) break;
+    }
+
+    const row = await store.getCall(live.callId!);
+    assert.ok(row?.recordingAttachmentId, "the recording was ingested as an attachment");
+    assert.ok(row?.transcriptMessageId, "a transcript was posted into the self-DM");
+
+    const posted = await store.getMessage(row!.transcriptMessageId!);
+    assert.equal(posted?.channelId, channel.id, "the transcript landed in the self-DM");
+    assert.equal(posted?.authorType, "system");
+    const transcriptBroadcast = broadcasts
+      .filter((b) => (b.payload as { type: string }).type === "message")
+      .find((b) => (b.payload as { message: { id: string } }).message.id === row!.transcriptMessageId);
+    assert.ok(transcriptBroadcast, "the transcript was broadcast");
+    const content = (transcriptBroadcast!.payload as { message: { content: string } }).message.content;
+    assert.match(content, /\*\*Alice Ng\*\*[\s\S]*note to self buy milk/);
+
+    const audit = await store.listAudit();
+    assert.ok(audit.some((e) => e.action === "call.start" && e.detail === "solo"), "the solo start was audited");
+    assert.ok(audit.some((e) => e.action === "call.transcribed"));
+  } finally {
+    await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
 // ── §2.4 v3.1 REQUIRED failure-isolation fix: "the artifact is never invisible" ────────────────────
 // Below: the two gaps the finding named — SecRecorder never configured, and transcription
 // exhausting its retries — each used to leave the ingested recording UNCLAIMED (and so invisible in

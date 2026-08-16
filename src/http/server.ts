@@ -599,6 +599,23 @@ function buildRouter(
     sendJson(res, 201, { ...channel, members: [principal.sub, other] });
   });
 
+  router.add("POST", "/self-dm", async ({ res, principal }) => {
+    // A self-DM ("notes to self") — the home for solo voice memos. It's a `kind:"dm"` channel with a
+    // SINGLE user member (you), so `findDmChannel` (which requires exactly two) never collides with a
+    // real 2-party DM, and the normal call button (peer-gated) stays hidden while the solo-record
+    // button shows. Idempotent: one self-DM per user.
+    const existing = await store.findSelfDmChannel(principal.sub);
+    if (existing) {
+      sendJson(res, 200, { ...existing, members: [principal.sub] });
+      return;
+    }
+    const channel = await store.createChannel({ workspaceId: "ws-default", kind: "dm", createdBy: principal.sub });
+    await store.addMember({ channelId: channel.id, memberRef: principal.sub, memberType: "user", role: "owner" });
+    subscribe?.(principal.sub, channel.id);
+    await store.appendAudit({ actor: principal.sub, action: "dm.create", target: channel.id, detail: "self" });
+    sendJson(res, 201, { ...channel, members: [principal.sub] });
+  });
+
   router.add("POST", "/channels", async ({ req, res, principal }) => {
     const body = (await readJsonBody(req)) as { name?: string; kind?: ChannelKind; workspaceId?: string; marking?: string };
     // An optional INITIAL channel marking (setting it later goes through POST /channels/:id/marking).

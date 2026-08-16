@@ -32,8 +32,15 @@ class FakeCallRegistry implements CallRegistry {
   untrackCalls: string[] = [];
   checkRingingTimeoutsImpl: () => Promise<Array<{ channelId: string; caller: string; callee: string }>> = async () => [];
 
+  soloImpl: (input: { channelId: string; connId: string; sub: string; wantRecording: boolean }) => Promise<LiveCall> = async () => {
+    throw new Error("soloImpl not configured");
+  };
+
   async invite(input: { channelId: string; callerConnId: string; caller: string; wantRecording: boolean }) {
     return this.inviteImpl(input);
+  }
+  async startSolo(input: { channelId: string; connId: string; sub: string; wantRecording: boolean }) {
+    return this.soloImpl(input);
   }
   async accept(input: { channelId: string; connId: string; consent: boolean }) {
     return this.acceptImpl(input);

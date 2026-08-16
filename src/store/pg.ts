@@ -733,6 +733,22 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToChannel(rows[0]) : null;
   }
 
+  async findSelfDmChannel(sub: string): Promise<Channel | null> {
+    const { rows } = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.workspace_id, c.kind, c.name, c.cui_marking, c.archived, c.created_by, c.created_at
+       FROM channels c
+       WHERE c.kind = 'dm'
+         AND (SELECT count(*) FROM channel_members m
+              WHERE m.channel_id = c.id AND m.member_type = 'user') = 1
+         AND EXISTS (SELECT 1 FROM channel_members m
+                     WHERE m.channel_id = c.id AND m.member_ref = $1 AND m.member_type = 'user')
+       ORDER BY c.ins_seq
+       LIMIT 1`,
+      [sub],
+    );
+    return rows[0] ? rowToChannel(rows[0]) : null;
+  }
+
   // ── agents ───────────────────────────────────────────────────────────────────────────────────
 
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {

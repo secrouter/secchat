@@ -105,8 +105,10 @@ export interface MediadLeg {
 
 export interface MediadCreateSessionInput {
   callId: Id;
-  legs: [MediadLeg, MediadLeg]; // caller leg, callee leg — see §11's SFU caution: don't assume
-  // exactly two elsewhere in the codebase, but v1's control-API surface IS two-leg.
+  // One leg per participant: a normal 1:1 call sends [caller, callee]; a solo self-DM voice memo
+  // sends a single [caller] leg (mediad records + mixes an N-leg session, N>=1 — see
+  // mediad/internal/session/finalize.go). The wire layer passes this straight through.
+  legs: MediadLeg[];
 }
 
 /** mediad's single-response (non-trickle, §2.2) SDP answer for one leg's offer. */

@@ -232,6 +232,17 @@ export class MemoryStore implements Store, SessionStore {
     return null;
   }
 
+  async findSelfDmChannel(sub: string): Promise<Channel | null> {
+    for (const channel of this.#channels.values()) {
+      if (channel.kind !== "dm") continue;
+      const userRefs = (this.#members.get(channel.id) ?? [])
+        .filter((m) => m.memberType === "user")
+        .map((m) => m.memberRef);
+      if (userRefs.length === 1 && userRefs[0] === sub) return channel;
+    }
+    return null;
+  }
+
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {
     const agent: Agent = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     this.#agents.set(agent.id, agent);
