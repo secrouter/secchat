@@ -38,8 +38,32 @@ func newTestManager(t *testing.T) *Manager {
 	return mgr
 }
 
-func twoLegs(a, b string) [2]LegSpec {
-	return [2]LegSpec{{LegID: "leg_" + a, Sub: a}, {LegID: "leg_" + b, Sub: b}}
+func twoLegs(a, b string) []LegSpec {
+	return []LegSpec{{LegID: "leg_" + a, Sub: a}, {LegID: "leg_" + b, Sub: b}}
+}
+
+func oneLeg(a string) []LegSpec {
+	return []LegSpec{{LegID: "leg_" + a, Sub: a}}
+}
+
+// A solo self-DM voice memo: a session with a SINGLE leg. It must be created (not rejected as
+// "exactly two legs"), expose exactly one leg, and have no forwarding peer for it.
+func TestCreateSessionSingleLeg(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("solo1", oneLeg("alice"))
+	if err != nil {
+		t.Fatalf("one-leg CreateSession: %v", err)
+	}
+	st := sess.State()
+	if len(st.Legs) != 1 {
+		t.Fatalf("want 1 leg, got %d", len(st.Legs))
+	}
+	if st.Legs[0].LegID != "leg_alice" {
+		t.Fatalf("want leg_alice, got %q", st.Legs[0].LegID)
+	}
+	if peer := sess.peerLeg("leg_alice"); peer != nil {
+		t.Fatalf("a solo leg must have no forwarding peer, got %v", peer)
+	}
 }
 
 func TestCreateSessionEnforcesSessionCap(t *testing.T) {

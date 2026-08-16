@@ -29,20 +29,23 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	if req.CallID == "" || len(req.Legs) != 2 {
-		writeError(w, http.StatusBadRequest, "bad_request", "callId and exactly two legs are required")
+	// One leg = a solo self-DM voice memo (record yourself); two legs = a 1:1 call. A session
+	// records + mixes N legs (N>=1) — the RTP forwarding between legs is peer-nil-safe, so a
+	// single leg simply records with nothing to forward to.
+	if req.CallID == "" || len(req.Legs) < 1 || len(req.Legs) > 2 {
+		writeError(w, http.StatusBadRequest, "bad_request", "callId and one or two legs are required")
 
 		return
 	}
 
-	var legs [2]session.LegSpec
-	for i, l := range req.Legs {
+	legs := make([]session.LegSpec, 0, len(req.Legs))
+	for _, l := range req.Legs {
 		if l.LegID == "" || l.Sub == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "each leg requires legId and sub")
 
 			return
 		}
-		legs[i] = session.LegSpec{LegID: l.LegID, Sub: l.Sub}
+		legs = append(legs, session.LegSpec{LegID: l.LegID, Sub: l.Sub})
 	}
 
 	sess, err := s.mgr.CreateSession(req.CallID, legs)

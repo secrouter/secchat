@@ -133,10 +133,10 @@ func (m *Manager) Close() error {
 	return err
 }
 
-// CreateSession allocates a new session: two legs, per-leg recorder writers opened (not yet
-// writing — no RTP has arrived), and the session's shared t0 established
-// (docs/plans/voice-contracts.md §2.1).
-func (m *Manager) CreateSession(callID string, legs [2]LegSpec) (*Session, error) {
+// CreateSession allocates a new session: one or two legs (one = a solo self-DM voice memo, two =
+// a 1:1 call), per-leg recorder writers opened (not yet writing — no RTP has arrived), and the
+// session's shared t0 established (docs/plans/voice-contracts.md §2.1).
+func (m *Manager) CreateSession(callID string, legs []LegSpec) (*Session, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()

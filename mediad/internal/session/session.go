@@ -104,7 +104,7 @@ type Session struct {
 	stopRTCP chan struct{}
 }
 
-func newSession(mgr *Manager, id, callID, dir string, specs [2]LegSpec, t0 time.Time) (*Session, error) {
+func newSession(mgr *Manager, id, callID, dir string, specs []LegSpec, t0 time.Time) (*Session, error) {
 	s := &Session{
 		id:        id,
 		callID:    callID,
