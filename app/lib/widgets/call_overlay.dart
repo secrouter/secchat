@@ -1,12 +1,15 @@
 /// The call UI (docs/plans/voice-calls-plan.md §3.3): a ring screen (accept /
-/// accept-without-recording / decline) while ringing, and a compact in-call
-/// bar (mute, hang up, ● REC, duration, the mediad-down notice) once
-/// connecting/active. Wraps the whole app body in a [Stack] rather than using
-/// `showDialog`/`Navigator` so a call rings/stays live across channel
+/// accept-without-recording / decline) while ringing, and a brief "call
+/// ended" banner. Wraps the whole app body in a [Stack] rather than using
+/// `showDialog`/`Navigator` so a call rings/dismisses across channel
 /// switches without fighting the app's own navigation.
+///
+/// The SUSTAINED in-call UI (connecting/active/recordingMemo -- mute, hang
+/// up, ● REC, duration, the mic-level meter) used to live here as a compact
+/// bottom bar, but has moved to the full-screen [CallScreen] reached via
+/// `ChatScreen`'s Call bottom tab (see `call_screen.dart`) -- this overlay
+/// only owns the states that are too transient to deserve their own tab.
 library;
-
-import 'dart:async';
 
 import 'package:flutter/material.dart';
 
@@ -50,23 +53,12 @@ class CallOverlay extends StatelessWidget {
                   labelForSub: labelForSub,
                 ),
               ),
-            if (snap.isLive)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: _CallBar(
-                  controller: controller,
-                  labelForSub: labelForSub,
-                ),
-              ),
-            if (snap.phase == CallPhase.recordingMemo)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: _MemoRecordingBar(controller: controller),
-              ),
+            // isLive/recordingMemo intentionally show NOTHING here anymore --
+            // `ChatScreen` renders [CallScreen] full-screen (behind the Call
+            // bottom tab) for exactly those phases; a compact bar here too
+            // would double up the UI and, worse, physically overlap
+            // `ChatScreen`'s bottomNavigationBar (same bottom-anchored
+            // `Positioned` real estate).
             if (snap.phase == CallPhase.ended)
               Positioned(
                 left: 0,
@@ -95,12 +87,6 @@ String _endReasonLabel(CallEndReason reason) => switch (reason) {
   CallEndReason.failed => 'Call failed',
   CallEndReason.none => 'Call ended',
 };
-
-String _fmtDuration(Duration d) {
-  final m = d.inMinutes.toString().padLeft(2, '0');
-  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
-  return '$m:$s';
-}
 
 /// Full-screen ring UI: outbound ("Calling…", cancel) or inbound (accept /
 /// accept-without-recording / decline, plus the consent explainer when the
@@ -292,240 +278,6 @@ class _RingAction extends StatelessWidget {
   }
 }
 
-/// The connecting/active in-call bar, pinned to the bottom of the screen.
-class _CallBar extends StatefulWidget {
-  const _CallBar({required this.controller, required this.labelForSub});
-
-  final CallController controller;
-  final String Function(String) labelForSub;
-
-  @override
-  State<_CallBar> createState() => _CallBarState();
-}
-
-class _CallBarState extends State<_CallBar> {
-  Timer? _ticker;
-
-  @override
-  void initState() {
-    super.initState();
-    // The controller only notifies on state CHANGES; the duration display
-    // needs a tick every second while live regardless of whether anything
-    // else changed.
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _ticker?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final snap = widget.controller.snapshot;
-    final peer = snap.peerSub == null ? '' : widget.labelForSub(snap.peerSub!);
-    final compact = isCompact(context);
-    final elapsed = snap.connectedAt == null
-        ? null
-        : DateTime.now().difference(snap.connectedAt!);
-
-    return Material(
-      color: AppColors.surfaceRaised,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 12 : 20,
-            vertical: 10,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (snap.recordingUnavailableNotice)
-                const _NoticeLine(
-                  icon: Icons.mic_off,
-                  text:
-                      'Recording unavailable — this call will NOT be recorded.',
-                  color: AppColors.warn,
-                ),
-              if (snap.recordingDeclinedNotice)
-                const _NoticeLine(
-                  icon: Icons.mic_off,
-                  text:
-                      'The other party declined recording — this call will NOT be recorded.',
-                  color: AppColors.warn,
-                ),
-              Row(
-                children: [
-                  const Icon(Icons.call, size: 16, color: AppColors.ok),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      snap.phase == CallPhase.connecting
-                          ? 'Connecting to $peer…'
-                          : peer,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.text,
-                      ),
-                    ),
-                  ),
-                  if (snap.recordingIndicatorOn) ...[
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: const BoxDecoration(
-                        color: AppColors.bad,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 5),
-                    const Text(
-                      'REC',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.bad,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                  ],
-                  if (elapsed != null) ...[
-                    Text(
-                      _fmtDuration(elapsed),
-                      style: AppFonts.mono(
-                        fontSize: 12,
-                        color: AppColors.textFaint,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                  ],
-                  IconButton(
-                    onPressed: widget.controller.toggleMute,
-                    icon: Icon(
-                      snap.muted ? Icons.mic_off : Icons.mic,
-                      size: 18,
-                    ),
-                    tooltip: snap.muted ? 'Unmute' : 'Mute',
-                    color: snap.muted ? AppColors.warn : AppColors.textMuted,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  IconButton(
-                    onPressed: widget.controller.hangUp,
-                    icon: const Icon(Icons.call_end, size: 18),
-                    tooltip: 'Hang up',
-                    color: AppColors.bad,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Minimal in-progress bar for a self-DM voice memo ([CallPhase.recordingMemo]):
-/// just the ● REC indicator, elapsed duration, and a Stop button (`call_end`)
-/// -- no peer name, no mute, no remote-audio UI (there's no peer to mute for
-/// or hear back from; [MediaSession] records server-side and sends nothing
-/// back, per [WebrtcCallController.buildRemoteAudioSink]'s `isLive` gate).
-class _MemoRecordingBar extends StatefulWidget {
-  const _MemoRecordingBar({required this.controller});
-
-  final CallController controller;
-
-  @override
-  State<_MemoRecordingBar> createState() => _MemoRecordingBarState();
-}
-
-class _MemoRecordingBarState extends State<_MemoRecordingBar> {
-  Timer? _ticker;
-
-  @override
-  void initState() {
-    super.initState();
-    // Same per-second tick as [_CallBarState] -- the duration display needs
-    // to advance even though the controller only notifies on state changes.
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _ticker?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final snap = widget.controller.snapshot;
-    final compact = isCompact(context);
-    final elapsed = snap.connectedAt == null
-        ? null
-        : DateTime.now().difference(snap.connectedAt!);
-
-    return Material(
-      color: AppColors.surfaceRaised,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 12 : 20,
-            vertical: 10,
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(
-                  color: AppColors.bad,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  'Recording voice memo…',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.text,
-                  ),
-                ),
-              ),
-              if (elapsed != null) ...[
-                Text(
-                  _fmtDuration(elapsed),
-                  style: AppFonts.mono(fontSize: 12, color: AppColors.textFaint),
-                ),
-                const SizedBox(width: 10),
-              ],
-              TextButton.icon(
-                onPressed: widget.controller.hangUp,
-                style: TextButton.styleFrom(foregroundColor: AppColors.bad),
-                icon: const Icon(Icons.stop_circle_outlined, size: 18),
-                label: const Text('Stop'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// A brief "call ended" / "missed call" / failure banner shown once, then
 /// dismissed (tap or [CallController.dismiss]).
 class _CallEndedBanner extends StatelessWidget {
@@ -576,34 +328,6 @@ class _CallEndedBanner extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _NoticeLine extends StatelessWidget {
-  const _NoticeLine({
-    required this.icon,
-    required this.text,
-    required this.color,
-  });
-
-  final IconData icon;
-  final String text;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(text, style: TextStyle(fontSize: 11.5, color: color)),
-          ),
-        ],
       ),
     );
   }

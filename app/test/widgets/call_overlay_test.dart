@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/calls/call_controller.dart';
-import 'package:secchat_app/models.dart' show CallMode;
 import 'package:secchat_app/widgets/call_overlay.dart';
 
 import '../calls/fake_call_controller.dart';
@@ -85,100 +84,32 @@ void main() {
     });
   });
 
-  group('in-call bar', () {
-    testWidgets('active call shows peer, duration, mute + hang up', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          CallSnapshot(
-            phase: CallPhase.active,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            amCaller: true,
-            mode: CallMode.p2p,
-            connectedAt: DateTime.now(),
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-      await tester.pump(); // let the 1s ticker's initial frame settle
+  // The sustained in-call bar (mute/hang-up/●REC/duration/mic meter) and the
+  // solo-memo bar used to be covered here, but that UI moved to the
+  // full-screen `CallScreen` (see `call_screen_test.dart`) -- `CallOverlay`
+  // no longer renders anything for `isLive`/`recordingMemo` (see its class
+  // doc); those states now render nothing here on purpose so they don't
+  // double up with -- and physically overlap -- `ChatScreen`'s Call tab.
+  testWidgets('a live/recordingMemo call renders nothing from CallOverlay itself (moved to CallScreen)', (
+    tester,
+  ) async {
+    final controller = FakeCallController()
+      ..emit(
+        CallSnapshot(
+          phase: CallPhase.active,
+          channelId: 'chan_1',
+          peerSub: 'bob',
+          connectedAt: DateTime.now(),
+        ),
+      );
+    await tester.pumpWidget(host(controller));
+    await tester.pump();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(find.byTooltip('Mute'), findsOneWidget);
-      expect(find.byTooltip('Hang up'), findsOneWidget);
-      // p2p mode never shows ● REC.
-      expect(find.text('REC'), findsNothing);
-
-      await tester.tap(find.byTooltip('Hang up'));
-      expect(controller.hangUpCalls, 1);
-    });
-
-    testWidgets('relayed + recording shows the ● REC indicator (server-pushed recordingOn, finding #7 -- truthful by construction, not derived from mode)', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          CallSnapshot(
-            phase: CallPhase.active,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            mode: CallMode.relayed,
-            recordingOn: true,
-            connectedAt: DateTime.now(),
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-      await tester.pump();
-
-      expect(find.text('REC'), findsOneWidget);
-    });
-
-    testWidgets('relayed mode alone, before the server pushes call_recording, does NOT show ● REC (no guessing from mode)', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          CallSnapshot(
-            phase: CallPhase.active,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            mode: CallMode.relayed,
-            connectedAt: DateTime.now(),
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-      await tester.pump();
-
-      expect(find.text('REC'), findsNothing);
-    });
-
-    testWidgets('mediad-down downgrade shows the recording-unavailable notice', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          CallSnapshot(
-            phase: CallPhase.connecting,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            mode: CallMode.p2p,
-            recordingUnavailableNotice: true,
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-      await tester.pump();
-
-      expect(find.textContaining('will NOT be recorded'), findsOneWidget);
-    });
-
-    testWidgets('tapping mute toggles it', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          CallSnapshot(
-            phase: CallPhase.active,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            connectedAt: DateTime.now(),
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-      await tester.pump();
-
-      await tester.tap(find.byTooltip('Mute'));
-      expect(controller.toggleMuteCalls, 1);
-    });
+    expect(find.byTooltip('Mute'), findsNothing);
+    expect(find.byTooltip('Hang up'), findsNothing);
+    expect(find.text('REC'), findsNothing);
+    // The wrapped chat content underneath is still there, unobstructed.
+    expect(find.text('channel content'), findsOneWidget);
   });
 
   group('call-ended banner', () {

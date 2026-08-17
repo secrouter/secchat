@@ -195,6 +195,37 @@ class MediaSession {
     if (track != null) track.enabled = !muted;
   }
 
+  /// The LOCAL mic's current input level, 0.0–1.0 -- the standard
+  /// `flutter_webrtc`/WebRTC-stats way to read it: `getStats()`'s
+  /// `media-source` report (kind `audio`) carries a live `audioLevel` value
+  /// sourced directly from the capture device, independent of whether
+  /// anything has been negotiated/sent yet. Some platforms only populate
+  /// `audioLevel` on the `outbound-rtp` report instead (once a track is
+  /// actually being sent), so that's the fallback. Returns `0.0` if neither
+  /// is present, or on any error -- this drives a debug meter
+  /// ([CallScreen]'s mic-level bar), so it must never throw.
+  Future<double> pollInputLevel() async {
+    final pc = _pc;
+    if (pc == null) return 0.0;
+    try {
+      final reports = await pc.getStats();
+      double? outboundLevel;
+      for (final report in reports) {
+        final values = report.values;
+        if (report.type == 'media-source' && values['kind'] == 'audio') {
+          final level = values['audioLevel'];
+          if (level is num) return level.toDouble();
+        } else if (report.type == 'outbound-rtp' && outboundLevel == null) {
+          final level = values['audioLevel'];
+          if (level is num) outboundLevel = level.toDouble();
+        }
+      }
+      return outboundLevel ?? 0.0;
+    } catch (_) {
+      return 0.0;
+    }
+  }
+
   RTCPeerConnection _requirePc() {
     final pc = _pc;
     if (pc == null) {

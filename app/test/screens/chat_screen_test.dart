@@ -1,15 +1,18 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secchat_app/calls/call_controller.dart';
 import 'package:secchat_app/commands.dart';
 import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/platform/daemon_supervisor.dart';
 import 'package:secchat_app/screens/chat.dart';
+import 'package:secchat_app/widgets/call_screen.dart';
 import 'package:secchat_app/widgets/composer.dart';
 import 'package:secchat_app/widgets/marking_banner.dart';
 import 'package:secchat_app/widgets/sidebar.dart';
 
+import '../calls/fake_call_controller.dart';
 import '../fakes/fake_api_client.dart';
 
 /// Pumps enough frames to flush the chained Futures `ChatScreen` awaits on
@@ -36,6 +39,67 @@ void main() {
   // timers under the test binding).
   setUp(() => debugDaemonSupervisorFactory = () => NoopDaemonSupervisor());
   tearDownAll(() => debugDaemonSupervisorFactory = createDaemonSupervisor);
+
+  final defaultCallControllerFactory = debugCallControllerFactory;
+  tearDownAll(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+  group('call bottom tabs', () {
+    testWidgets('a sustained call auto-focuses the Call tab; Chat/Call switch without ending the call', (
+      tester,
+    ) async {
+      final fake = FakeApiClient(me: _principal, channels: _channels);
+      final callController = FakeCallController();
+      debugCallControllerFactory = ({required api, required mySub, stunUrls = const []}) => callController;
+      addTearDown(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+      await tester.pumpWidget(
+        MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+      );
+      await pumpSettled(tester);
+
+      // No call in progress: no bottom tab bar, normal chat only.
+      expect(find.byType(CallScreen), findsNothing);
+      expect(find.text('Call'), findsNothing);
+      expect(find.text('general'), findsWidgets);
+
+      // The call reaches a SUSTAINED phase (voice-calls-plan.md §3.3) --
+      // the tab bar appears and the Call tab is auto-selected.
+      callController.emit(
+        CallSnapshot(
+          phase: CallPhase.active,
+          channelId: 'c1',
+          peerSub: 'dev.bob',
+          connectedAt: DateTime.now(),
+        ),
+      );
+      await pumpSettled(tester);
+
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.text('Call'), findsOneWidget);
+      expect(find.byType(CallScreen), findsOneWidget);
+
+      // Tap Chat: the call keeps running (no hangUp call), but the chat
+      // body is what's showing.
+      await tester.tap(find.text('Chat'));
+      await pumpSettled(tester);
+      expect(callController.hangUpCalls, 0);
+      expect(find.text('general'), findsWidgets);
+
+      // Tap Call: back to the full-screen call view, same live call.
+      await tester.tap(find.text('Call'));
+      await pumpSettled(tester);
+      expect(find.byType(CallScreen), findsOneWidget);
+
+      // The call ends -- the tab bar and CallScreen both drop, back to
+      // plain chat.
+      callController.emit(
+        const CallSnapshot(phase: CallPhase.ended, channelId: 'c1', peerSub: 'dev.bob'),
+      );
+      await pumpSettled(tester);
+      expect(find.text('Chat'), findsNothing);
+      expect(find.byType(CallScreen), findsNothing);
+    });
+  });
 
   testWidgets('on desktop, the daemon starts with a minted scoped runner token', (tester) async {
     tester.view.physicalSize = const Size(1400, 900); // the runner chip widens the top bar

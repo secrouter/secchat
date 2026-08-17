@@ -13,7 +13,7 @@
 /// only what they need (see `test/calls/fake_call_controller.dart`).
 library;
 
-import 'dart:async' show Completer, unawaited;
+import 'dart:async' show Completer, Timer, unawaited;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoView;
@@ -86,6 +86,7 @@ class CallSnapshot {
     this.recordingDeclinedNotice = false,
     this.recordingOn = false,
     this.muted = false,
+    this.micLevel = 0.0,
     this.connectedAt,
     this.endReason = CallEndReason.none,
     this.errorMessage,
@@ -142,6 +143,14 @@ class CallSnapshot {
 
   final bool muted;
 
+  /// The local mic's current input level, 0.0–1.0, sampled from
+  /// [MediaSession.pollInputLevel] roughly every 150ms while a call is live
+  /// (connecting/active/recordingMemo). Drives the mic-level meter in
+  /// [CallScreen] -- a flat meter while the user is visibly speaking is the
+  /// debug signal that the mic isn't actually capturing anything. Always
+  /// `0.0` outside those phases.
+  final double micLevel;
+
   /// When the call became [CallPhase.active] -- the in-call bar's duration
   /// timer reads this (`DateTime.now().difference(connectedAt)`).
   final DateTime? connectedAt;
@@ -173,6 +182,7 @@ class CallSnapshot {
     bool? recordingDeclinedNotice,
     bool? recordingOn,
     bool? muted,
+    double? micLevel,
     Object? connectedAt = _unset,
     CallEndReason? endReason,
     Object? errorMessage = _unset,
@@ -188,6 +198,7 @@ class CallSnapshot {
     recordingDeclinedNotice: recordingDeclinedNotice ?? this.recordingDeclinedNotice,
     recordingOn: recordingOn ?? this.recordingOn,
     muted: muted ?? this.muted,
+    micLevel: micLevel ?? this.micLevel,
     connectedAt: identical(connectedAt, _unset) ? this.connectedAt : connectedAt as DateTime?,
     endReason: endReason ?? this.endReason,
     errorMessage: identical(errorMessage, _unset) ? this.errorMessage : errorMessage as String?,
@@ -301,8 +312,46 @@ class WebrtcCallController extends CallController {
   /// once `start()` resolves. Cleared on replay or on any [_endLocally].
   String? _pendingRemoteOffer;
 
+  /// Polls [MediaSession.pollInputLevel] into [CallSnapshot.micLevel] while
+  /// the call is live -- see [_updateMicLevelPolling]. Started/stopped
+  /// automatically as [_emit] moves the phase in and out of a live state, so
+  /// no call site needs to remember to manage it.
+  Timer? _micLevelTimer;
+
   void _emit(CallSnapshot next) {
     _snapshot = next;
+    notifyListeners();
+    _updateMicLevelPolling();
+  }
+
+  /// Starts/stops [_micLevelTimer] to match whether [_snapshot] is currently
+  /// in a phase where a mic is actually open (connecting/active/
+  /// recordingMemo -- the same set [CallScreen] treats as "sustained"). A
+  /// fresh [CallSnapshot] is always constructed with `micLevel: 0.0`
+  /// (its default) whenever a call starts or ends (see [startCall],
+  /// [startSoloRecord], [_endLocally]), so stopping the timer here doesn't
+  /// need to separately zero it out.
+  void _updateMicLevelPolling() {
+    final live =
+        _snapshot.phase == CallPhase.connecting ||
+        _snapshot.phase == CallPhase.active ||
+        _snapshot.phase == CallPhase.recordingMemo;
+    if (live) {
+      _micLevelTimer ??= Timer.periodic(const Duration(milliseconds: 150), (_) => _pollMicLevel());
+    } else {
+      _micLevelTimer?.cancel();
+      _micLevelTimer = null;
+    }
+  }
+
+  void _pollMicLevel() async {
+    final media = _media;
+    if (media == null || _micLevelTimer == null) return;
+    final level = await media.pollInputLevel();
+    // The timer (or the whole controller) may have been cancelled/disposed
+    // while the await above was in flight -- don't resurrect a stale update.
+    if (_micLevelTimer == null) return;
+    _snapshot = _snapshot.copyWith(micLevel: level);
     notifyListeners();
   }
 
@@ -822,6 +871,8 @@ class WebrtcCallController extends CallController {
 
   @override
   void dispose() {
+    _micLevelTimer?.cancel();
+    _micLevelTimer = null;
     final media = _media;
     _media = null;
     if (media != null) unawaited(media.dispose());

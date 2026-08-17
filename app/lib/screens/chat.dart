@@ -20,6 +20,7 @@ import '../widgets/brand_mark.dart';
 import '../widgets/badges.dart';
 import '../widgets/call_button.dart';
 import '../widgets/call_overlay.dart';
+import '../widgets/call_screen.dart';
 import '../widgets/coding_agent_dialog.dart';
 import '../widgets/coding_strip.dart';
 import '../widgets/composer.dart';
@@ -199,6 +200,23 @@ class _ChatScreenState extends State<ChatScreen> {
   // [build] regardless of which channel is open.
   late final CallController _callController;
 
+  // Which bottom tab is showing while a call is in a SUSTAINED phase
+  // (connecting/active/recordingMemo, see [isSustainedCallPhase]) -- 0 =
+  // Chat, 1 = Call. Meaningless (and the tab bar isn't shown at all)
+  // outside a sustained call; [_onCallControllerChanged] auto-selects Call
+  // on the way in and resets to Chat on the way out, so a fresh call always
+  // starts prominent rather than wherever the user last left it.
+  int _callTab = 0;
+  bool _wasSustainedCall = false;
+
+  void _onCallControllerChanged() {
+    final sustained = isSustainedCallPhase(_callController.snapshot.phase);
+    if (sustained != _wasSustainedCall) {
+      _wasSustainedCall = sustained;
+      setState(() => _callTab = sustained ? 1 : 0);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -207,6 +225,7 @@ class _ChatScreenState extends State<ChatScreen> {
       mySub: widget.principal.sub,
       stunUrls: widget.principal.callStunUrls,
     );
+    _callController.addListener(_onCallControllerChanged);
     _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
     // Start the bundled runner daemon on desktop.
     if (_daemon.supported) unawaited(_startDaemon());
@@ -340,6 +359,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _typingPrune?.cancel();
     _wsReconnect?.cancel();
     _daemon.dispose();
+    _callController.removeListener(_onCallControllerChanged);
     _callController.dispose();
     _wsSub?.cancel();
     super.dispose();
@@ -1652,57 +1672,76 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < kCompactWidth;
+    // The normal chat body -- unchanged from before the call tab existed.
     // Compact (phone): single pane, rail behind a drawer. The transcript owns
     // the screen; everything the top bar carried moves into the drawer.
-    if (MediaQuery.sizeOf(context).width < kCompactWidth) {
-      return CallOverlay(
-        controller: _callController,
-        labelForSub: _labelForSub,
-        child: Scaffold(
-          backgroundColor: AppColors.bg,
-          drawer: Drawer(
-            backgroundColor: AppColors.surface,
-            width: MediaQuery.sizeOf(context).width * 0.86,
-            shape: const RoundedRectangleBorder(),
-            child: _sidebar(compact: true),
-          ),
-          body: SafeArea(child: _buildMain(compact: true)),
-        ),
-      );
-    }
+    final chatBody = compact
+        ? SafeArea(child: _buildMain(compact: true))
+        : Column(
+            children: [
+              AppTopBar(
+                principal: widget.principal,
+                status: _connStatus,
+                onSignOut: widget.onSignOut,
+                onSearch: _openSearch,
+                onMentions: _openMentions,
+                mentionCount: _unseenMentions,
+                runnerState: _daemon.supported ? _daemon.state : null,
+                onSshKeys: () => showSshKeyDialog(context, api: widget.api),
+                onWebhooks: () => showGlobalWebhooksDialog(context, api: widget.api, channels: _channels),
+                onAdmin: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
+                ),
+              ),
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _sidebar(),
+                    Expanded(child: _buildMain()),
+                  ],
+                ),
+              ),
+            ],
+          );
+
+    // While a call is SUSTAINED (connecting/active/recordingMemo) the call
+    // gets pulled out of `CallOverlay`'s compact bottom bar and into its own
+    // full-screen tab (voice-calls-plan.md §3.3's UI polish) -- `IndexedStack`
+    // keeps the chat body mounted (so it doesn't lose scroll position/state)
+    // while the Call tab is showing, and vice versa. `CallOverlay` still
+    // wraps everything for the TRANSIENT ring/ended states, which apply
+    // regardless of which tab is selected.
+    final sustainedCall = isSustainedCallPhase(_callController.snapshot.phase);
+    final body = sustainedCall
+        ? IndexedStack(
+            index: _callTab,
+            children: [chatBody, CallScreen(controller: _callController, labelForSub: _labelForSub)],
+          )
+        : chatBody;
 
     return CallOverlay(
       controller: _callController,
       labelForSub: _labelForSub,
       child: Scaffold(
         backgroundColor: AppColors.bg,
-        body: Column(
-          children: [
-            AppTopBar(
-              principal: widget.principal,
-              status: _connStatus,
-              onSignOut: widget.onSignOut,
-              onSearch: _openSearch,
-              onMentions: _openMentions,
-              mentionCount: _unseenMentions,
-              runnerState: _daemon.supported ? _daemon.state : null,
-              onSshKeys: () => showSshKeyDialog(context, api: widget.api),
-              onWebhooks: () => showGlobalWebhooksDialog(context, api: widget.api, channels: _channels),
-              onAdmin: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
-              ),
-            ),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _sidebar(),
-                  Expanded(child: _buildMain()),
-                ],
-              ),
-            ),
-          ],
-        ),
+        drawer: compact
+            ? Drawer(
+                backgroundColor: AppColors.surface,
+                width: MediaQuery.sizeOf(context).width * 0.86,
+                shape: const RoundedRectangleBorder(),
+                child: _sidebar(compact: true),
+              )
+            : null,
+        body: body,
+        bottomNavigationBar: sustainedCall
+            ? CallTabBar(
+                controller: _callController,
+                selected: _callTab,
+                onSelect: (tab) => setState(() => _callTab = tab),
+              )
+            : null,
       ),
     );
   }
