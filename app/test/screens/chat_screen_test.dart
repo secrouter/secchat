@@ -1213,6 +1213,73 @@ void main() {
     expect(find.text('Edit…'), findsNothing);
   });
 
+  testWidgets(
+      'a "system" transcript message offers "Correct transcript" (not author-gated) '
+      'and saving calls editMessage, while a normal user message keeps plain "Edit…"',
+      (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice — not the author of either message below (there is no author)
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'system',
+            authorType: AuthorType.system,
+            displayName: 'Voice call',
+            content: 'transcript: bob said hello',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+          Message(
+            id: 'm2',
+            seq: 2,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: "bob's own message",
+            createdAt: DateTime(2026, 1, 1, 9, 31),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // The system message's menu offers "Correct…" (not "Edit…") — any channel
+    // member (not just an author, since a system message has none) may use it.
+    final menuButtons = find.byTooltip('Message actions');
+    expect(menuButtons, findsNWidgets(2));
+    await tester.tap(menuButtons.first);
+    await tester.pumpAndSettle();
+    expect(find.text('Correct…'), findsOneWidget);
+    expect(find.text('Edit…'), findsNothing);
+
+    await tester.tap(find.text('Correct…'));
+    await tester.pumpAndSettle();
+
+    // The dialog is relabeled too, and saving reuses the same editMessage machinery.
+    expect(find.text('Correct transcript'), findsOneWidget);
+    final field = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField));
+    await tester.enterText(field, 'transcript: bob said hello, corrected');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Save changes'));
+    await tester.pumpAndSettle();
+
+    expect(fake.editCalls, hasLength(1));
+    expect(fake.editCalls.single.messageId, 'm1');
+    expect(fake.editCalls.single.content, 'transcript: bob said hello, corrected');
+    expect(find.textContaining('transcript: bob said hello, corrected'), findsOneWidget);
+
+    // The normal user message (bob's, not alice's) is untouched: edit gating stays
+    // author-only, so a non-author sees no Edit… item and no Correct… either.
+    await tester.tap(menuButtons.last);
+    await tester.pumpAndSettle();
+    expect(find.text('Edit…'), findsNothing);
+    expect(find.text('Correct…'), findsNothing);
+  });
+
   testWidgets('an edited message shows "(edited)" and View history opens the revision list', (tester) async {
     final fake = FakeApiClient(
       me: _principal, // dev.alice

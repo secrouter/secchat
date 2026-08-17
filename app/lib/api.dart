@@ -255,9 +255,12 @@ abstract class ApiClient {
   /// `redaction` WS event.
   Future<void> redactMessage(String messageId, String reason);
 
-  /// Edits a message's text (author only) — a tracked revision, not an in-place
-  /// rewrite. History is preserved and the change is audited; every viewer sees
-  /// the new text + an "(edited)" marker live via a `message_edit` WS event.
+  /// Edits a message's text — a tracked revision, not an in-place rewrite.
+  /// History is preserved and the change is audited; every viewer sees the
+  /// new text + an "(edited)" marker live via a `message_edit` WS event. The
+  /// server gates who may call this per message: author-only for a normal
+  /// user message, any channel member for a "system" transcript/summary
+  /// message (a "Correct transcript" edit).
   Future<void> editMessage(String messageId, String content);
 
   /// The full version history of a message (original + every edit), newest

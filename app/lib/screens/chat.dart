@@ -916,13 +916,19 @@ class _ChatScreenState extends State<ChatScreen> {
     if (changed) _transcripts[channelId] = updated;
   }
 
-  /// Edits [message] (author only) via a dialog. The new text is applied
-  /// optimistically; the live `message_edit` echo reconciles the exact server
-  /// timestamp. A failure surfaces an error.
+  /// Edits [message] via a dialog — author-only for a normal user message, or
+  /// (for a "system" transcript/summary message) a "Correct transcript" any
+  /// channel member may use. The new text is applied optimistically; the live
+  /// `message_edit` echo reconciles the exact server timestamp. A failure
+  /// surfaces an error.
   Future<void> _editMessage(Message message) async {
     final channel = _selected;
     if (channel == null || message.content == null) return;
-    final next = await showEditDialog(context, message.content!);
+    final next = await showEditDialog(
+      context,
+      message.content!,
+      isCorrection: message.authorType == AuthorType.system,
+    );
     if (next == null || !mounted) return;
     try {
       await widget.api.editMessage(message.id, next);
