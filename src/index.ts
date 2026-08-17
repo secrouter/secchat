@@ -225,6 +225,10 @@ const callRegistry = makeCallRegistry({
   marking: config.marking,
   dlp: config.dlp,
   broadcast,
+  // Post-call transcript summary (Feature 1): the SAME LlmClient/model the assistant path uses
+  // (never a second SecRouter client) — see CallRegistryDeps' doc comment.
+  llm,
+  summaryModel: config.assistantModel,
   // Same post-call-pipeline wiring the mediad client above got, for the LIVE path (calls/registry.ts's
   // runPostCallPipeline) rather than the crash-recovery sweep.
   recordingsDir: config.mediad?.recordingsDir,

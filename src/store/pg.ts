@@ -968,7 +968,9 @@ export class PgStore implements Store, SessionStore {
    * plaintext + audit event land together or not at all). The messages row is never touched, so
    * the hash chain is untouched: the tamper-evident record of the edit is its `message.edit` audit
    * event. FOR UPDATE on the row serializes concurrent edits (so revision numbers can't collide)
-   * and fails closed on an unknown/redacted message (author-only is enforced at the route). */
+   * and fails closed on an unknown/redacted message (WHO may call this — author-only for a normal
+   * message, any channel member for a `system` transcript — is enforced at the route, not here;
+   * this just records `by` as the new revision's author, see MessageRevision.authorRef). */
   async editMessage(id: Id, by: string, content: string): Promise<Message> {
     const client = await this.#pool.connect();
     try {
@@ -1007,7 +1009,8 @@ export class PgStore implements Store, SessionStore {
       await client.query(
         `INSERT INTO message_revisions (message_id, revision, author_ref, content, content_sha256, at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [id, nextRevision, row.author_ref, content, hashContent(content), at],
+        // `by` (the editor), not necessarily row.author_ref — see MessageRevision's doc comment.
+        [id, nextRevision, by, content, hashContent(content), at],
       );
       await client.query(`UPDATE message_content SET content = $2 WHERE message_id = $1`, [id, content]);
       await this.#appendAuditWithClient(client, { actor: by, action: "message.edit", target: id, detail: `rev ${nextRevision}` });

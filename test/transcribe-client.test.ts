@@ -52,6 +52,7 @@ test("transcribeLeg: posts multipart with file + diarize=false by default", asyn
     const form = calls[0]!.init.body as FormData;
     assert.ok(form instanceof FormData);
     assert.equal(form.get("diarize"), "false");
+    assert.equal(form.get("identify"), "false", "identify defaults to false, same as diarize");
     const file = form.get("file") as unknown as Blob;
     assert.ok(file instanceof Blob);
     assert.equal(await file.text(), "fake ogg bytes");
@@ -68,6 +69,21 @@ test("transcribeLeg: diarize:true (the mixed-mode fallback) is sent as-is", asyn
 
     const client = makeTranscribeClient({ baseUrl: "http://x", fetchImpl });
     await client.transcribeLeg({ legId: "mixed", filePath: path, diarize: true });
+  });
+});
+
+test("transcribeLeg: identify:true is sent so enrolled voiceprints can be matched (calls/registry.ts's runPostCallPipeline sets this on every leg)", async () => {
+  await withFixtureFile("leg bytes", async (path) => {
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const form = init!.body as FormData;
+      assert.equal(form.get("identify"), "true");
+      assert.equal(form.get("diarize"), "false", "identify is independent of diarize — per-leg identity still needs no diarization (A7)");
+      return jsonResponse(200, { ...OK_RESULT, speakers: [{ name: "Alice Ng", match_score: 0.94 }] });
+    }) as typeof fetch;
+
+    const client = makeTranscribeClient({ baseUrl: "http://x", fetchImpl });
+    const out = await client.transcribeLeg({ legId: "leg_caller", filePath: path, identify: true });
+    assert.deepEqual(out.speakers, [{ name: "Alice Ng", match_score: 0.94 }]);
   });
 });
 

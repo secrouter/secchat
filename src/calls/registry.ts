@@ -28,6 +28,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { governedCallAppend } from "../governance/append.ts";
+import { parseMarking } from "../marking/caveats.ts";
 import type { MarkingPolicy } from "../marking/policy.ts";
 import type { DlpPolicy } from "../dlp/policy.ts";
 import { sha256Hex, type BlobStore } from "../attachments/blobs.ts";
@@ -40,7 +41,7 @@ import {
 import type { MediadClient, MediadFinalizeManifest } from "./mediad-client.ts";
 import { formatTranscript, mergeTranscripts, type LegTranscript, type MergedTurn, type TranscriptHeaderInput } from "../transcribe/merge.ts";
 import type { TranscribeClient } from "../transcribe/client.ts";
-import type { AddAttachmentInput, Attachment, CallMode, CallParticipantRow, CallRecordingState, Id, Store } from "../types.ts";
+import type { AddAttachmentInput, Attachment, CallMode, CallParticipantRow, CallRecordingState, Id, LlmClient, Store } from "../types.ts";
 import { groupLegId, LEG_CALLEE_ID, LEG_CALLER_ID } from "./leg-ids.ts";
 
 /** Injected per-connection send (ws/hub.ts's `Hub.sendToConnection`) — CallRegistry never touches
@@ -118,6 +119,15 @@ export interface CallRegistryDeps {
    * skipped there (same "absence = feature unavailable, never a hard error" posture as `mediad`/
    * `transcribe`). */
   enrollVoiceprint?: (input: { name: string; filePath: string }) => Promise<void>;
+  /** OPTIONAL — present whenever SecRouter is configured for the assistant path (index.ts wires the
+   * SAME `LlmClient` instance the assistant uses, never a second one — matches `enrollVoiceprint`'s
+   * "one instance" reasoning). Backs the post-call transcript SUMMARY step (`runPostCallPipeline`,
+   * below): unset just means summarization is silently skipped there (same "absence = feature
+   * unavailable, never a hard error" posture as `mediad`/`transcribe`/`enrollVoiceprint`). */
+  llm?: LlmClient;
+  /** Model id for the summary call (mirrors the assistant path's `config.assistantModel` — index.ts
+   * passes the SAME value). Defaults to `"auto"` when `llm` is wired but this isn't. */
+  summaryModel?: string;
 }
 
 /** CallRegistry's live view of one call — the ringing/active bookkeeping that exists only while
@@ -1102,7 +1112,11 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
 
     try {
       const results = await Promise.all(
-        legFiles.map((l) => transcribe.transcribeLeg({ legId: l.legId, filePath: join(sessionDir, l.file!.path) })),
+        // identify:true — match each leg's speaker against SecRecorder's enrolled-voiceprint
+        // registry (transcribe/client.ts's `TranscribeSpeaker`) so a solo-memo enrollment gets
+        // matched on a LATER call's transcript. Independent of per-leg identity (A7) / `diarize`
+        // (unset here, as before) — this is purely about the identify=true match, not attribution.
+        legFiles.map((l) => transcribe.transcribeLeg({ legId: l.legId, filePath: join(sessionDir, l.file!.path), identify: true })),
       );
       const users = await Promise.all(legFiles.map((l) => deps.store.getUser(l.sub)));
       const legs: LegTranscript[] = legFiles.map((l, i) => ({
@@ -1131,6 +1145,50 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       deps.broadcast(call.channelId, { type: "message", message: posted });
       // NOTE: governedCallAppend already audits `call.transcribed` itself (governance/append.ts) —
       // not duplicated here.
+
+      // Best-effort LLM summary of the transcript we just posted — its OWN governed system
+      // message, right after the transcript (§ Feature 1). No audio involved (it's over the
+      // merged TEXT, `body`), so unlike enrollment below it has no ordering dependency on
+      // `deleteSessionDir`. Own try/catch: a summarization failure must never crash the pipeline
+      // or take the transcript down with it (which has already posted by this point either way).
+      if (deps.llm) {
+        try {
+          // Attributed to a call PARTICIPANT (the starter, first in join order for 1:1/solo/group
+          // alike — `Store.addCallParticipant`'s call order in `accept`/`startSolo`/`startGroup`)
+          // via actingUser, so SecRouter governs/budgets/audits this as a real user's call, never
+          // as SecChat's own service identity (secrouter/client.ts's X-Sec-Acting-User contract).
+          const summarizingSub = participants[0]?.sub;
+          if (!summarizingSub) throw new Error("no call participant to attribute the summary to");
+          // Classification = the TRANSCRIPT message's own effective marking (the exact content
+          // being summarized) — forwarded so SecRouter's clearance/data-residency egress gate
+          // evaluates this call at the right level instead of its deployment default (mirrors
+          // assistant/service.ts's `classification` derivation).
+          const classification = parseMarking(deps.marking, posted.marking)?.level;
+          const stream = deps.llm.complete({
+            model: deps.summaryModel ?? "auto",
+            messages: [
+              { role: "system", content: "Summarize this call transcript concisely; do not add information not present." },
+              { role: "user", content: body },
+            ],
+            actingUser: summarizingSub,
+            classification,
+          });
+          let summaryText = "";
+          for await (const delta of stream) summaryText += delta;
+          summaryText = summaryText.trim();
+          if (!summaryText) throw new Error("summarizer produced no output");
+
+          const summaryPosted = await governedCallAppend(
+            { store: deps.store, marking: deps.marking, dlp: deps.dlp },
+            { channelId: call.channelId, content: `📝 Summary\n\n${summaryText}`, attachmentIds: [] },
+          );
+          deps.broadcast(call.channelId, { type: "message", message: summaryPosted });
+          await deps.store.appendAudit({ actor: "system", action: "call.summarized", target: call.callId });
+        } catch (err) {
+          await deps.store.appendAudit({ actor: "system", action: "call.summarize_failed", target: call.callId, detail: describeError(err) });
+        }
+      }
+
       await editPendingIfClaimed(call, pendingMessageId, "🎙️ Recording stored.");
 
       // Opt-in voiceprint enrollment (solo memos only, `enroll:true` — a solo memo always has

@@ -13,11 +13,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCallRegistry, CallSignalError, type CallRegistryDeps, type LiveCall } from "../src/calls/registry.ts";
 import type { MediadClient } from "../src/calls/mediad-client.ts";
-import type { TranscribeClient, TranscribeResult } from "../src/transcribe/client.ts";
+import type { TranscribeClient, TranscribeLegJob, TranscribeResult } from "../src/transcribe/client.ts";
 import { MemoryStore } from "../src/store/memory.ts";
 import { MemoryBlobStore } from "../src/attachments/blobs.ts";
 import { makeMarkingPolicy } from "../src/marking/policy.ts";
-import type { AppendAuditInput, AppendMessageInput, CallParticipantRow, CallRow, Channel, CreateCallInput, Id, Member, Store } from "../src/types.ts";
+import type {
+  AppendAuditInput,
+  AppendMessageInput,
+  CallParticipantRow,
+  CallRow,
+  Channel,
+  CreateCallInput,
+  Id,
+  LlmClient,
+  LlmCompleteRequest,
+  Member,
+  Store,
+} from "../src/types.ts";
 
 const MARKING = makeMarkingPolicy(["UNCLASSIFIED", "CUI"], "UNCLASSIFIED", []);
 
@@ -1352,6 +1364,186 @@ test("transcription exhausted (poison audio): a visible failure line replaces th
     const editBroadcast = broadcasts.find((b) => (b.payload as { type: string }).type === "message_edit");
     assert.ok(editBroadcast, "the edit was broadcast live");
     assert.match((editBroadcast!.payload as { content: string }).content, /transcription failed/);
+  } finally {
+    await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
+// ── Feature 1: post-call transcript SUMMARY (best-effort, its own governed system message) ───────
+// ── Feature 3: identify:true wired into every transcribeLeg job (voiceprint matching) ────────────
+
+/** A minimal fake `LlmClient` (types.ts) — `complete` yields the configured canned summary as one
+ * delta and records every request, so the tests below can assert on attribution (`actingUser`) and
+ * the model/classification forwarded, mirroring assistant/service.ts's real usage shape. */
+function fakeLlmClient(summaryText: string): LlmClient & { calls: LlmCompleteRequest[] } {
+  const calls: LlmCompleteRequest[] = [];
+  return {
+    calls,
+    complete(req: LlmCompleteRequest) {
+      calls.push(req);
+      return (async function* () {
+        yield summaryText;
+      })();
+    },
+  };
+}
+
+/** Shared setup for the summary tests below: a relayed 2-party call whose recording + transcript
+ * post successfully (mirrors "relayed call end-to-end" above), parameterized by an optional `llm`
+ * dep so both "summary posted" and "no summarizer configured" share one harness. Also records every
+ * `transcribeLeg` job (Feature 3's `identify:true` assertion). */
+async function setupTwoPartyCallForSummary(recordingsDir: string, opts: { llm?: LlmClient }) {
+  const store = new MemoryStore();
+  const channel = await store.createChannel({ workspaceId: "ws-1", kind: "dm", createdBy: "alice" });
+  await store.addMember({ channelId: channel.id, memberRef: "alice", memberType: "user", role: "member" });
+  await store.addMember({ channelId: channel.id, memberRef: "bob", memberType: "user", role: "member" });
+  await store.upsertUser({ sub: "alice", displayName: "Alice Ng", groups: [] });
+  await store.upsertUser({ sub: "bob", displayName: "Bob Reyes", groups: [] });
+
+  const mediad = fakeMediad({ healthy: true });
+  const originalCreateSession = mediad.createSession.bind(mediad);
+  mediad.createSession = async (input) => {
+    const res = await originalCreateSession(input);
+    await mkdir(join(recordingsDir, res.sessionId), { recursive: true });
+    await writeFile(join(recordingsDir, res.sessionId, "caller.ogg"), "fake-caller-audio");
+    await writeFile(join(recordingsDir, res.sessionId, "callee.ogg"), "fake-callee-audio");
+    await writeFile(join(recordingsDir, res.sessionId, "mixed.m4a"), "fake-mixed-audio");
+    return res;
+  };
+
+  const blobs = new MemoryBlobStore();
+  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+  const { send } = makeSend();
+  const { deliverToUser } = makeDeliverToUser();
+  const transcribeJobs: TranscribeLegJob[] = [];
+  const transcribeByLegId: Record<string, TranscribeResult> = {};
+
+  const registry = makeCallRegistry({
+    store,
+    send,
+    deliverToUser,
+    now: () => Date.now(),
+    mediad,
+    transcribe: {
+      async transcribeLeg(job) {
+        transcribeJobs.push(job);
+        const result = transcribeByLegId[job.legId];
+        if (!result) throw new Error(`no fixture for leg ${job.legId}`);
+        return result;
+      },
+      async enrollVoiceprint() {
+        throw new Error("not fixtured: this test doesn't opt into enrollment");
+      },
+    },
+    marking: MARKING,
+    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+    recordingsDir,
+    blobs,
+    addAttachment: (input) => store.addAttachment(input),
+    llm: opts.llm,
+    summaryModel: "test-summary-model",
+  });
+
+  await registry.invite({ channelId: channel.id, callerConnId: "a", caller: "alice", wantRecording: true });
+  const live = (await registry.accept({ channelId: channel.id, connId: "b", consent: true })) as LiveCall;
+
+  mediad.endSession = async (sessionId) => ({
+    sessionId,
+    files: [
+      { legId: live.legCaller, path: "caller.ogg", startOffsetMs: 0, durationMs: 5000 },
+      { legId: live.legCallee, path: "callee.ogg", startOffsetMs: 200, durationMs: 4800 },
+      { path: "mixed.m4a", startOffsetMs: 0, durationMs: 5000 },
+    ],
+    truncated: false,
+  });
+  transcribeByLegId[live.legCaller!] = {
+    task: "transcribe",
+    language: "en",
+    duration: 5,
+    text: "hey are you free",
+    words: [],
+    segments: [{ start: 0.5, end: 2, text: "hey are you free" }],
+  };
+  transcribeByLegId[live.legCallee!] = {
+    task: "transcribe",
+    language: "en",
+    duration: 4.8,
+    text: "yes go ahead",
+    words: [],
+    segments: [{ start: 1.0, end: 2.5, text: "yes go ahead" }],
+  };
+
+  await registry.end({ channelId: channel.id, connId: "a", reason: "hangup" });
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const row = await store.getCall(live.callId!);
+    if (row?.transcriptMessageId) break;
+  }
+
+  return { store, live, broadcasts, transcribeJobs };
+}
+
+test("post-call pipeline: with an LLM client configured, a Summary message is posted right after the transcript, attributed to the starting participant, and audited", async () => {
+  const recordingsDir = await mkdtemp(join(tmpdir(), "secchat-summary-test-"));
+  try {
+    const llm = fakeLlmClient("Alice and Bob discussed the deploy issue and agreed on next steps.");
+    const { store, live, broadcasts, transcribeJobs } = await setupTwoPartyCallForSummary(recordingsDir, { llm });
+
+    const row = await store.getCall(live.callId!);
+    assert.ok(row?.transcriptMessageId, "a transcript was posted");
+
+    // Exactly one summarization call, attributed to the FIRST call participant (join order —
+    // the caller, "alice" — CallParticipantRow's addCallParticipant call order in accept()), never
+    // to SecChat's own service identity.
+    assert.equal(llm.calls.length, 1, "the summarizer was called exactly once");
+    assert.equal(llm.calls[0]!.actingUser, "alice", "attributed to the call's starter, not a service identity");
+    assert.equal(llm.calls[0]!.model, "test-summary-model");
+    assert.match(llm.calls[0]!.messages.at(-1)!.content, /hey are you free/, "the merged transcript text is what's summarized");
+
+    // The summary posts as its OWN governed system message, containing the canned summary text
+    // and a "📝 Summary" header — found AFTER the transcript in broadcast order.
+    const messageBroadcasts = broadcasts.filter((b) => (b.payload as { type: string }).type === "message");
+    const transcriptIdx = messageBroadcasts.findIndex(
+      (b) => (b.payload as { message: { id: string } }).message.id === row!.transcriptMessageId,
+    );
+    assert.ok(transcriptIdx >= 0, "the transcript itself was broadcast");
+    const summaryIdx = messageBroadcasts.findIndex((b) =>
+      (b.payload as { message: { content: string } }).message.content.includes("Alice and Bob discussed the deploy issue"),
+    );
+    assert.ok(summaryIdx >= 0, "the summary message was broadcast");
+    assert.ok(summaryIdx > transcriptIdx, "the summary is posted AFTER the transcript");
+    const summaryMessage = (messageBroadcasts[summaryIdx]!.payload as { message: { content: string; authorType: string } }).message;
+    assert.match(summaryMessage.content, /📝 Summary/);
+    assert.equal(summaryMessage.authorType, "system");
+
+    const audit = await store.listAudit();
+    assert.ok(audit.some((e) => e.action === "call.summarized" && e.target === live.callId), "success is audited");
+    assert.ok(!audit.some((e) => e.action === "call.summarize_failed"));
+
+    // Feature 3: identify:true was sent on every per-leg transcription job.
+    assert.equal(transcribeJobs.length, 2);
+    assert.ok(transcribeJobs.every((j) => j.identify === true), "identify:true is sent so enrolled voiceprints can be matched");
+  } finally {
+    await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
+test("post-call pipeline: with NO LLM client configured, the summary step is skipped cleanly — the transcript still posts and no summarize audit lands", async () => {
+  const recordingsDir = await mkdtemp(join(tmpdir(), "secchat-nosummary-test-"));
+  try {
+    const { store, live, broadcasts } = await setupTwoPartyCallForSummary(recordingsDir, {}); // no `llm`
+
+    const row = await store.getCall(live.callId!);
+    assert.ok(row?.transcriptMessageId, "the transcript still posts without a summarizer configured");
+
+    const messageBroadcasts = broadcasts.filter((b) => (b.payload as { type: string }).type === "message");
+    assert.ok(
+      !messageBroadcasts.some((b) => (b.payload as { message: { content: string } }).message.content.includes("📝 Summary")),
+      "no summary message was posted",
+    );
+
+    const audit = await store.listAudit();
+    assert.ok(!audit.some((e) => e.action === "call.summarized" || e.action === "call.summarize_failed"), "no summarize audit either way — the feature was never attempted");
   } finally {
     await rm(recordingsDir, { recursive: true, force: true });
   }

@@ -188,7 +188,12 @@ export interface Message {
 export interface MessageRevision {
   messageId: Id;
   revision: number; // 1 = original, ascending
-  authorRef: string; // who wrote this revision (always the original author — edit is author-only)
+  // Who wrote THIS revision: revision 1 is always the original author; a later revision is
+  // whoever called editMessage (`by`) — normally the same person, since editing a normal message
+  // is author-only, but a `system`-authored transcript relaxes that (any channel member may
+  // correct it, http/server.ts's `POST /messages/:id/edit`), so this is the correcting member for
+  // those revisions, not "system".
+  authorRef: string;
   content?: string; // omitted for a redacted message
   contentSha256: Sha256Hex;
   at: string; // createdAt for revision 1, the edit time thereafter

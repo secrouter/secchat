@@ -64,9 +64,24 @@ export interface TranscribeSegment {
   speaker?: string;
 }
 
+/** One enrolled-voiceprint match — present only on an `identify=true` response (§ TranscribeLegJob.
+ * identify). TODO(voice): confirm SecRecorder's exact `speakers[]` field names/shape once it's
+ * documented in docs/plans/voice-contracts.md §5.1 (same "sent but not yet exercised against a real
+ * response" caveat as `diarize=true`'s `speaker` fields, above) — `name`/`match_score` are this
+ * client's best-effort read of the enrollment feature `enrollVoiceprint` (below) registers speakers
+ * for. */
+export interface TranscribeSpeaker {
+  /** The enrolled name this speaker was matched to (`EnrollVoiceprintJob.name`), when confident
+   * enough to report — absent for an unmatched/unenrolled speaker. */
+  name?: string;
+  /** SecRecorder's confidence for `name`, when present. */
+  match_score?: number;
+}
+
 /** SecRecorder's `POST /v1/audio/transcriptions` response. The `diarize=false` shape (calls' default
  * per-leg mode) carries no `speaker` on any word/segment — per-leg identity already gives exact
- * attribution (A7), so calls need none of that. */
+ * attribution (A7), so calls need none of that. `speakers[]` is `identify=true`-only (absent
+ * otherwise) — see `TranscribeSpeaker`. */
 export interface TranscribeResult {
   task: "transcribe";
   language: string;
@@ -74,6 +89,7 @@ export interface TranscribeResult {
   text: string;
   words: TranscribeWord[];
   segments: TranscribeSegment[];
+  speakers?: TranscribeSpeaker[];
 }
 
 export interface TranscribeLegJob {
@@ -87,6 +103,13 @@ export interface TranscribeLegJob {
    * transcription pass ... with diarize=true"); omitted/false (the default) for the normal per-leg
    * jobs, where diarization is unnecessary (A7). */
   diarize?: boolean;
+  /** `true` to have SecRecorder match this leg's audio against its enrolled-voiceprint registry
+   * (`enrollVoiceprint`, below) and return `TranscribeResult.speakers[]` (`name`/`match_score`).
+   * Independent of `diarize` — per-leg identity already tells calls WHO is speaking (A7); this is
+   * about matching that leg's speaker against a PREVIOUSLY enrolled voiceprint (e.g. from an
+   * earlier solo memo's `enroll:true`), not about attributing turns within the leg. Omitted/false
+   * skips the match (the pre-existing behavior). */
+  identify?: boolean;
 }
 
 /** One opt-in voiceprint enrollment — the solo self-DM memo flow's `enroll:true` path
@@ -180,6 +203,7 @@ export function makeTranscribeClient(deps: TranscribeClientDeps): TranscribeClie
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(bytes)], { type: "audio/ogg" }), basename(job.filePath));
     form.append("diarize", job.diarize ? "true" : "false");
+    form.append("identify", job.identify ? "true" : "false");
 
     let res: Response;
     try {

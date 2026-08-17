@@ -350,8 +350,10 @@ export class MemoryStore implements Store, SessionStore {
   /** Appends a revision (capturing the original as revision 1 on the first edit), overwrites the
    * current plaintext, stamps `editedAt`, and records a `message.edit` audit event. The message
    * row's `contentSha256`/`hash` (the original) are untouched, so the chain still verifies — the
-   * edit lives entirely out-of-band. Author-only is enforced by the route; a redacted message has
-   * no plaintext to revise, so it throws (the route maps this to 409). */
+   * edit lives entirely out-of-band. WHO may call this (author-only for a normal message; any
+   * channel member for a `system` transcript) is enforced by the route, not here — this method just
+   * records `by` as the new revision's author (see MessageRevision.authorRef's doc comment). A
+   * redacted message has no plaintext to revise, so it throws (the route maps this to 409). */
   async editMessage(id: Id, by: string, content: string): Promise<Message> {
     const message = this.#messagesById.get(id);
     if (!message) throw new Error(`MemoryStore.editMessage: unknown message ${id}`);
@@ -374,7 +376,7 @@ export class MemoryStore implements Store, SessionStore {
     revisions.push({
       messageId: id,
       revision: revisions[revisions.length - 1]!.revision + 1,
-      authorRef: message.authorRef,
+      authorRef: by, // the editor, not necessarily message.authorRef — see MessageRevision's doc comment
       content,
       contentSha256: hashContent(content),
       at,

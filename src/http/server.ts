@@ -1197,10 +1197,15 @@ function buildRouter(
   // ── Trackable edit: a revision, never an in-place rewrite. `editMessage` leaves the original row
   // (and the hash chain, which binds the ORIGINAL content) untouched, appends the new version to the
   // message's history, and records an audited `message.edit` event — so "who edited when" is provable
-  // and every prior version is retained (until redaction purges them). AUTHOR-ONLY, deliberately
-  // narrower than redaction: an admin's remedy for bad content is a visible redaction tombstone, never
-  // a silent rewrite of someone else's words. Membership-gated; non-empty content required; 409 on a
-  // redacted message. Broadcasts a `message_edit` event so every viewer's copy updates live.
+  // and every prior version is retained (until redaction purges them). AUTHOR-ONLY for a normal
+  // message, deliberately narrower than redaction: an admin's remedy for bad content is a visible
+  // redaction tombstone, never a silent rewrite of someone else's words. The ONE exception: a
+  // `system`-authored message (governedCallAppend's call transcripts, src/governance/append.ts) has
+  // no human author to defer to, so any USER member of its channel may correct it instead — the
+  // correction is attributed to THEM in the revision history (Store.editMessage's `by`, see
+  // MessageRevision.authorRef's doc comment), never silently to "system". Membership-gated;
+  // non-empty content required; 409 on a redacted message. Broadcasts a `message_edit` event so
+  // every viewer's copy updates live.
   router.add("POST", "/messages/:id/edit", async ({ req, res, params, principal }) => {
     const messageId = params.id!;
     const message = await store.getMessage(messageId);
@@ -1212,8 +1217,10 @@ function buildRouter(
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    if (message.authorRef !== principal.sub) {
-      sendJson(res, 403, { error: "forbidden" }); // author-only — no admin override (see comment above)
+    // Author-only, EXCEPT a system transcript — any channel member may correct it (see comment
+    // above); membership was just confirmed above, so no further check is needed there.
+    if (message.authorRef !== principal.sub && message.authorType !== "system") {
+      sendJson(res, 403, { error: "forbidden" });
       return;
     }
     if (message.redactedAt) {
@@ -1227,6 +1234,11 @@ function buildRouter(
       return;
     }
     const updated = await store.editMessage(messageId, principal.sub, content);
+    // TODO(voice): a member correcting a system-authored (call transcript) message here is a
+    // labeled speaker-ID correction — a future speaker-ID feedback loop could re-enroll from it
+    // (transcribe/client.ts's `enrollVoiceprint`) to improve later `identify=true` matches
+    // (calls/registry.ts's `runPostCallPipeline`). Deferred: this just records the correction as a
+    // normal revision (`message.authorType === "system"`, checked above), no re-enrollment yet.
     broadcast?.(message.channelId, {
       type: "message_edit",
       messageId,
