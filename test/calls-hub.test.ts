@@ -43,6 +43,7 @@ class FakeCallRegistry implements CallRegistry {
     throw new Error("joinGroupImpl not configured");
   };
   leaveGroupCalls: Array<{ channelId: string; connId: string; sub: string }> = [];
+  setParticipantMediaCalls: Array<{ channelId: string; connId: string; sub: string; cameraOn: boolean; screenOn: boolean; cameraTrackId?: string; screenTrackId?: string }> = [];
 
   async invite(input: { channelId: string; callerConnId: string; caller: string; wantRecording: boolean }) {
     return this.inviteImpl(input);
@@ -76,6 +77,9 @@ class FakeCallRegistry implements CallRegistry {
   }
   async leaveGroup(input: { channelId: string; connId: string; sub: string }): Promise<void> {
     this.leaveGroupCalls.push(input);
+  }
+  setParticipantMedia(input: { channelId: string; connId: string; sub: string; cameraOn: boolean; screenOn: boolean; cameraTrackId?: string; screenTrackId?: string }): void {
+    this.setParticipantMediaCalls.push(input);
   }
 }
 
@@ -240,13 +244,13 @@ test("call_sdp: relayed to CallRegistry.relay with the reconstructed frame", asy
   }
 });
 
-test("call_sdp: an oversized SDP (>32 KiB) is rejected with frame_too_large and NEVER reaches CallRegistry.relay", async () => {
+test("call_sdp: an oversized SDP (>64 KiB) is rejected with frame_too_large and NEVER reaches CallRegistry.relay", async () => {
   const registry = new FakeCallRegistry();
   const { server, hub, port } = await startServer(registry);
   const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
   try {
     await opened(alice);
-    const huge = "x".repeat(33 * 1024);
+    const huge = "x".repeat(65 * 1024);
     const got = nextMessage(alice);
     alice.send(JSON.stringify({ type: "call_sdp", channelId: "chan-1", sdpType: "offer", sdp: huge }));
     assert.deepEqual(await got, { type: "call_error", channelId: "chan-1", error: "frame_too_large" });
@@ -283,7 +287,7 @@ test("call_candidate: an oversized candidate string is dropped (never reaches re
   const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
   try {
     await opened(alice);
-    alice.send(JSON.stringify({ type: "call_candidate", channelId: "chan-1", candidate: "x".repeat(33 * 1024) }));
+    alice.send(JSON.stringify({ type: "call_candidate", channelId: "chan-1", candidate: "x".repeat(65 * 1024) }));
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(registry.relayCalls.length, 0);
   } finally {
@@ -307,6 +311,103 @@ test("call_candidate: a connection that floods past the per-connection cap is de
     await wasClosed;
     assert.ok(registry.relayCalls.length <= 500, "at most the cap's worth of frames were ever relayed");
   } finally {
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+// ── call_media: dispatch + validation ─────────────────────────────────────────────────────────
+
+test("call_media: dispatched to CallRegistry.setParticipantMedia with the sender's own connId/sub, including track ids", async () => {
+  const registry = new FakeCallRegistry();
+  const { server, hub, port } = await startServer(registry);
+  const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
+  try {
+    await opened(alice);
+    alice.send(
+      JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: true, screenOn: false, cameraTrackId: "cam-track-1" }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(registry.setParticipantMediaCalls.length, 1);
+    const call = registry.setParticipantMediaCalls[0]!;
+    assert.equal(call.channelId, "chan-1");
+    assert.equal(call.sub, "alice");
+    assert.equal(call.cameraOn, true);
+    assert.equal(call.screenOn, false);
+    assert.equal(call.cameraTrackId, "cam-track-1");
+    assert.equal(call.screenTrackId, undefined);
+  } finally {
+    alice.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("call_media: a non-boolean cameraOn/screenOn is dropped, never reaches the registry", async () => {
+  const registry = new FakeCallRegistry();
+  const { server, hub, port } = await startServer(registry);
+  const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
+  try {
+    await opened(alice);
+    alice.send(JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: "yes", screenOn: false }));
+    alice.send(JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: true, screenOn: null }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(registry.setParticipantMediaCalls.length, 0);
+  } finally {
+    alice.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("call_media: an oversized cameraTrackId/screenTrackId (>256 bytes) is dropped, never reaches the registry", async () => {
+  const registry = new FakeCallRegistry();
+  const { server, hub, port } = await startServer(registry);
+  const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
+  try {
+    await opened(alice);
+    const huge = "x".repeat(257);
+    alice.send(JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: true, screenOn: false, cameraTrackId: huge }));
+    alice.send(JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: false, screenOn: true, screenTrackId: huge }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(registry.setParticipantMediaCalls.length, 0);
+  } finally {
+    alice.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("call_media: a track id at exactly the 256-byte cap is accepted", async () => {
+  const registry = new FakeCallRegistry();
+  const { server, hub, port } = await startServer(registry);
+  const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
+  try {
+    await opened(alice);
+    const atCap = "x".repeat(256);
+    alice.send(JSON.stringify({ type: "call_media", channelId: "chan-1", cameraOn: true, screenOn: false, cameraTrackId: atCap }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(registry.setParticipantMediaCalls.length, 1);
+    assert.equal(registry.setParticipantMediaCalls[0]!.cameraTrackId, atCap);
+  } finally {
+    alice.close();
+    hub.close();
+    await stopServer(server);
+  }
+});
+
+test("call_sdp: a 64 KiB SDP is now accepted (the cap was bumped from 32 KiB for larger video SDPs)", async () => {
+  const registry = new FakeCallRegistry();
+  const { server, hub, port } = await startServer(registry);
+  const alice = new WebSocket(`ws://127.0.0.1:${port}/?token=alice`);
+  try {
+    await opened(alice);
+    const big = "x".repeat(60 * 1024); // over the OLD 32 KiB cap, under the NEW 64 KiB one
+    alice.send(JSON.stringify({ type: "call_sdp", channelId: "chan-1", sdpType: "offer", sdp: big }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(registry.relayCalls.length, 1, "a frame under the new 64 KiB cap is relayed, not rejected");
+  } finally {
+    alice.close();
     hub.close();
     await stopServer(server);
   }

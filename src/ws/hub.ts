@@ -60,12 +60,17 @@ interface Connection {
 
 /** call_* payload bounds (§2.1/§4, voice-contracts.md §1.3): in p2p mode, `call_sdp`/`call_candidate`
  * are a user-to-user content path the server relays without inspecting — outside DLP/marking/chain
- * governance by construction, so bounded rather than trusted. 32 KiB is "far below the hub's general
- * 16 MiB frame ceiling" per the plan. A frame over the cap is dropped; a connection that blows past
- * the candidate-count cap is treated as hostile/broken and destroyed — the same posture frame.ts's
- * FrameDecoder already takes for an oversized frame. */
-const MAX_CALL_FRAME_BYTES = 32 * 1024;
+ * governance by construction, so bounded rather than trusted. 64 KiB is "far below the hub's general
+ * 16 MiB frame ceiling" per the plan — bumped from the original 32 KiB since video call SDPs (more
+ * m-lines/codecs than audio-only) run larger; cheap insurance. A frame over the cap is dropped; a
+ * connection that blows past the candidate-count cap is treated as hostile/broken and destroyed —
+ * the same posture frame.ts's FrameDecoder already takes for an oversized frame. */
+const MAX_CALL_FRAME_BYTES = 64 * 1024;
 const MAX_CALL_CANDIDATES_PER_CONNECTION = 500;
+/** `call_media`'s `cameraTrackId`/`screenTrackId` are opaque client-local track ids (browser
+ * UUIDs, see types.ts's `CallMediaState`) — nowhere near this long; bounded defensively like every
+ * other call_* payload field. */
+const MAX_CALL_MEDIA_TRACK_ID_LEN = 256;
 
 /** How often ws/hub.ts sweeps for expired ringing calls (calls/registry.ts's `checkRingingTimeouts`
  * is the pure check; this interval is the "something stateful drives it" half — mirrors
@@ -367,6 +372,29 @@ export function attachWsHub(
         channelId,
         fromConnId: conn.id,
         frame: { type: "call_candidate", channelId, candidate: msg.candidate, sdpMid, sdpMLineIndex },
+      });
+      return;
+    }
+
+    if (type === "call_media") {
+      // Camera/screen on-off + opaque track-id labels (types.ts's `CallMediaState`) — group AND 1:1
+      // calls (p2p or relayed); `setParticipantMedia` silently drops this for a non-participant/
+      // solo call, the same "unbound sender -> never forwarded" posture as `relay()` above, rather
+      // than a client-facing `call_error` (this is routine state, not a request that can be
+      // rejected). For a relayed call it also kicks off mediad renegotiation internally.
+      if (typeof msg.cameraOn !== "boolean" || typeof msg.screenOn !== "boolean") return;
+      const cameraTrackId = msg.cameraTrackId;
+      const screenTrackId = msg.screenTrackId;
+      if (cameraTrackId !== undefined && (typeof cameraTrackId !== "string" || Buffer.byteLength(cameraTrackId, "utf8") > MAX_CALL_MEDIA_TRACK_ID_LEN)) return;
+      if (screenTrackId !== undefined && (typeof screenTrackId !== "string" || Buffer.byteLength(screenTrackId, "utf8") > MAX_CALL_MEDIA_TRACK_ID_LEN)) return;
+      calls.setParticipantMedia({
+        channelId,
+        connId: conn.id,
+        sub: conn.sub,
+        cameraOn: msg.cameraOn,
+        screenOn: msg.screenOn,
+        cameraTrackId,
+        screenTrackId,
       });
       return;
     }

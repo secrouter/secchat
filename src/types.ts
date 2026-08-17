@@ -545,16 +545,51 @@ export interface CallJoinFrame {
   channelId: Id;
 }
 
+/** Camera/screen-share on-off + the associated LOCAL video track ids, shared by
+ * {@link CallMediaFrame}/{@link CallMediaBroadcastFrame} and {@link CallRosterFrame}'s
+ * per-participant entries. `cameraTrackId`/`screenTrackId` are the CLIENT's own local video track
+ * ids (browser UUIDs, one per active camera/screen track) — they exist ONLY so a receiver can label
+ * which forwarded video tile is a camera vs. a screen share; the backend treats them as opaque
+ * strings, never parses/interprets them, and relays them exactly as sent. Absent/false is the
+ * default (a fresh joiner always starts with camera/screen off, see `CallParticipantJoinedFrame`). */
+export interface CallMediaState {
+  cameraOn: boolean;
+  screenOn: boolean;
+  cameraTrackId?: string;
+  screenTrackId?: string;
+}
+
+/** A participant -> server: their camera/screen on-off (and/or track id) state changed. Group calls
+ * (a `kind:"human"` channel's live call) AND 1:1 (DM) calls, p2p or relayed — a solo self-DM memo
+ * (no peer) is the only call shape the registry rejects/ignores this for (no crash). */
+export interface CallMediaFrame extends CallMediaState {
+  type: "call_media";
+  channelId: Id;
+}
+
+/** server -> every OTHER bound party's connection: `sub`'s media state changed — every other
+ * participant for a group call (mirrors `CallParticipantJoinedFrame`'s "every other" fan-out), the
+ * one peer for a 1:1 call — never echoed back to the sender. */
+export interface CallMediaBroadcastFrame extends CallMediaState {
+  type: "call_media";
+  channelId: Id;
+  sub: string;
+}
+
 /** server -> the JOINER's bound connection only, right after a winning `call_join`: who else is
  * currently on the call (including the joiner itself) — the roster snapshot a client needs to render
- * its participant list without a second round trip. */
+ * its participant list without a second round trip. Each entry carries that participant's CURRENT
+ * media state ({@link CallMediaState}) so a joiner renders existing camera/screen tiles without a
+ * separate round trip; a participant who has never sent `call_media` reads as camera/screen off. */
 export interface CallRosterFrame {
   type: "call_roster";
   channelId: Id;
-  participants: Array<{ sub: string }>;
+  participants: Array<{ sub: string } & CallMediaState>;
 }
 
-/** server -> every OTHER bound participant connection: a member joined the call. */
+/** server -> every OTHER bound participant connection: a member joined the call. A joiner always
+ * starts with camera/screen off (matches `CallRosterFrame`'s per-participant default) — they signal
+ * otherwise via their own subsequent `call_media` frame, same as anyone else. */
 export interface CallParticipantJoinedFrame {
   type: "call_participant_joined";
   channelId: Id;

@@ -12,6 +12,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCallRegistry, CallSignalError, type CallRegistryDeps, type LiveCall } from "../src/calls/registry.ts";
+import { LEG_CALLER_ID, LEG_CALLEE_ID } from "../src/calls/leg-ids.ts";
 import type { MediadClient } from "../src/calls/mediad-client.ts";
 import type { TranscribeClient, TranscribeLegJob, TranscribeResult } from "../src/transcribe/client.ts";
 import { MemoryStore } from "../src/store/memory.ts";
@@ -166,7 +167,44 @@ function makeDeliverToUser() {
 /** Builds a CallRegistry over a fresh fake store for a single DM(alice,bob) channel, with an
  * injected mutable clock. `nowMs` starts at a fixed instant and only advances when the test calls
  * `advance()` — never `Date.now()`, per the plan's "pure + injected clock" requirement. */
-function makeHarness(opts: { mediad?: MediadClient; transcribe?: TranscribeClient; ringingTimeoutMs?: number } = {}) {
+/** A synchronous stand-in for `CallRegistryDeps.scheduleDelayed`: runs the callback immediately
+ * rather than actually waiting `mediaRenegotiateDelayMs` — the default for both harnesses below so
+ * ordinary tests never sleep for the (production) 750ms call_media renegotiation delay. Tests that
+ * care about the delay/coalescing mechanics themselves use `makeFakeScheduler` instead, which lets
+ * them fire each scheduled pass on demand. */
+const runImmediately = (fn: () => void, _delayMs: number) => fn();
+
+/** A controllable stand-in for `CallRegistryDeps.scheduleDelayed` — queues callbacks instead of
+ * running them, so a test can assert on what's (or isn't) queued after a toggle, then fire exactly
+ * one queued pass at a time via `runNext()`/drain them all via `runAll()`. Mirrors
+ * `requestOtherLegsRenegotiation`'s own "at most one scheduled + one pending" coalescing: two
+ * toggles before a `run*()` call only ever produce ONE queued entry here (the registry's own
+ * `state.scheduled` guard suppresses the second `scheduleDelayed` call), and the "one queued
+ * follow-up" shows up as a SECOND entry only once the first has been run and its (also fire-and-
+ * forget) completion re-schedules. */
+function makeFakeScheduler() {
+  const queue: Array<() => void> = [];
+  const scheduleDelayed = (fn: () => void, _delayMs: number) => {
+    queue.push(fn);
+  };
+  return {
+    scheduleDelayed,
+    queue,
+    runNext: () => queue.shift()?.(),
+    runAll: () => {
+      while (queue.length > 0) queue.shift()!();
+    },
+  };
+}
+
+function makeHarness(
+  opts: {
+    mediad?: MediadClient;
+    transcribe?: TranscribeClient;
+    ringingTimeoutMs?: number;
+    scheduleDelayed?: (fn: () => void, delayMs: number) => void;
+  } = {},
+) {
   const CHANNEL = "dm-1";
   const fake = makeFakeStore({ channels: { [CHANNEL]: { kind: "dm" } }, members: { [CHANNEL]: ["alice", "bob"] } });
   const { send, sent } = makeSend();
@@ -183,6 +221,8 @@ function makeHarness(opts: { mediad?: MediadClient; transcribe?: TranscribeClien
     transcribe: opts.transcribe,
     marking: MARKING,
     broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+    mediaRenegotiateDelayMs: 0,
+    scheduleDelayed: opts.scheduleDelayed ?? runImmediately,
   };
   const registry = makeCallRegistry(deps);
   return { CHANNEL, registry, sent, delivered, broadcasts, fake, advance: (ms: number) => (nowMs += ms) };
@@ -514,7 +554,9 @@ test("checkRingingTimeouts: an ACTIVE (already-accepted) call is never touched b
 
 /** A `kind:"human"` channel with 3 members (alice, bob, carol) — the group-calling harness, mirrors
  * `makeHarness` but over a group channel rather than a 2-party DM. */
-function makeGroupHarness(opts: { mediad?: MediadClient; transcribe?: TranscribeClient } = {}) {
+function makeGroupHarness(
+  opts: { mediad?: MediadClient; transcribe?: TranscribeClient; scheduleDelayed?: (fn: () => void, delayMs: number) => void } = {},
+) {
   const CHANNEL = "group-1";
   const fake = makeFakeStore({ channels: { [CHANNEL]: { kind: "human" } }, members: { [CHANNEL]: ["alice", "bob", "carol"] } });
   const { send, sent } = makeSend();
@@ -530,6 +572,8 @@ function makeGroupHarness(opts: { mediad?: MediadClient; transcribe?: Transcribe
     transcribe: opts.transcribe,
     marking: MARKING,
     broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+    mediaRenegotiateDelayMs: 0,
+    scheduleDelayed: opts.scheduleDelayed ?? runImmediately,
   };
   const registry = makeCallRegistry(deps);
   return { CHANNEL, registry, sent, delivered, broadcasts, fake, advance: (ms: number) => (nowMs += ms) };
@@ -625,6 +669,326 @@ test("group: joinGroup rejects a non-member, a double-join, and a busy user", as
     registry.joinGroup({ channelId: CHANNEL, connId: "alice-c-2", sub: "alice" }),
     (err: unknown) => err instanceof CallSignalError && err.code === "already_in_call",
   );
+});
+
+// ── group calls: call_media / setParticipantMedia (types.ts's CallMediaFrame) ───────────────────
+
+test("group: a fresh joiner's call_roster entries default camera/screen OFF with track ids absent (not merely undefined)", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+
+  const rosterToBob = sent.find((s) => s.connId === "bob-c" && (s.payload as { type?: string }).type === "call_roster");
+  const participants = (rosterToBob!.payload as { participants: Array<Record<string, unknown>> }).participants;
+  const alice = participants.find((p) => p.sub === "alice")!;
+  assert.equal(alice.cameraOn, false);
+  assert.equal(alice.screenOn, false);
+  assert.ok(!("cameraTrackId" in alice), "an untoggled participant's roster entry omits cameraTrackId entirely");
+  assert.ok(!("screenTrackId" in alice), "an untoggled participant's roster entry omits screenTrackId entirely");
+});
+
+test("group: setParticipantMedia broadcasts call_media to every OTHER bound participant, never echoing back to the sender", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "carol-c", sub: "carol" });
+  await flush();
+  sent.length = 0; // only care about frames sent BY the toggle below
+
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "bob-c", sub: "bob", cameraOn: true, screenOn: false, cameraTrackId: "bob-cam-1" });
+
+  const mediaFrames = sent.filter((s) => (s.payload as { type?: string }).type === "call_media");
+  assert.equal(mediaFrames.length, 2, "exactly the two OTHER participants (alice, carol) hear about it");
+  assert.deepEqual(
+    mediaFrames.map((f) => f.connId).sort(),
+    ["alice-c", "carol-c"],
+  );
+  assert.ok(!mediaFrames.some((f) => f.connId === "bob-c"), "the sender never receives its own call_media broadcast");
+  for (const f of mediaFrames) {
+    assert.deepEqual(f.payload, { type: "call_media", channelId: CHANNEL, sub: "bob", cameraOn: true, screenOn: false, cameraTrackId: "bob-cam-1" });
+  }
+});
+
+test("group: a LATER joiner's call_roster reflects an EARLIER toggle's current media state, not just presence", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "alice-c", sub: "alice", cameraOn: true, screenOn: true, cameraTrackId: "alice-cam", screenTrackId: "alice-screen" });
+
+  await registry.joinGroup({ channelId: CHANNEL, connId: "carol-c", sub: "carol" });
+  await flush();
+
+  const rosterToCarol = sent.find((s) => s.connId === "carol-c" && (s.payload as { type?: string }).type === "call_roster");
+  const participants = (rosterToCarol!.payload as { participants: Array<Record<string, unknown>> }).participants;
+  const aliceEntry = participants.find((p) => p.sub === "alice");
+  assert.deepEqual(aliceEntry, { sub: "alice", cameraOn: true, screenOn: true, cameraTrackId: "alice-cam", screenTrackId: "alice-screen" });
+  const bobEntry = participants.find((p) => p.sub === "bob");
+  assert.equal(bobEntry?.cameraOn, false);
+  assert.equal(bobEntry?.screenOn, false);
+});
+
+test("group: call_media from a NON-participant (never joined) or a stale/wrong connId is silently ignored — no broadcast, no crash", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+  sent.length = 0;
+
+  // mallory was never a participant on this call at all.
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "mallory-c", sub: "mallory", cameraOn: true, screenOn: false });
+  // bob IS a participant, but this frame claims to come from a DIFFERENT (unbound) connection —
+  // the same anti-spoof posture as relay()'s "frame from a connection not bound to the call".
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "bob-c-2", sub: "bob", cameraOn: true, screenOn: false });
+
+  assert.equal(sent.filter((s) => (s.payload as { type?: string }).type === "call_media").length, 0);
+});
+
+test("group: call_media for a channel with NO live call at all is silently ignored", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "alice-c", sub: "alice", cameraOn: true, screenOn: false });
+  assert.equal(sent.length, 0);
+});
+
+// ── group calls: call_media renegotiation orchestration (sender leg, then delayed "others" pass) ─
+
+test("group: call_media toggle renegotiates the SENDER's leg immediately, then every OTHER leg only after the delayed follow-up pass fires", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const scheduler = makeFakeScheduler();
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad, scheduleDelayed: scheduler.scheduleDelayed });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "carol-c", sub: "carol" });
+  await flush();
+  mediad.renegotiateCalls.length = 0; // only care about the toggle below
+
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "bob-c", sub: "bob", cameraOn: true, screenOn: false, cameraTrackId: "bob-cam" });
+  await flush(); // lets bob's own-leg renegotiate() + its `.then()` (which SCHEDULES, doesn't run, the others pass) settle
+
+  // The sender's OWN leg is renegotiated immediately — nobody else's yet.
+  assert.deepEqual(mediad.renegotiateCalls, [{ sessionId: "sess-1", legId: "leg_bob" }]);
+  assert.equal(scheduler.queue.length, 1, "exactly one other-legs pass is queued, not yet run");
+
+  const offerToBob = sent.find(
+    (s) => s.connId === "bob-c" && (s.payload as { type?: string }).type === "call_sdp" && (s.payload as { sdpType?: string }).sdpType === "offer",
+  );
+  assert.deepEqual(offerToBob!.payload, { type: "call_sdp", channelId: CHANNEL, sdpType: "offer", sdp: "renegotiate-offer-for:leg_bob" });
+
+  // Fire the delayed follow-up: every OTHER live leg (alice, carol) gets renegotiated.
+  scheduler.runNext();
+  await flush();
+
+  assert.deepEqual(mediad.renegotiateCalls.map((c) => c.legId).sort(), ["leg_alice", "leg_bob", "leg_carol"]);
+  const offerToAlice = sent.find((s) => s.connId === "alice-c" && (s.payload as { type?: string }).type === "call_sdp");
+  const offerToCarol = sent.find((s) => s.connId === "carol-c" && (s.payload as { type?: string }).type === "call_sdp");
+  assert.ok(offerToAlice && offerToCarol, "every OTHER live leg is renegotiated by the follow-up pass");
+  assert.equal(scheduler.queue.length, 0, "no further passes left queued");
+});
+
+test("group: a duplicate call_media frame (no field actually changed) triggers NO renegotiation, only the broadcast", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const scheduler = makeFakeScheduler();
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad, scheduleDelayed: scheduler.scheduleDelayed });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+  mediad.renegotiateCalls.length = 0;
+
+  // bob's default state is already {cameraOn:false, screenOn:false} — resending the same state is a no-op.
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "bob-c", sub: "bob", cameraOn: false, screenOn: false });
+  await flush();
+
+  assert.equal(mediad.renegotiateCalls.length, 0, "no change -> no renegotiation at all");
+  assert.equal(scheduler.queue.length, 0, "no other-legs pass queued either");
+  assert.ok(
+    sent.some((s) => s.connId === "alice-c" && (s.payload as { type?: string }).type === "call_media"),
+    "the broadcast itself still happens even for a no-op state resend",
+  );
+});
+
+test("group: rapid double-toggle from the same sender coalesces the other-legs follow-up into a single queued pass, not stacked", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const scheduler = makeFakeScheduler();
+  const { CHANNEL, registry } = makeGroupHarness({ mediad, scheduleDelayed: scheduler.scheduleDelayed });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+  mediad.renegotiateCalls.length = 0;
+
+  // Two rapid, genuinely different toggles from bob, back to back, before the event loop even turns.
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "bob-c", sub: "bob", cameraOn: true, screenOn: false, cameraTrackId: "bob-cam-1" });
+  registry.setParticipantMedia({
+    channelId: CHANNEL,
+    connId: "bob-c",
+    sub: "bob",
+    cameraOn: true,
+    screenOn: true,
+    cameraTrackId: "bob-cam-1",
+    screenTrackId: "bob-screen-1",
+  });
+  await flush(); // both own-leg renegotiations + their `.then()` schedule requests settle
+
+  // The sender's OWN leg was renegotiated for BOTH genuine changes (that part isn't coalesced — it's
+  // cheap/direct, one call_sdp offer per toggle, exactly what §2a asks for).
+  assert.equal(mediad.renegotiateCalls.filter((c) => c.legId === "leg_bob").length, 2);
+  // But only ONE other-legs pass is queued — the second toggle's request coalesced into the first
+  // (still-queued, not-yet-fired) one instead of stacking a second timer.
+  assert.equal(scheduler.queue.length, 1, "the second toggle's other-legs request coalesced into the first, not stacked");
+
+  scheduler.runNext();
+  await flush();
+  assert.deepEqual(mediad.renegotiateCalls.filter((c) => c.legId !== "leg_bob").map((c) => c.legId), ["leg_alice"], "exactly one other-legs pass ran, covering alice");
+  assert.equal(scheduler.queue.length, 0, "no leftover queued follow-up from the coalesced toggle");
+});
+
+test("solo self-DM memo: call_media is still ignored — no crash, no broadcast, no mediad call (no peer to relay to)", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const soloFake = makeFakeStore({ channels: { "solo-1": { kind: "dm" } }, members: { "solo-1": ["alice"] } });
+  const { send: soloSend, sent: soloSent } = makeSend();
+  const { deliverToUser: soloDeliver } = makeDeliverToUser();
+  const soloRegistry = makeCallRegistry({
+    store: soloFake.store,
+    send: soloSend,
+    deliverToUser: soloDeliver,
+    now: () => Date.now(),
+    mediad,
+    marking: MARKING,
+    broadcast: () => {},
+    mediaRenegotiateDelayMs: 0,
+    scheduleDelayed: runImmediately,
+  });
+  await soloRegistry.startSolo({ channelId: "solo-1", connId: "alice-c", sub: "alice", wantRecording: true });
+  soloSent.length = 0;
+  mediad.renegotiateCalls.length = 0;
+  soloRegistry.setParticipantMedia({ channelId: "solo-1", connId: "alice-c", sub: "alice", cameraOn: true, screenOn: false });
+  await flush();
+  assert.equal(soloSent.filter((s) => (s.payload as { type?: string }).type === "call_media").length, 0);
+  assert.equal(mediad.renegotiateCalls.length, 0);
+});
+
+// ── 1:1 calls: call_media (p2p relay-only, relayed renegotiation) ────────────────────────────────
+
+test("1:1 p2p: call_media is relayed verbatim (as a broadcast frame with sub) to the peer, with ZERO mediad calls (no session exists)", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeHarness({ mediad });
+  await registry.invite({ channelId: CHANNEL, callerConnId: "a", caller: "alice", wantRecording: false });
+  await registry.accept({ channelId: CHANNEL, connId: "b", consent: false }); // consent:false -> always p2p
+  const live = registry.getActiveCall(CHANNEL)!;
+  assert.equal(live.mode, "p2p");
+  sent.length = 0;
+
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "a", sub: "alice", cameraOn: true, screenOn: false, cameraTrackId: "alice-cam" });
+  await flush();
+
+  const mediaToBob = sent.find((s) => s.connId === "b" && (s.payload as { type?: string }).type === "call_media");
+  assert.deepEqual(mediaToBob!.payload, { type: "call_media", channelId: CHANNEL, sub: "alice", cameraOn: true, screenOn: false, cameraTrackId: "alice-cam" });
+  assert.ok(!sent.some((s) => s.connId === "a"), "the sender never receives its own call_media broadcast");
+  assert.equal(mediad.renegotiateCalls.length, 0, "p2p has no mediad session — the clients renegotiate directly, never the server");
+  assert.equal(mediad.createSessionCalls.length, 0);
+});
+
+test("1:1 p2p: a non-bound/non-party sub is silently ignored, no crash", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeHarness({ mediad });
+  await registry.invite({ channelId: CHANNEL, callerConnId: "a", caller: "alice", wantRecording: false });
+  await registry.accept({ channelId: CHANNEL, connId: "b", consent: false });
+  sent.length = 0;
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "mallory-c", sub: "mallory", cameraOn: true, screenOn: false });
+  // alice's own connId with bob's sub (spoofed) — also dropped.
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "a", sub: "bob", cameraOn: true, screenOn: false });
+  await flush();
+  assert.equal(sent.filter((s) => (s.payload as { type?: string }).type === "call_media").length, 0);
+});
+
+test("1:1 relayed: call_media renegotiates the SENDER's leg immediately, then the PEER's leg after the delayed follow-up pass — same server-offer/client-answer mechanics as a group call", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const scheduler = makeFakeScheduler();
+  const { CHANNEL, registry, sent } = makeHarness({ mediad, scheduleDelayed: scheduler.scheduleDelayed });
+  await registry.invite({ channelId: CHANNEL, callerConnId: "a", caller: "alice", wantRecording: true });
+  await registry.accept({ channelId: CHANNEL, connId: "b", consent: true }); // healthy mediad + consent:true -> relayed
+  const live = registry.getActiveCall(CHANNEL)!;
+  assert.equal(live.mode, "relayed");
+  sent.length = 0;
+  mediad.renegotiateCalls.length = 0;
+
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "a", sub: "alice", cameraOn: true, screenOn: false, cameraTrackId: "alice-cam" });
+  await flush();
+
+  // The peer (bob) gets the relayed call_media broadcast frame immediately, same as p2p.
+  const mediaToBob = sent.find((s) => s.connId === "b" && (s.payload as { type?: string }).type === "call_media");
+  assert.deepEqual(mediaToBob!.payload, { type: "call_media", channelId: CHANNEL, sub: "alice", cameraOn: true, screenOn: false, cameraTrackId: "alice-cam" });
+
+  // The SENDER's (alice's) own leg is renegotiated right away — the OTHER leg (bob's) not yet.
+  assert.deepEqual(mediad.renegotiateCalls, [{ sessionId: "sess-1", legId: LEG_CALLER_ID }]);
+  assert.equal(scheduler.queue.length, 1, "the other-leg follow-up is queued, not yet run");
+  const offerToAlice = sent.find(
+    (s) => s.connId === "a" && (s.payload as { type?: string }).type === "call_sdp" && (s.payload as { sdpType?: string }).sdpType === "offer",
+  );
+  // Identical wire shape to a group call's server-initiated renegotiation offer (renegotiateOthers)
+  // — the app answers both the SAME way (createAnswerFor path), so this MUST match exactly.
+  assert.deepEqual(offerToAlice!.payload, { type: "call_sdp", channelId: CHANNEL, sdpType: "offer", sdp: `renegotiate-offer-for:${LEG_CALLER_ID}` });
+
+  // alice answers the server-initiated offer — brokered to mediad via answerLeg, the SAME "existing
+  // answer path" a group call's participant uses (relayGroup's answer branch), now shared by relay().
+  await registry.relay({ channelId: CHANNEL, fromConnId: "a", frame: { type: "call_sdp", channelId: CHANNEL, sdpType: "answer", sdp: "alice-answer" } });
+  assert.deepEqual(mediad.answerLegCalls, [{ sessionId: "sess-1", legId: LEG_CALLER_ID, sdp: "alice-answer" }]);
+
+  // Now the delayed follow-up pass fires: bob's leg (the OTHER live leg) gets renegotiated too.
+  scheduler.runNext();
+  await flush();
+  assert.deepEqual(mediad.renegotiateCalls, [{ sessionId: "sess-1", legId: LEG_CALLER_ID }, { sessionId: "sess-1", legId: LEG_CALLEE_ID }]);
+  const offerToBob = sent.find(
+    (s) => s.connId === "b" && (s.payload as { type?: string }).type === "call_sdp" && (s.payload as { sdpType?: string }).sdpType === "offer",
+  );
+  assert.deepEqual(offerToBob!.payload, { type: "call_sdp", channelId: CHANNEL, sdpType: "offer", sdp: `renegotiate-offer-for:${LEG_CALLEE_ID}` });
+
+  // bob answers too — brokered via the same answerLeg path.
+  await registry.relay({ channelId: CHANNEL, fromConnId: "b", frame: { type: "call_sdp", channelId: CHANNEL, sdpType: "answer", sdp: "bob-answer" } });
+  assert.deepEqual(mediad.answerLegCalls[1], { sessionId: "sess-1", legId: LEG_CALLEE_ID, sdp: "bob-answer" });
+});
+
+test("1:1 relayed: a duplicate call_media frame (no field changed) triggers NO renegotiation, only the relay", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeHarness({ mediad });
+  await registry.invite({ channelId: CHANNEL, callerConnId: "a", caller: "alice", wantRecording: true });
+  await registry.accept({ channelId: CHANNEL, connId: "b", consent: true });
+  sent.length = 0;
+  mediad.renegotiateCalls.length = 0;
+
+  // alice's default state is already {cameraOn:false, screenOn:false} — resending it is a no-op.
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "a", sub: "alice", cameraOn: false, screenOn: false });
+  await flush();
+  assert.equal(mediad.renegotiateCalls.length, 0);
+  assert.ok(sent.some((s) => s.connId === "b" && (s.payload as { type?: string }).type === "call_media"), "the relay itself still happens for a no-op resend");
+});
+
+test("group: media state is EPHEMERAL per call — a fresh call in the same channel starts with camera/screen off again, even after a prior call's toggle", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent } = makeGroupHarness({ mediad });
+
+  // First call: alice toggles her camera on, then leaves (LAST OUT — the call ends).
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  registry.setParticipantMedia({ channelId: CHANNEL, connId: "alice-c", sub: "alice", cameraOn: true, screenOn: false, cameraTrackId: "old-cam" });
+  await registry.end({ channelId: CHANNEL, connId: "alice-c", sub: "alice", reason: "hangup" });
+  assert.equal(registry.getActiveCall(CHANNEL), undefined, "the first call fully ended (last participant out)");
+
+  // Second call: a fresh start — the durable call_participants table is call-scoped, and so is the
+  // LiveCall's in-memory participants map; nothing from the ended call should leak forward.
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c-2", sub: "alice" });
+  sent.length = 0;
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+
+  const rosterToBob = sent.find((s) => s.connId === "bob-c" && (s.payload as { type?: string }).type === "call_roster");
+  const aliceEntry = (rosterToBob!.payload as { participants: Array<Record<string, unknown>> }).participants.find((p) => p.sub === "alice");
+  assert.deepEqual(aliceEntry, { sub: "alice", cameraOn: false, screenOn: false }, "no leftover cameraOn/cameraTrackId from the PRIOR call");
 });
 
 test("group: a participant leaving mid-call drops their leg, notifies the rest, and renegotiates — the call stays up", async () => {

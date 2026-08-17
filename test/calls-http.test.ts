@@ -46,6 +46,9 @@ function fakeCallsWith(live: LiveCall | undefined): CallRegistry {
     async joinGroup() {
       throw new Error("not used by this test");
     },
+    setParticipantMedia() {
+      throw new Error("not used by this test");
+    },
     async leaveGroup() {},
   };
 }

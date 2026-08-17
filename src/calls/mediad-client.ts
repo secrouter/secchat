@@ -137,6 +137,12 @@ export interface MediadFinalizeFile {
   path: string; // path on the shared recordings volume (relative to the session dir)
   startOffsetMs: number; // this file's offset from the session t0 (0 for the mixed file)
   durationMs: number;
+  /** OPTIONAL — reserved for a future mediad that distinguishes an "audio" per-leg file from the
+   * "mixed" playback file explicitly, rather than callers inferring it from `legId`'s
+   * presence/absence (as `runPostCallPipeline`/`kickReconciledTranscription` still do — this field
+   * is unread by both; every lookup stays legId-based). Absent from mediad's current manifest
+   * response. */
+  kind?: "audio" | "mixed";
 }
 
 export interface MediadFinalizeManifest {
