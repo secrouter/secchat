@@ -197,4 +197,37 @@ void main() {
       expect(controller.hangUpCalls, 1);
     });
   });
+
+  group('ended view', () {
+    testWidgets('a memo shows "Call Ended" + a transcript hint; Close dismisses', (tester) async {
+      final controller = FakeCallController()
+        ..emit(const CallSnapshot(phase: CallPhase.ended, channelId: 'chan_1', endReason: CallEndReason.hangup));
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Call Ended'), findsOneWidget);
+      expect(find.textContaining('transcript will appear'), findsOneWidget);
+
+      await tester.tap(find.text('Close'));
+      expect(controller.dismissCalls, 1);
+    });
+
+    testWidgets('a failed call surfaces the error message', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.ended,
+            channelId: 'chan_1',
+            peerSub: 'bob',
+            endReason: CallEndReason.failed,
+            errorMessage: 'the recording service is unavailable',
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Call Ended'), findsOneWidget);
+      expect(find.text('the recording service is unavailable'), findsOneWidget);
+    });
+  });
 }

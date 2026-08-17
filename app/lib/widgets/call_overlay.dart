@@ -53,40 +53,18 @@ class CallOverlay extends StatelessWidget {
                   labelForSub: labelForSub,
                 ),
               ),
-            // isLive/recordingMemo intentionally show NOTHING here anymore --
-            // `ChatScreen` renders [CallScreen] full-screen (behind the Call
-            // bottom tab) for exactly those phases; a compact bar here too
-            // would double up the UI and, worse, physically overlap
-            // `ChatScreen`'s bottomNavigationBar (same bottom-anchored
-            // `Positioned` real estate).
-            if (snap.phase == CallPhase.ended)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: _CallEndedBanner(
-                  controller: controller,
-                  labelForSub: labelForSub,
-                ),
-              ),
+            // isLive/recordingMemo/ended intentionally show NOTHING here anymore
+            // -- `ChatScreen` renders [CallScreen] full-screen (behind the Call
+            // bottom tab) for the sustained phases AND the terminal "Call Ended"
+            // screen (the old auto-dismiss banner is gone; the user closes the
+            // ended screen explicitly). A compact bar here would double up the UI
+            // and physically overlap `ChatScreen`'s bottomNavigationBar.
           ],
         );
       },
     );
   }
 }
-
-String _endReasonLabel(CallEndReason reason) => switch (reason) {
-  CallEndReason.hangup => 'Call ended',
-  CallEndReason.remoteHangup => 'Call ended',
-  CallEndReason.disconnect => 'Call dropped — connection lost',
-  CallEndReason.declined => 'Call declined',
-  CallEndReason.cancelled => 'Call cancelled',
-  CallEndReason.missed => 'Missed call',
-  CallEndReason.taken => 'Answered on another tab',
-  CallEndReason.failed => 'Call failed',
-  CallEndReason.none => 'Call ended',
-};
 
 /// Full-screen ring UI: outbound ("Calling…", cancel) or inbound (accept /
 /// accept-without-recording / decline, plus the consent explainer when the
@@ -278,57 +256,3 @@ class _RingAction extends StatelessWidget {
   }
 }
 
-/// A brief "call ended" / "missed call" / failure banner shown once, then
-/// dismissed (tap or [CallController.dismiss]).
-class _CallEndedBanner extends StatelessWidget {
-  const _CallEndedBanner({required this.controller, required this.labelForSub});
-
-  final CallController controller;
-  final String Function(String) labelForSub;
-
-  @override
-  Widget build(BuildContext context) {
-    final snap = controller.snapshot;
-    final peer = snap.peerSub == null ? '' : labelForSub(snap.peerSub!);
-    final failed = snap.endReason == CallEndReason.failed;
-    return Material(
-      color: failed ? AppColors.badBg : AppColors.surfaceRaised,
-      child: SafeArea(
-        top: false,
-        child: InkWell(
-          onTap: controller.dismiss,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            child: Row(
-              children: [
-                Icon(
-                  failed ? Icons.error_outline : Icons.call_end,
-                  size: 16,
-                  color: failed ? AppColors.bad : AppColors.textMuted,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    failed && snap.errorMessage != null
-                        ? snap.errorMessage!
-                        // A solo memo has no peer (voice-memo UX) -- drop the " — <peer>" suffix
-                        // rather than showing it dangling empty.
-                        : peer.isEmpty
-                        ? _endReasonLabel(snap.endReason)
-                        : '${_endReasonLabel(snap.endReason)} — $peer',
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      color: failed ? AppColors.bad : AppColors.textMuted,
-                    ),
-                  ),
-                ),
-                const Icon(Icons.close, size: 15, color: AppColors.textFaint),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}

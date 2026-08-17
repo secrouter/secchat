@@ -207,13 +207,17 @@ class _ChatScreenState extends State<ChatScreen> {
   // on the way in and resets to Chat on the way out, so a fresh call always
   // starts prominent rather than wherever the user last left it.
   int _callTab = 0;
-  bool _wasSustainedCall = false;
+  bool _wasCallTabVisible = false;
 
   void _onCallControllerChanged() {
-    final sustained = isSustainedCallPhase(_callController.snapshot.phase);
-    if (sustained != _wasSustainedCall) {
-      _wasSustainedCall = sustained;
-      setState(() => _callTab = sustained ? 1 : 0);
+    // The call tab is present for a sustained call AND the terminal "Call Ended"
+    // screen ([isCallTabPhase]). Auto-focus Call when the tab first appears and
+    // reset to Chat once it's gone (dismissed to idle); active→ended keeps the
+    // Call tab focused so the user sees "Call Ended" and closes it explicitly.
+    final visible = isCallTabPhase(_callController.snapshot.phase);
+    if (visible != _wasCallTabVisible) {
+      _wasCallTabVisible = visible;
+      setState(() => _callTab = visible ? 1 : 0);
     }
   }
 
@@ -1706,15 +1710,15 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           );
 
-    // While a call is SUSTAINED (connecting/active/recordingMemo) the call
-    // gets pulled out of `CallOverlay`'s compact bottom bar and into its own
-    // full-screen tab (voice-calls-plan.md §3.3's UI polish) -- `IndexedStack`
-    // keeps the chat body mounted (so it doesn't lose scroll position/state)
-    // while the Call tab is showing, and vice versa. `CallOverlay` still
-    // wraps everything for the TRANSIENT ring/ended states, which apply
-    // regardless of which tab is selected.
-    final sustainedCall = isSustainedCallPhase(_callController.snapshot.phase);
-    final body = sustainedCall
+    // While a call occupies the tab ([isCallTabPhase]: a sustained call, plus
+    // the terminal "Call Ended" screen) it's pulled out of `CallOverlay` into
+    // its own full-screen tab -- `IndexedStack` keeps the chat body mounted (so
+    // it doesn't lose scroll position/state) while the Call tab is showing, and
+    // vice versa. `CallOverlay` still wraps everything for the TRANSIENT ring
+    // state. The old auto-dismiss "call ended" banner is gone: ending now shows
+    // a "Call Ended" screen in this tab that the user closes explicitly.
+    final showCallTab = isCallTabPhase(_callController.snapshot.phase);
+    final body = showCallTab
         ? IndexedStack(
             index: _callTab,
             children: [chatBody, CallScreen(controller: _callController, labelForSub: _labelForSub)],
@@ -1735,7 +1739,7 @@ class _ChatScreenState extends State<ChatScreen> {
               )
             : null,
         body: body,
-        bottomNavigationBar: sustainedCall
+        bottomNavigationBar: showCallTab
             ? CallTabBar(
                 controller: _callController,
                 selected: _callTab,

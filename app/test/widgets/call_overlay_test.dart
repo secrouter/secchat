@@ -112,38 +112,24 @@ void main() {
     expect(find.text('channel content'), findsOneWidget);
   });
 
-  group('call-ended banner', () {
-    testWidgets('shows the end reason and dismisses on tap', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          const CallSnapshot(
-            phase: CallPhase.ended,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            endReason: CallEndReason.missed,
-          ),
-        );
-      await tester.pumpWidget(host(controller));
+  // The old auto-dismiss "call ended" banner is gone — the ended state now lives
+  // in CallScreen's full-screen "Call Ended" view (see call_screen_test.dart),
+  // which the user closes explicitly. CallOverlay renders nothing for it.
+  testWidgets('renders nothing for the ended phase (no banner)', (tester) async {
+    final controller = FakeCallController()
+      ..emit(
+        const CallSnapshot(
+          phase: CallPhase.ended,
+          channelId: 'chan_1',
+          peerSub: 'bob',
+          endReason: CallEndReason.missed,
+        ),
+      );
+    await tester.pumpWidget(host(controller));
+    await tester.pump();
 
-      expect(find.textContaining('Missed call'), findsOneWidget);
-      await tester.tap(find.textContaining('Missed call'));
-      expect(controller.dismissCalls, 1);
-    });
-
-    testWidgets('a failure shows the error message', (tester) async {
-      final controller = FakeCallController()
-        ..emit(
-          const CallSnapshot(
-            phase: CallPhase.ended,
-            channelId: 'chan_1',
-            peerSub: 'bob',
-            endReason: CallEndReason.failed,
-            errorMessage: 'Could not access the microphone',
-          ),
-        );
-      await tester.pumpWidget(host(controller));
-
-      expect(find.text('Could not access the microphone'), findsOneWidget);
-    });
+    expect(find.textContaining('Missed call'), findsNothing);
+    expect(find.text('Call Ended'), findsNothing);
+    expect(find.text('channel content'), findsOneWidget);
   });
 }

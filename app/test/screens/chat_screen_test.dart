@@ -90,13 +90,24 @@ void main() {
       await pumpSettled(tester);
       expect(find.byType(CallScreen), findsOneWidget);
 
-      // The call ends -- the tab bar and CallScreen both drop, back to
-      // plain chat.
+      // The call ends -- the tab bar STAYS (the old auto-dismiss banner is
+      // gone); the Call tab now shows a "Call Ended" screen the user closes
+      // explicitly.
       callController.emit(
         const CallSnapshot(phase: CallPhase.ended, channelId: 'c1', peerSub: 'dev.bob'),
       );
       await pumpSettled(tester);
-      expect(find.text('Chat'), findsNothing);
+      expect(find.text('Call'), findsOneWidget); // tab bar still present
+      expect(find.byType(CallScreen), findsOneWidget);
+      expect(find.text('Call Ended'), findsOneWidget);
+
+      // Tapping Close dismisses the call; the following idle snapshot drops the
+      // whole tab view back to plain chat.
+      await tester.tap(find.text('Close'));
+      expect(callController.dismissCalls, 1);
+      callController.emit(const CallSnapshot());
+      await pumpSettled(tester);
+      expect(find.text('Call'), findsNothing);
       expect(find.byType(CallScreen), findsNothing);
     });
   });

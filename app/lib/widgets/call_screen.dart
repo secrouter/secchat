@@ -30,6 +30,12 @@ String _fmtDuration(Duration d) {
 bool isSustainedCallPhase(CallPhase phase) =>
     phase == CallPhase.connecting || phase == CallPhase.active || phase == CallPhase.recordingMemo;
 
+/// Phases that occupy the full-screen call tab: a sustained call PLUS the
+/// terminal [CallPhase.ended] "Call Ended" screen. Ended stays in the tab (the
+/// user dismisses it with the Close button) instead of an auto-dismissing
+/// overlay banner over the chat.
+bool isCallTabPhase(CallPhase phase) => isSustainedCallPhase(phase) || phase == CallPhase.ended;
+
 /// Full-screen call UI for a live/connecting/recording call. Rebuilds via
 /// [AnimatedBuilder] on [controller], same pattern as [CallOverlay].
 class CallScreen extends StatefulWidget {
@@ -68,6 +74,17 @@ class _CallScreenState extends State<CallScreen> {
       animation: widget.controller,
       builder: (context, _) {
         final snap = widget.controller.snapshot;
+        // Terminal state: a "Call Ended" screen the user closes explicitly (the
+        // old overlay banner is gone) — closing returns to idle, which drops the
+        // whole tab view back to plain chat.
+        if (snap.phase == CallPhase.ended) {
+          return _EndedView(
+            controller: widget.controller,
+            wasMemo: snap.peerSub == null,
+            reason: snap.endReason,
+            errorMessage: snap.errorMessage,
+          );
+        }
         final isMemo = snap.phase == CallPhase.recordingMemo;
         final peer = snap.peerSub == null ? '' : widget.labelForSub(snap.peerSub!);
         final title = isMemo ? 'Voice memo' : peer;
@@ -244,7 +261,86 @@ class MicLevelMeter extends StatelessWidget {
   }
 }
 
-class _BigControlButton extends StatelessWidget {
+/// The "Call Ended" terminal screen shown in the call tab. Replaces the old
+/// auto-dismissing overlay banner: the user reads it and taps Close, which
+/// dismisses the call ([CallController.dismiss] → idle) and returns to chat.
+class _EndedView extends StatelessWidget {
+  const _EndedView({
+    required this.controller,
+    required this.wasMemo,
+    required this.reason,
+    required this.errorMessage,
+  });
+
+  final CallController controller;
+  final bool wasMemo;
+  final CallEndReason reason;
+  final String? errorMessage;
+
+  String get _subtitle {
+    if (reason == CallEndReason.failed && errorMessage != null) return errorMessage!;
+    if (wasMemo) return 'Your voice memo is saved — the transcript will appear in this chat shortly.';
+    return switch (reason) {
+      CallEndReason.disconnect => 'Connection lost.',
+      CallEndReason.declined => 'The other party declined.',
+      CallEndReason.cancelled => 'Call cancelled.',
+      CallEndReason.missed => 'No answer.',
+      CallEndReason.taken => 'Answered on another device.',
+      CallEndReason.failed => 'The call failed.',
+      _ => 'The call has ended.',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.bg,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+          child: Column(
+            children: [
+              const Spacer(flex: 2),
+              Container(
+                width: 96,
+                height: 96,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+                child: const Icon(Icons.call_end, size: 40, color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Call Ended',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.text),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14, color: AppColors.textMuted),
+              ),
+              const Spacer(flex: 3),
+              _BigControlButton(
+                icon: Icons.close,
+                label: 'Close',
+                background: AppColors.accent,
+                foreground: AppColors.onAccent,
+                onTap: controller.dismiss,
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A large round call control (Mute / End / Close). Hovering it grows the
+/// circle and adds a colour-matched glow so the mouseover accent is
+/// unmistakable — the End/Close action in particular reads as a real button.
+class _BigControlButton extends StatefulWidget {
   const _BigControlButton({
     required this.icon,
     required this.label,
@@ -260,25 +356,55 @@ class _BigControlButton extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_BigControlButton> createState() => _BigControlButtonState();
+}
+
+class _BigControlButtonState extends State<_BigControlButton> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(40),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(color: background, shape: BoxShape.circle),
-              child: Icon(icon, color: foreground, size: 30),
-            ),
-            const SizedBox(height: 8),
-            Text(label, style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
-          ],
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedScale(
+                scale: _hovered ? 1.16 : 1.0,
+                duration: const Duration(milliseconds: 130),
+                curve: Curves.easeOut,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 130),
+                  curve: Curves.easeOut,
+                  width: 72,
+                  height: 72,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: widget.background,
+                    shape: BoxShape.circle,
+                    boxShadow: _hovered
+                        ? [
+                            BoxShadow(
+                              color: widget.background.withValues(alpha: 0.55),
+                              blurRadius: 24,
+                              spreadRadius: 4,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Icon(widget.icon, color: widget.foreground, size: 30),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(widget.label, style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+            ],
+          ),
         ),
       ),
     );
