@@ -143,6 +143,72 @@ class SoloRecordButton extends StatelessWidget {
   }
 }
 
+/// The group-channel header's call control (multi-party SFU calls,
+/// voice-contracts.md's `call_start`/`call_join`): lets anyone either start a
+/// fresh call or join one already live. Unlike [CallButton] there's no ring/
+/// invite for a group call and so no wire signal telling a client whether a
+/// call is already in progress in this channel before it tries -- this
+/// offers BOTH actions explicitly (join-on-demand) rather than guessing
+/// which one applies; picking the wrong one is a harmless server-side
+/// rejection, not a real failure mode. Single-flight gated like every other
+/// call control -- disabled while already on a call/memo anywhere in the app.
+class GroupCallButton extends StatelessWidget {
+  const GroupCallButton({super.key, required this.controller, required this.channelId});
+
+  final CallController controller;
+  final String channelId;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final busy = controller.snapshot.phase != CallPhase.idle;
+        // 'start'/'join' rather than an enum -- keeps the popup's value type
+        // (`String`, like [SoloRecordButton]'s `enroll` bool) something a
+        // widget test can name via `PopupMenuButton<String>` without needing
+        // access to a private type.
+        return PopupMenuButton<String>(
+          enabled: !busy,
+          tooltip: busy ? 'Already on a call' : 'Start or join a group call',
+          icon: Icon(
+            Icons.groups_outlined,
+            size: 17,
+            color: busy ? AppColors.textFaint : AppColors.textMuted,
+          ),
+          color: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+            side: const BorderSide(color: AppColors.border),
+          ),
+          onSelected: (action) {
+            switch (action) {
+              case 'start':
+                controller.startGroupCall(channelId);
+              case 'join':
+                controller.joinGroupCall(channelId);
+            }
+          },
+          itemBuilder: (_) => [
+            const PopupMenuItem<String>(
+              value: 'start',
+              child: _CallMenuRow(icon: Icons.call, label: 'Start call', detail: 'Begin a new group call'),
+            ),
+            const PopupMenuItem<String>(
+              value: 'join',
+              child: _CallMenuRow(
+                icon: Icons.login,
+                label: 'Join call',
+                detail: 'Join a call already in progress',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _CallMenuRow extends StatelessWidget {
   const _CallMenuRow({
     required this.icon,

@@ -198,6 +198,85 @@ void main() {
     });
   });
 
+  group('group call roster', () {
+    testWidgets('shows a waiting message with no participants, then a tile per participant', (
+      tester,
+    ) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            isGroup: true,
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Group call'), findsOneWidget);
+      expect(find.text('Waiting for others to join…'), findsOneWidget);
+      expect(find.byKey(const Key('participant-tile-bob')), findsNothing);
+
+      // A participant joins (WsCallParticipantJoinedEvent -> the roster map
+      // gains an entry) -- a tile for them appears.
+      controller.emit(
+        controller.snapshot.copyWith(
+          participants: const {'bob': CallParticipant(sub: 'bob')},
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Waiting for others to join…'), findsNothing);
+      expect(find.byKey(const Key('participant-tile-bob')), findsOneWidget);
+      expect(find.text('Bob'), findsOneWidget);
+
+      // A second participant joins -- both tiles show.
+      controller.emit(
+        controller.snapshot.copyWith(
+          participants: const {
+            'bob': CallParticipant(sub: 'bob'),
+            'carol': CallParticipant(sub: 'carol'),
+          },
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('participant-tile-bob')), findsOneWidget);
+      expect(find.byKey(const Key('participant-tile-carol')), findsOneWidget);
+
+      // bob leaves (WsCallParticipantLeftEvent) -- their tile disappears,
+      // carol's stays.
+      controller.emit(
+        controller.snapshot.copyWith(
+          participants: const {'carol': CallParticipant(sub: 'carol')},
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('participant-tile-bob')), findsNothing);
+      expect(find.byKey(const Key('participant-tile-carol')), findsOneWidget);
+    });
+
+    testWidgets('a group call ended shows "Call Ended" without the memo transcript hint', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.ended,
+            channelId: 'chan_1',
+            isGroup: true,
+            endReason: CallEndReason.hangup,
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Call Ended'), findsOneWidget);
+      // Group calls aren't memos -- the "your voice memo is saved" copy
+      // (which peerSub == null alone would otherwise trigger) must not show.
+      expect(find.textContaining('transcript will appear'), findsNothing);
+    });
+  });
+
   group('ended view', () {
     testWidgets('a memo shows "Call Ended" + a transcript hint; Close dismisses', (tester) async {
       final controller = FakeCallController()

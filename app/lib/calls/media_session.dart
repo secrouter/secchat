@@ -14,12 +14,16 @@ import 'dart:async';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-/// One call leg's WebRTC state: local mic capture, the peer connection, and
-/// the remote track sunk to a live audio element (via [remoteRenderer] --
-/// on web, `flutter_webrtc` backs an `RTCVideoRenderer` with a hidden
-/// `<video>`/`<audio>` element regardless of whether video is used, which is
-/// what actually plays the remote party's audio; there is no separate
-/// "audio-only renderer" type).
+/// One call leg's WebRTC state: local mic capture, the (single) peer
+/// connection, and every remote track sunk to a live audio element (via
+/// [remoteRenderers] -- on web, `flutter_webrtc` backs an `RTCVideoRenderer`
+/// with a hidden `<video>`/`<audio>` element regardless of whether video is
+/// used, which is what actually plays a remote party's audio; there is no
+/// separate "audio-only renderer" type). Still exactly ONE `RTCPeerConnection`
+/// per instance even for a group call -- mediad's SFU relays every other
+/// participant's audio to us over that single PC's multiple inbound
+/// transceivers, so `pc.onTrack` just fires more than once instead of the
+/// class needing a PC per remote party.
 class MediaSession {
   MediaSession({this.stunUrls = const []});
 
@@ -44,12 +48,23 @@ class MediaSession {
   /// [createAnswerFor]'s [_requirePc] throw.
   bool get isStarted => _pc != null;
 
-  /// The remote party's audio, sunk here — mount this in a (0x0, invisible)
-  /// `RTCVideoRenderer` widget so the platform actually plays it (see the
-  /// class doc). Callers own the widget lifecycle; this class owns the
-  /// renderer's `srcObject`.
-  final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
-  bool _remoteRendererInitialized = false;
+  /// Every remote party's audio, sunk here — one [RTCVideoRenderer] per
+  /// remote track, keyed by that track's source id (`MediaStream.id`, or the
+  /// track's own id for a streamless track). A 1:1/solo call only ever has
+  /// one entry; a group (SFU) call gets one per OTHER participant the server
+  /// relays to us (`pc.onTrack` fires once per inbound track -- N−1 of them
+  /// in an N-party call). Mount ALL of these in (0x0, invisible)
+  /// `RTCVideoRenderer` widgets so the platform actually plays them (see the
+  /// class doc) -- [CallController.buildRemoteAudioSink] does this. Callers
+  /// own the widget lifecycle; this class owns each renderer's `srcObject`
+  /// and disposal.
+  final Map<String, RTCVideoRenderer> remoteRenderers = {};
+
+  /// Fired whenever [remoteRenderers] gains or loses an entry, so
+  /// [CallController] can rebuild [CallController.buildRemoteAudioSink].
+  /// Never fired for an in-place `srcObject` update on an existing renderer
+  /// (nothing visible changes -- the sink widget doesn't care).
+  void Function()? onRemoteRenderersChanged;
 
   /// Fired for each locally-gathered ICE candidate — **p2p mode only**
   /// (voice-contracts.md §2.2/§2.2 of the plan: relayed mode is non-trickle,
@@ -73,9 +88,6 @@ class MediaSession {
   /// Acquires the mic and opens the peer connection. Call once per call leg
   /// before creating/receiving an offer.
   Future<void> start() async {
-    await remoteRenderer.initialize();
-    _remoteRendererInitialized = true;
-
     _localStream = await navigator.mediaDevices.getUserMedia(<String, dynamic>{
       // Echo/noise mitigation (plan R2) -- verified across BOTH p2p and
       // relayed modes per the plan's testing strategy (the relay adds
@@ -94,7 +106,17 @@ class MediaSession {
 
     pc.onTrack = (RTCTrackEvent event) {
       if (event.streams.isEmpty) return;
-      remoteRenderer.srcObject = event.streams.first;
+      final stream = event.streams.first;
+      // The stream id is stable per remote source for the life of that
+      // source's track (mediad/the browser mint a fresh one per m-line) --
+      // good enough as the renderer key even though it's opaque (no sub
+      // travels with the track itself; the roster's identity comes from
+      // `call_roster`/`call_participant_joined`, matched by [CallController]
+      // separately, not by this id).
+      unawaited(_attachRemoteTrack(stream.id, stream));
+    };
+    pc.onRemoveTrack = (MediaStream stream, MediaStreamTrack track) {
+      unawaited(_detachRemoteTrack(stream.id));
     };
     pc.onConnectionState = (RTCPeerConnectionState state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
@@ -114,6 +136,36 @@ class MediaSession {
     for (final track in _localStream!.getAudioTracks()) {
       await pc.addTrack(track, _localStream!);
     }
+  }
+
+  /// Routes one inbound remote track to its own renderer, creating that
+  /// renderer (and initializing it -- async, unlike the old eager
+  /// [start]-time init) the first time [sourceId] is seen. A group call's
+  /// `pc.onTrack` fires once per remote participant's track; a 1:1/solo
+  /// call's fires exactly once, so this degrades to the old single-renderer
+  /// behavior for those callers.
+  Future<void> _attachRemoteTrack(String sourceId, MediaStream stream) async {
+    var renderer = remoteRenderers[sourceId];
+    final isNew = renderer == null;
+    if (isNew) {
+      renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      remoteRenderers[sourceId] = renderer;
+    }
+    renderer.srcObject = stream;
+    if (isNew) onRemoteRenderersChanged?.call();
+  }
+
+  /// Tears down and drops the renderer for a remote track that just ended
+  /// (`pc.onRemoveTrack` -- a participant left / their leg was renegotiated
+  /// away). No-op if [sourceId] never had a renderer (or was already
+  /// removed by [dispose]).
+  Future<void> _detachRemoteTrack(String sourceId) async {
+    final renderer = remoteRenderers.remove(sourceId);
+    if (renderer == null) return;
+    renderer.srcObject = null;
+    await renderer.dispose();
+    onRemoteRenderersChanged?.call();
   }
 
   /// Creates an offer, sets it as the local description, and returns the SDP
@@ -136,6 +188,15 @@ class MediaSession {
   /// description) as of that moment. Same non-trickle caveat as [createOffer]
   /// for relayed mode -- use [currentLocalSdp] after
   /// [waitForIceGatheringComplete], not this return value.
+  ///
+  /// Also the RENEGOTIATION path: a group call's server can send a fresh
+  /// offer on an already-connected PC whenever the roster changes (a
+  /// participant joining/leaving adds/drops an m-line) -- `setRemoteDescription`
+  /// / `createAnswer` / `setLocalDescription` behave identically for a
+  /// renegotiation as for the initial offer, so this same method (called
+  /// again) IS "apply a server-initiated offer, create an answer, return it"
+  /// with no separate method needed. [CallController._applyRemoteSdp] is the
+  /// one call site for both cases.
   Future<String> createAnswerFor(String remoteOfferSdp) async {
     final pc = _requirePc();
     await pc.setRemoteDescription(RTCSessionDescription(remoteOfferSdp, 'offer'));
@@ -239,9 +300,11 @@ class MediaSession {
   Future<void> dispose() async {
     onLocalCandidate = null;
     onConnectionEstablished = null;
+    onRemoteRenderersChanged = null;
     final pc = _pc;
     _pc = null;
     pc?.onTrack = null;
+    pc?.onRemoveTrack = null;
     pc?.onIceCandidate = null;
     pc?.onIceGatheringState = null;
     pc?.onConnectionState = null;
@@ -255,10 +318,11 @@ class MediaSession {
       }
     }
 
-    if (_remoteRendererInitialized) {
-      remoteRenderer.srcObject = null;
-      await remoteRenderer.dispose();
-      _remoteRendererInitialized = false;
+    final renderers = remoteRenderers.values.toList();
+    remoteRenderers.clear();
+    for (final renderer in renderers) {
+      renderer.srcObject = null;
+      await renderer.dispose();
     }
   }
 }

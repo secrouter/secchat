@@ -7,6 +7,7 @@ import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/platform/daemon_supervisor.dart';
 import 'package:secchat_app/screens/chat.dart';
+import 'package:secchat_app/widgets/call_button.dart';
 import 'package:secchat_app/widgets/call_screen.dart';
 import 'package:secchat_app/widgets/composer.dart';
 import 'package:secchat_app/widgets/marking_banner.dart';
@@ -110,6 +111,28 @@ void main() {
       expect(find.text('Call'), findsNothing);
       expect(find.byType(CallScreen), findsNothing);
     });
+  });
+
+  testWidgets('a human channel header shows the group call button', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: _channels);
+    final callController = FakeCallController();
+    debugCallControllerFactory = ({required api, required mySub, stunUrls = const []}) => callController;
+    addTearDown(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // c1 ('general') is a ChannelKind.human channel and auto-selected first.
+    expect(find.byType(GroupCallButton), findsOneWidget);
+
+    await tester.tap(find.byType(GroupCallButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start call'));
+    await tester.pumpAndSettle();
+
+    expect(callController.startGroupCallCalls, ['c1']);
   });
 
   testWidgets('on desktop, the daemon starts with a minted scoped runner token', (tester) async {

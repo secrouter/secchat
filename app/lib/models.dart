@@ -1100,6 +1100,33 @@ final class WsCallRecordingEvent extends WsEvent {
   final bool recording;
 }
 
+/// The initial roster of a group (multi-party SFU) call, sent once when this
+/// connection's `call_start`/`call_join` takes hold -- who's already in the
+/// call (voice-contracts.md group-call addendum). Later membership changes
+/// arrive one at a time via [WsCallParticipantJoinedEvent]/
+/// [WsCallParticipantLeftEvent], not another roster push.
+final class WsCallRosterEvent extends WsEvent {
+  const WsCallRosterEvent({required this.participants, required super.channelId});
+
+  /// The subs already in the call (mine is never included).
+  final List<String> participants;
+}
+
+/// A participant joined the live group call in [channelId] -- add a roster
+/// tile. Fired for everyone already in the call, not the joiner themselves
+/// (they get [WsCallRosterEvent] instead).
+final class WsCallParticipantJoinedEvent extends WsEvent {
+  const WsCallParticipantJoinedEvent({required this.sub, required super.channelId});
+  final String sub;
+}
+
+/// A participant left the live group call in [channelId] -- drop their
+/// roster tile.
+final class WsCallParticipantLeftEvent extends WsEvent {
+  const WsCallParticipantLeftEvent({required this.sub, required super.channelId});
+  final String sub;
+}
+
 /// A `call_*` frame this connection sent was rejected -- sent to the ONE
 /// connection that sent it, never broadcast (`src/ws/hub.ts`'s
 /// `sendCallError`; voice-contracts.md §1.3 only mandates "a WS-level error
@@ -1275,6 +1302,26 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'call_missed':
       return WsCallMissedEvent(channelId: channelId);
+    case 'call_roster':
+      final raw = json['participants'];
+      final subs = raw is List
+          ? raw
+                .whereType<Map<String, dynamic>>()
+                .map((p) => p['sub'] as String? ?? '')
+                .where((sub) => sub.isNotEmpty)
+                .toList()
+          : <String>[];
+      return WsCallRosterEvent(participants: subs, channelId: channelId);
+    case 'call_participant_joined':
+      return WsCallParticipantJoinedEvent(
+        sub: json['sub'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_participant_left':
+      return WsCallParticipantLeftEvent(
+        sub: json['sub'] as String? ?? '',
+        channelId: channelId,
+      );
     case 'call_recording':
       return WsCallRecordingEvent(
         recording: json['recording'] == 'on',

@@ -830,6 +830,9 @@ class _ChatScreenState extends State<ChatScreen> {
         case WsCallMissedEvent():
         case WsCallRecordingEvent():
         case WsCallErrorEvent():
+        case WsCallRosterEvent():
+        case WsCallParticipantJoinedEvent():
+        case WsCallParticipantLeftEvent():
           _callController.handleEvent(event);
       }
     });
@@ -1770,12 +1773,17 @@ class _ChatScreenState extends State<ChatScreen> {
     return '$kind · $n ${n == 1 ? 'member' : 'members'}';
   }
 
-  /// The DM header's call control (voice-calls-plan.md §3.3), or null for a
-  /// non-DM channel. A normal 2-party DM gets the presence-aware [CallButton];
-  /// the caller's own self-DM ([Channel.isSelfDm] -- a `dm` channel with no
-  /// peer) gets [SoloRecordButton] instead, which starts a solo voice-memo
-  /// recording rather than ringing anyone.
+  /// The channel header's call control (voice-calls-plan.md §3.3), or null
+  /// for an agent channel. A `human` (multi-member, non-DM, non-agent)
+  /// channel gets [GroupCallButton] -- a multi-party SFU call, join-on-demand
+  /// since there's no ring/invite for it. A normal 2-party DM gets the
+  /// presence-aware [CallButton]; the caller's own self-DM ([Channel.isSelfDm]
+  /// -- a `dm` channel with no peer) gets [SoloRecordButton] instead, which
+  /// starts a solo voice-memo recording rather than ringing anyone.
   Widget? _callButtonFor(Channel channel) {
+    if (channel.kind == ChannelKind.human) {
+      return GroupCallButton(controller: _callController, channelId: channel.id);
+    }
     if (channel.kind != ChannelKind.dm) return null;
     final peer = channel.peer(widget.principal.sub);
     if (peer == null) {
@@ -2241,7 +2249,9 @@ class _ChannelHeader extends StatelessWidget {
   /// Opens the inbound-webhook manager. Null hides the control (e.g. DMs).
   final VoidCallback? onWebhooks;
 
-  /// The DM call button (voice-calls-plan.md §3.3). Null for every non-DM channel.
+  /// The channel's call control (voice-calls-plan.md §3.3 / group-call
+  /// addendum): [CallButton]/[SoloRecordButton] for a DM, [GroupCallButton]
+  /// for a `human` channel. Null for an agent channel.
   final Widget? callButton;
 
   @override

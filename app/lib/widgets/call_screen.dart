@@ -80,17 +80,23 @@ class _CallScreenState extends State<CallScreen> {
         if (snap.phase == CallPhase.ended) {
           return _EndedView(
             controller: widget.controller,
-            wasMemo: snap.peerSub == null,
+            // A solo memo and a group call BOTH leave peerSub null (no
+            // single fixed peer) -- isGroup is what actually tells them
+            // apart; see [CallSnapshot.isGroup]'s doc.
+            wasMemo: !snap.isGroup && snap.peerSub == null,
             reason: snap.endReason,
             errorMessage: snap.errorMessage,
           );
         }
         final isMemo = snap.phase == CallPhase.recordingMemo;
+        final isGroup = snap.isGroup;
         final peer = snap.peerSub == null ? '' : widget.labelForSub(snap.peerSub!);
-        final title = isMemo ? 'Voice memo' : peer;
+        final title = isGroup ? 'Group call' : (isMemo ? 'Voice memo' : peer);
         final elapsed = snap.connectedAt == null ? null : DateTime.now().difference(snap.connectedAt!);
         final statusText = snap.phase == CallPhase.connecting
             ? 'Connecting…'
+            : isGroup
+            ? '${snap.participants.length + 1} in call' // +1 for me
             : isMemo
             ? (elapsed == null ? 'Starting…' : 'Recording…')
             : (elapsed == null ? 'Connecting…' : 'Connected');
@@ -108,25 +114,30 @@ class _CallScreenState extends State<CallScreen> {
               child: Column(
                 children: [
                   const Spacer(flex: 2),
-                  Container(
-                    width: 96,
-                    height: 96,
-                    alignment: Alignment.center,
-                    decoration: const BoxDecoration(
-                      color: AppColors.surfaceRaised,
-                      shape: BoxShape.circle,
-                    ),
-                    child: isMemo
-                        ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
-                        : Text(
-                            initialsFor(peer),
-                            style: const TextStyle(
-                              fontSize: 30,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.accent,
-                            ),
+                  isGroup
+                      ? _ParticipantGrid(
+                          participants: snap.participants.values.toList(),
+                          labelForSub: widget.labelForSub,
+                        )
+                      : Container(
+                          width: 96,
+                          height: 96,
+                          alignment: Alignment.center,
+                          decoration: const BoxDecoration(
+                            color: AppColors.surfaceRaised,
+                            shape: BoxShape.circle,
                           ),
-                  ),
+                          child: isMemo
+                              ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
+                              : Text(
+                                  initialsFor(peer),
+                                  style: const TextStyle(
+                                    fontSize: 30,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.accent,
+                                  ),
+                                ),
+                        ),
                   const SizedBox(height: 20),
                   Text(
                     title,
@@ -205,6 +216,86 @@ class _CallScreenState extends State<CallScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+/// The roster grid for a group call: one tile per OTHER participant
+/// ([CallSnapshot.participants] -- I don't get a tile for myself, matching
+/// the wire contract's roster shape). Wraps rather than a fixed grid so it
+/// degrades gracefully from a 2-party group call up to a dozen-odd tiles.
+class _ParticipantGrid extends StatelessWidget {
+  const _ParticipantGrid({required this.participants, required this.labelForSub});
+
+  final List<CallParticipant> participants;
+  final String Function(String sub) labelForSub;
+
+  @override
+  Widget build(BuildContext context) {
+    if (participants.isEmpty) {
+      // I've started/joined the call but nobody else is on it yet.
+      return const Text(
+        'Waiting for others to join…',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 14, color: AppColors.textMuted),
+      );
+    }
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 16,
+      runSpacing: 16,
+      children: [
+        for (final p in participants) _ParticipantTile(sub: p.sub, label: labelForSub(p.sub)),
+      ],
+    );
+  }
+}
+
+/// One participant's avatar + name in the [_ParticipantGrid]. No live
+/// speaking/mute indicator -- the wire contract carries no per-participant
+/// signal for either today (see [CallParticipant]'s doc) -- the mic glyph is
+/// a static "on the call" marker, not a truthful mute state.
+class _ParticipantTile extends StatelessWidget {
+  const _ParticipantTile({required this.sub, required this.label});
+
+  final String sub;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      key: Key('participant-tile-$sub'),
+      width: 76,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+            child: Text(
+              initialsFor(label),
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.mic, size: 11, color: AppColors.textMuted),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

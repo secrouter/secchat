@@ -1,9 +1,13 @@
-/// The client-side signaling state machine for a 1:1 voice call
-/// (docs/plans/voice-calls-plan.md §2.1/§2.2/§3.3), mirroring the server's
-/// `CallState` (`ringing → active → ended`, voice-contracts.md §1). Talks the
-/// `call_*` frames over the existing global WS socket
-/// ([ApiClient.subscribeAll]/`sendCall*`) and drives a [MediaSession] for the
-/// actual audio.
+/// The client-side signaling state machine for a voice call -- 1:1, solo
+/// memo, or multi-party (docs/plans/voice-calls-plan.md §2.1/§2.2/§3.3),
+/// mirroring the server's `CallState` (`ringing → active → ended`,
+/// voice-contracts.md §1). A group call skips ringing entirely (`call_start`/
+/// `call_join` are direct, no `call_invite`/`call_accept` handshake) but
+/// otherwise rides the same `connecting`/`active` phases and the same
+/// `call_sdp` offer/answer machinery -- see [CallSnapshot.isGroup] and
+/// [CallParticipant]. Talks the `call_*` frames over the existing global WS
+/// socket ([ApiClient.subscribeAll]/`sendCall*`) and drives a [MediaSession]
+/// for the actual audio.
 ///
 /// [CallController] is the abstract seam the UI (and widget tests) depend on
 /// -- same shape as `DaemonSupervisor`/`RunnerDaemonState`
@@ -58,6 +62,26 @@ enum CallPhase {
   ended,
 }
 
+/// One other participant in a live GROUP call (voice-contracts.md group-call
+/// addendum's `call_roster`/`call_participant_joined`/`call_participant_left`
+/// -- never used for a 1:1/solo call, which stick with [CallSnapshot.peerSub]
+/// instead). Deliberately thin: the wire contract carries no per-participant
+/// mute/speaking signal today, so [CallScreen]'s roster tiles show identity
+/// only (avatar + name) -- there's nothing truthful to show for "is this
+/// specific remote party speaking right now" without that.
+@immutable
+class CallParticipant {
+  const CallParticipant({required this.sub});
+
+  final String sub;
+
+  @override
+  bool operator ==(Object other) => other is CallParticipant && other.sub == sub;
+
+  @override
+  int get hashCode => sub.hashCode;
+}
+
 /// Why a call reached [CallPhase.ended] (or never got past ringing).
 enum CallEndReason {
   none,
@@ -90,15 +114,33 @@ class CallSnapshot {
     this.connectedAt,
     this.endReason = CallEndReason.none,
     this.errorMessage,
+    this.isGroup = false,
+    this.participants = const {},
   });
 
   final CallPhase phase;
 
-  /// The DM channel this call belongs to; null only at [CallPhase.idle].
+  /// The channel this call belongs to; null only at [CallPhase.idle].
   final String? channelId;
 
-  /// The other party's sub; null only at [CallPhase.idle].
+  /// The other party's sub for a 1:1 call; always null for a solo memo AND
+  /// for a group call ([isGroup]) -- a group call's "who's on it" lives in
+  /// [participants] instead, since there's no single fixed peer.
   final String? peerSub;
+
+  /// True for a multi-party (SFU) call started with [CallController.startGroupCall]
+  /// / [CallController.joinGroupCall] -- relayed-only, no ring/accept
+  /// handshake, roster-driven instead of [peerSub]-driven. Sticks at its
+  /// starting value through [CallPhase.ended] so the ended screen can still
+  /// tell a group call's "Call Ended" apart from a solo memo's (both leave
+  /// [peerSub] null).
+  final bool isGroup;
+
+  /// The OTHER participants currently on a group call, keyed by sub — seeded
+  /// from `call_roster` when [isGroup] joining/starting completes, kept live
+  /// by `call_participant_joined`/`call_participant_left`. Always empty for a
+  /// non-group call.
+  final Map<String, CallParticipant> participants;
 
   /// Whether *I* am the caller on this call (drives which ring UI shows).
   final bool amCaller;
@@ -186,6 +228,8 @@ class CallSnapshot {
     Object? connectedAt = _unset,
     CallEndReason? endReason,
     Object? errorMessage = _unset,
+    bool? isGroup,
+    Map<String, CallParticipant>? participants,
   }) => CallSnapshot(
     phase: phase ?? this.phase,
     channelId: identical(channelId, _unset) ? this.channelId : channelId as String?,
@@ -202,6 +246,8 @@ class CallSnapshot {
     connectedAt: identical(connectedAt, _unset) ? this.connectedAt : connectedAt as DateTime?,
     endReason: endReason ?? this.endReason,
     errorMessage: identical(errorMessage, _unset) ? this.errorMessage : errorMessage as String?,
+    isGroup: isGroup ?? this.isGroup,
+    participants: participants ?? this.participants,
   );
 }
 
@@ -218,7 +264,12 @@ abstract class CallController extends ChangeNotifier {
   /// (`ChatScreen`) forwards every `WsCallInviteEvent`/`WsCallAcceptEvent`/
   /// `WsCallTakenEvent`/`WsCallSdpEvent`/`WsCallCandidateEvent`/
   /// `WsCallEndEvent`/`WsCallMissedEvent`/`WsCallRecordingEvent`/
-  /// `WsCallErrorEvent` it receives on the global socket.
+  /// `WsCallErrorEvent`/`WsCallRosterEvent`/`WsCallParticipantJoinedEvent`/
+  /// `WsCallParticipantLeftEvent` it receives on the global socket. The
+  /// latter three (group-call roster) are `WsCallSdpEvent`'s renegotiation
+  /// offers aside -- those ride the SAME event type/handler the initial
+  /// offer/answer exchange already uses (see [MediaSession.createAnswerFor]'s
+  /// doc).
   void handleEvent(WsEvent event);
 
   /// Start a call to [peerSub] in [channelId] (`call_invite`).
@@ -239,6 +290,15 @@ abstract class CallController extends ChangeNotifier {
     required bool wantRecording,
     bool enroll = false,
   });
+
+  /// Start a fresh group (multi-party, relayed-only SFU) call in
+  /// [channelId] (`call_start`) — no ringing, live immediately.
+  Future<void> startGroupCall(String channelId);
+
+  /// Join a group call already live in [channelId] (`call_join`) — the
+  /// server replies with the current roster (`call_roster`) and this leg's
+  /// own offer/answer exchange.
+  Future<void> joinGroupCall(String channelId);
 
   /// Answer a ringing INBOUND call (`call_accept`). [consent] is the
   /// recording-consent decision.
@@ -394,6 +454,48 @@ class WebrtcCallController extends CallController {
     api.sendCallSoloStart(channelId, wantRecording: wantRecording, enroll: enroll);
   }
 
+  /// Sends `call_start` and enters [CallPhase.connecting] with [CallSnapshot.isGroup]
+  /// set — deliberately does NOT call [_beginMedia] itself (unlike the 1:1
+  /// caller path): there's no accept echo to wait for, but there IS a roster
+  /// confirmation ([_onRoster]) that plays the same role [_onSoloAccept]
+  /// plays for a solo memo, so media only opens once the server confirms the
+  /// join actually took hold. Mirrors [startSoloRecord]'s shape (and its
+  /// unit test's "just the send + phase flip" scope — see
+  /// `test/calls/webrtc_call_controller_test.dart`).
+  @override
+  Future<void> startGroupCall(String channelId) async {
+    if (_snapshot.phase != CallPhase.idle) return; // already on a call/memo — the UI gates this too
+    _acceptConfirmed = false;
+    _emit(
+      CallSnapshot(
+        phase: CallPhase.connecting,
+        channelId: channelId,
+        amCaller: true,
+        mode: CallMode.relayed, // group calls are relayed-only (SFU) — no p2p mode to negotiate
+        isGroup: true,
+      ),
+    );
+    api.sendCallStart(channelId);
+  }
+
+  /// Sends `call_join` — same shape as [startGroupCall] but `amCaller: false`
+  /// (I'm joining someone else's live call, not starting one).
+  @override
+  Future<void> joinGroupCall(String channelId) async {
+    if (_snapshot.phase != CallPhase.idle) return;
+    _acceptConfirmed = false;
+    _emit(
+      CallSnapshot(
+        phase: CallPhase.connecting,
+        channelId: channelId,
+        amCaller: false,
+        mode: CallMode.relayed,
+        isGroup: true,
+      ),
+    );
+    api.sendCallJoin(channelId);
+  }
+
   @override
   Future<void> accept({required bool consent}) async {
     final channelId = _snapshot.channelId;
@@ -484,10 +586,19 @@ class WebrtcCallController extends CallController {
   Widget buildRemoteAudioSink() {
     final media = _media;
     if (media == null || !_snapshot.isLive) return const SizedBox.shrink();
-    // Zero-size but mounted: on web this keeps the underlying `<audio>`/
-    // `<video>` element attached to the DOM so the remote track actually
-    // plays (see [MediaSession]'s class doc) without taking any layout space.
-    return SizedBox(width: 0, height: 0, child: RTCVideoView(media.remoteRenderer));
+    final renderers = media.remoteRenderers.values;
+    if (renderers.isEmpty) return const SizedBox.shrink();
+    // Zero-size but mounted: on web this keeps every remote party's
+    // underlying `<audio>`/`<video>` element attached to the DOM so their
+    // track actually plays (see [MediaSession]'s class doc) without taking
+    // any layout space. ALL of [MediaSession.remoteRenderers] — one per
+    // remote participant on a group call, the usual single entry for a
+    // 1:1/solo call.
+    return SizedBox(
+      width: 0,
+      height: 0,
+      child: Stack(children: [for (final renderer in renderers) RTCVideoView(renderer)]),
+    );
   }
 
   // ── Wire events ─────────────────────────────────────────────────────
@@ -517,6 +628,12 @@ class WebrtcCallController extends CallController {
         _onRecording(channelId, recording);
       case WsCallErrorEvent(:final channelId, :final error, :final detail):
         _onCallError(channelId, error, detail);
+      case WsCallRosterEvent(:final channelId, :final participants):
+        _onRoster(channelId, participants);
+      case WsCallParticipantJoinedEvent(:final channelId, :final sub):
+        _onParticipantJoined(channelId, sub);
+      case WsCallParticipantLeftEvent(:final channelId, :final sub):
+        _onParticipantLeft(channelId, sub);
       default:
         break; // not a call event
     }
@@ -745,6 +862,39 @@ class WebrtcCallController extends CallController {
     _emit(_snapshot.copyWith(recordingOn: recording));
   }
 
+  /// The server's confirmation that THIS connection's `call_start`/
+  /// `call_join` took hold — plays the same role [_onSoloAccept] plays for a
+  /// solo memo (there's no `call_accept` echo for a group call): seed the
+  /// roster, then open media for the first time. Guarded on `_media == null`
+  /// rather than a one-shot flag so a duplicate/late roster push (should the
+  /// server ever resend one) doesn't reopen media on top of an already-live
+  /// call.
+  void _onRoster(String channelId, List<String> subs) {
+    if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
+    _emit(_snapshot.copyWith(participants: {for (final sub in subs) sub: CallParticipant(sub: sub)}));
+    if (_media == null) unawaited(_beginMedia());
+  }
+
+  /// A participant joined the group call — add their roster tile. The
+  /// server separately renegotiates the SFU's tracks for us (a fresh
+  /// `call_sdp` offer, handled generically by [_onSdp]/[_applyRemoteSdp]);
+  /// this only updates the roster the UI reads for identity.
+  void _onParticipantJoined(String channelId, String sub) {
+    if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
+    _emit(
+      _snapshot.copyWith(
+        participants: {..._snapshot.participants, sub: CallParticipant(sub: sub)},
+      ),
+    );
+  }
+
+  /// A participant left the group call — drop their roster tile.
+  void _onParticipantLeft(String channelId, String sub) {
+    if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
+    final participants = Map<String, CallParticipant>.of(_snapshot.participants)..remove(sub);
+    _emit(_snapshot.copyWith(participants: participants));
+  }
+
   // ── Media lifecycle ─────────────────────────────────────────────────
 
   Future<void> _beginMedia() async {
@@ -761,6 +911,11 @@ class WebrtcCallController extends CallController {
     media.onConnectionEstablished = () {
       if (_snapshot.mode == CallMode.p2p) _markActive();
     };
+    // A group call's roster tiles are identity-only (no per-participant
+    // audio-level signal exists on the wire, see [CallParticipant]'s doc) --
+    // but the audio itself still needs every new/removed remote renderer
+    // re-mounted into [buildRemoteAudioSink] as the SFU adds/drops tracks.
+    media.onRemoteRenderersChanged = notifyListeners;
 
     final mode = _snapshot.mode;
     if (mode == CallMode.p2p) {
@@ -865,6 +1020,9 @@ class WebrtcCallController extends CallController {
         mode: _snapshot.mode,
         endReason: reason,
         errorMessage: errorMessage,
+        // Carried through so the ended screen can tell a group call's "Call
+        // Ended" apart from a solo memo's (both leave peerSub null).
+        isGroup: _snapshot.isGroup,
       ),
     );
   }

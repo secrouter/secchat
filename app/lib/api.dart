@@ -352,6 +352,17 @@ abstract class ApiClient {
   /// recording as the caller's voiceprint enrollment.
   void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll});
 
+  /// Start a group (multi-party, relayed-only SFU) call in [channelId]
+  /// (`call_start`, caller → server). Unlike [sendCallInvite] this never
+  /// rings anyone -- the server puts the call live immediately and other
+  /// members join with [sendCallJoin] on their own initiative.
+  void sendCallStart(String channelId);
+
+  /// Join a live group call in [channelId] (`call_join`, caller → server).
+  /// The server replies with the current roster (`call_roster`) and this
+  /// leg's own offer/answer exchange over [sendCallSdp].
+  void sendCallJoin(String channelId);
+
   /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
   /// arrive as `presence` WS events.
   Future<List<String>> getPresence();
@@ -998,6 +1009,16 @@ class HttpApiClient implements ApiClient {
       'wantRecording': wantRecording,
       if (enroll != null) 'enroll': enroll,
     });
+  }
+
+  @override
+  void sendCallStart(String channelId) {
+    _sendCallFrame({'type': 'call_start', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallJoin(String channelId) {
+    _sendCallFrame({'type': 'call_join', 'channelId': channelId});
   }
 
   @override
