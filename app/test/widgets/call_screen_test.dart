@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secchat_app/calls/call_controller.dart';
+import 'package:secchat_app/formatting.dart';
 import 'package:secchat_app/widgets/call_screen.dart';
 
 import '../calls/fake_call_controller.dart';
@@ -196,6 +197,159 @@ void main() {
       await tester.tap(find.text('Stop'));
       expect(controller.hangUpCalls, 1);
     });
+
+    testWidgets('camera/screen buttons are present on a live group call and toggle', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(phase: CallPhase.active, channelId: 'chan_1', isGroup: true),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Video'), findsOneWidget);
+      expect(find.text('Share'), findsOneWidget);
+
+      await tester.tap(find.text('Video'));
+      expect(controller.toggleCameraCalls, 1);
+
+      await tester.tap(find.text('Share'));
+      expect(controller.toggleScreenShareCalls, 1);
+
+      // Labels/colors flip once the snapshot reports the source is on --
+      // the controller (real or fake) owns applying the toggle; this
+      // asserts the button reflects whatever state it's given.
+      controller.emit(controller.snapshot.copyWith(localCameraOn: true, localScreenOn: true));
+      await tester.pump();
+
+      expect(find.text('Stop video'), findsOneWidget);
+      expect(find.text('Stop share'), findsOneWidget);
+      expect(find.text('Video'), findsNothing);
+      expect(find.text('Share'), findsNothing);
+    });
+
+    testWidgets('camera/screen buttons are present on a live 1:1 call', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            peerSub: 'bob',
+            connectedAt: DateTime.now(),
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Video'), findsOneWidget);
+      expect(find.text('Share'), findsOneWidget);
+    });
+
+    testWidgets('camera/screen buttons are absent on a solo memo', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          CallSnapshot(phase: CallPhase.recordingMemo, channelId: 'chan_1', connectedAt: DateTime.now()),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.text('Video'), findsNothing);
+      expect(find.text('Stop video'), findsNothing);
+      expect(find.text('Share'), findsNothing);
+      expect(find.text('Stop share'), findsNothing);
+    });
+
+    testWidgets('a local camera preview shows only while the camera is on', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            peerSub: 'bob',
+            connectedAt: DateTime.now(),
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.byKey(const Key('local-camera-preview')), findsNothing);
+
+      controller.emit(controller.snapshot.copyWith(localCameraOn: true));
+      await tester.pump();
+
+      expect(find.byKey(const Key('local-camera-preview')), findsOneWidget);
+    });
+  });
+
+  group('screen share stage', () {
+    testWidgets('appears when a group participant is screen-sharing', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            isGroup: true,
+            participants: {'bob': CallParticipant(sub: 'bob')},
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.byKey(const Key('screen-share-stage')), findsNothing);
+
+      controller.emit(
+        controller.snapshot.copyWith(
+          participants: const {'bob': CallParticipant(sub: 'bob', screenOn: true)},
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('screen-share-stage')), findsOneWidget);
+      expect(find.textContaining('Bob is sharing'), findsOneWidget);
+    });
+
+    testWidgets('appears for my own screen share when nobody else is sharing', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(phase: CallPhase.active, channelId: 'chan_1', isGroup: true),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      controller.emit(controller.snapshot.copyWith(localScreenOn: true));
+      await tester.pump();
+
+      expect(find.byKey(const Key('screen-share-stage')), findsOneWidget);
+      expect(find.text('You are sharing your screen'), findsOneWidget);
+    });
+
+    testWidgets('a remote share wins the stage over a simultaneous local one', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            isGroup: true,
+            localScreenOn: true,
+            participants: {'bob': CallParticipant(sub: 'bob', screenOn: true)},
+          ),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.textContaining('Bob is sharing'), findsOneWidget);
+      expect(find.text('You are sharing your screen'), findsNothing);
+    });
+
+    testWidgets('never appears for a solo memo (which never has screen state)', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          CallSnapshot(phase: CallPhase.recordingMemo, channelId: 'chan_1', connectedAt: DateTime.now()),
+        );
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.byKey(const Key('screen-share-stage')), findsNothing);
+    });
   });
 
   group('group call roster', () {
@@ -255,6 +409,51 @@ void main() {
 
       expect(find.byKey(const Key('participant-tile-bob')), findsNothing);
       expect(find.byKey(const Key('participant-tile-carol')), findsOneWidget);
+    });
+
+    testWidgets('a participant tile renders video when a camera renderer is wired', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          const CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            isGroup: true,
+            participants: {
+              'bob': CallParticipant(sub: 'bob', cameraOn: true, cameraTrackId: 'cam-1'),
+              'carol': CallParticipant(sub: 'carol'),
+            },
+          ),
+        )
+        // Only bob has a renderer actually wired -- carol falls back to her
+        // avatar even though her `CallParticipant` doesn't drive that here
+        // (a real controller resolves this from `MediaSession.remoteTracks`
+        // instead; the fake exposes this as a plain testable seam).
+        ..remoteCameraViewBuilder = (sub) => sub == 'bob' ? const SizedBox(key: Key('bob-video')) : null;
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.byKey(const Key('video-tile-bob')), findsOneWidget);
+      expect(find.byKey(const Key('video-tile-carol')), findsNothing);
+      // carol still gets her identity avatar (initials) since no renderer
+      // was wired for her.
+      expect(find.text(initialsFor('carol')), findsOneWidget);
+    });
+
+    testWidgets('the 1:1 branch renders the peer\'s video when a camera renderer is wired', (tester) async {
+      final controller = FakeCallController()
+        ..emit(
+          CallSnapshot(
+            phase: CallPhase.active,
+            channelId: 'chan_1',
+            peerSub: 'bob',
+            connectedAt: DateTime.now(),
+          ),
+        )
+        ..remoteCameraViewBuilder = (sub) => sub == 'bob' ? const SizedBox(key: Key('bob-video')) : null;
+      await tester.pumpWidget(host(controller));
+      await tester.pump();
+
+      expect(find.byKey(const Key('video-tile-bob')), findsOneWidget);
     });
 
     testWidgets('a group call ended shows "Call Ended" without the memo transcript hint', (tester) async {

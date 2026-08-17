@@ -833,6 +833,7 @@ class _ChatScreenState extends State<ChatScreen> {
         case WsCallRosterEvent():
         case WsCallParticipantJoinedEvent():
         case WsCallParticipantLeftEvent():
+        case WsCallMediaEvent():
           _callController.handleEvent(event);
       }
     });

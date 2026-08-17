@@ -106,6 +106,22 @@ class _CallScreenState extends State<CallScreen> {
         // sub-phase to gate on, see `CallPhase.recordingMemo`'s doc).
         final recOn = isMemo || snap.recordingIndicatorOn;
 
+        // The FIRST remote participant currently screen-sharing -- a group
+        // call's roster, or (via the SAME `participants` map, see
+        // `CallSnapshot.participants`'s doc) a 1:1 call's peer. A remote
+        // share always wins the stage over our own (nothing stops both from
+        // being true at once; the OTHER party's content is what the room
+        // wants to look at).
+        String? remoteScreenSharer;
+        for (final p in snap.participants.values) {
+          if (p.screenOn) {
+            remoteScreenSharer = p.sub;
+            break;
+          }
+        }
+        final showLocalScreenStage = remoteScreenSharer == null && snap.localScreenOn;
+        final hasScreenStage = remoteScreenSharer != null || showLocalScreenStage;
+
         return Material(
           color: AppColors.bg,
           child: SafeArea(
@@ -114,29 +130,29 @@ class _CallScreenState extends State<CallScreen> {
               child: Column(
                 children: [
                   const Spacer(flex: 2),
+                  if (hasScreenStage) ...[
+                    _ScreenShareStage(
+                      label: remoteScreenSharer != null
+                          ? '${widget.labelForSub(remoteScreenSharer)} is sharing their screen'
+                          : 'You are sharing your screen',
+                      child: remoteScreenSharer != null
+                          ? (widget.controller.buildRemoteScreenView(remoteScreenSharer) ??
+                                const SizedBox.shrink())
+                          : widget.controller.buildLocalScreenPreview(),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   isGroup
                       ? _ParticipantGrid(
                           participants: snap.participants.values.toList(),
                           labelForSub: widget.labelForSub,
+                          controller: widget.controller,
                         )
-                      : Container(
-                          width: 96,
-                          height: 96,
-                          alignment: Alignment.center,
-                          decoration: const BoxDecoration(
-                            color: AppColors.surfaceRaised,
-                            shape: BoxShape.circle,
-                          ),
-                          child: isMemo
-                              ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
-                              : Text(
-                                  initialsFor(peer),
-                                  style: const TextStyle(
-                                    fontSize: 30,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.accent,
-                                  ),
-                                ),
+                      : _SoloVisual(
+                          isMemo: isMemo,
+                          peer: peer,
+                          peerSub: snap.peerSub,
+                          controller: widget.controller,
                         ),
                   const SizedBox(height: 20),
                   Text(
@@ -182,14 +198,32 @@ class _CallScreenState extends State<CallScreen> {
                     ),
                   const Spacer(flex: 2),
                   MicLevelMeter(level: snap.micLevel),
+                  // Own camera self-preview -- small, next to the mic meter
+                  // rather than in the grid/solo-visual slot (which is
+                  // reserved for OTHER parties -- see `_ParticipantTile`/
+                  // `_SoloVisual`'s remote-only video).
+                  if (!isMemo && snap.localCameraOn) ...[
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      key: const Key('local-camera-preview'),
+                      width: 96,
+                      height: 96,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(AppRadius.lg),
+                        child: widget.controller.buildLocalCameraPreview(),
+                      ),
+                    ),
+                  ],
                   const Spacer(flex: 3),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      // No peer to mute FOR on a solo memo -- mediad records
-                      // this connection's mic regardless of the local mute
-                      // toggle's UI existing or not, so hide a control that
-                      // would just be confusing.
+                      // No peer to mute/show video FOR on a solo memo --
+                      // mediad records this connection's mic regardless of
+                      // the local mute toggle's UI existing or not, and
+                      // [startSoloRecord] never requests a camera/screen
+                      // track in the first place -- hiding these controls
+                      // avoids offering a toggle that can't do anything.
                       if (!isMemo) ...[
                         _BigControlButton(
                           icon: snap.muted ? Icons.mic_off : Icons.mic,
@@ -198,7 +232,23 @@ class _CallScreenState extends State<CallScreen> {
                           foreground: snap.muted ? AppColors.onWarn : AppColors.text,
                           onTap: widget.controller.toggleMute,
                         ),
-                        const SizedBox(width: 28),
+                        const SizedBox(width: 18),
+                        _BigControlButton(
+                          icon: snap.localCameraOn ? Icons.videocam : Icons.videocam_off,
+                          label: snap.localCameraOn ? 'Stop video' : 'Video',
+                          background: snap.localCameraOn ? AppColors.accent : AppColors.surfaceRaised,
+                          foreground: snap.localCameraOn ? AppColors.onAccent : AppColors.text,
+                          onTap: widget.controller.toggleCamera,
+                        ),
+                        const SizedBox(width: 18),
+                        _BigControlButton(
+                          icon: snap.localScreenOn ? Icons.stop_screen_share : Icons.screen_share,
+                          label: snap.localScreenOn ? 'Stop share' : 'Share',
+                          background: snap.localScreenOn ? AppColors.accent : AppColors.surfaceRaised,
+                          foreground: snap.localScreenOn ? AppColors.onAccent : AppColors.text,
+                          onTap: widget.controller.toggleScreenShare,
+                        ),
+                        const SizedBox(width: 18),
                       ],
                       _BigControlButton(
                         icon: Icons.call_end,
@@ -225,10 +275,15 @@ class _CallScreenState extends State<CallScreen> {
 /// the wire contract's roster shape). Wraps rather than a fixed grid so it
 /// degrades gracefully from a 2-party group call up to a dozen-odd tiles.
 class _ParticipantGrid extends StatelessWidget {
-  const _ParticipantGrid({required this.participants, required this.labelForSub});
+  const _ParticipantGrid({
+    required this.participants,
+    required this.labelForSub,
+    required this.controller,
+  });
 
   final List<CallParticipant> participants;
   final String Function(String sub) labelForSub;
+  final CallController controller;
 
   @override
   Widget build(BuildContext context) {
@@ -245,40 +300,57 @@ class _ParticipantGrid extends StatelessWidget {
       spacing: 16,
       runSpacing: 16,
       children: [
-        for (final p in participants) _ParticipantTile(sub: p.sub, label: labelForSub(p.sub)),
+        for (final p in participants)
+          _ParticipantTile(sub: p.sub, label: labelForSub(p.sub), controller: controller),
       ],
     );
   }
 }
 
-/// One participant's avatar + name in the [_ParticipantGrid]. No live
-/// speaking/mute indicator -- the wire contract carries no per-participant
-/// signal for either today (see [CallParticipant]'s doc) -- the mic glyph is
-/// a static "on the call" marker, not a truthful mute state.
+/// One participant's avatar + name in the [_ParticipantGrid] -- or their
+/// live camera video, when [CallController.buildRemoteCameraView] resolves
+/// one for them (their screen share, if any, goes to the big stage above
+/// the grid instead -- see `CallScreen`'s `_ScreenShareStage`, not here). No
+/// live speaking/mute indicator -- the wire contract carries no
+/// per-participant signal for either (see [CallParticipant]'s doc) -- the
+/// mic glyph is a static "on the call" marker, not a truthful mute state.
 class _ParticipantTile extends StatelessWidget {
-  const _ParticipantTile({required this.sub, required this.label});
+  const _ParticipantTile({required this.sub, required this.label, required this.controller});
 
   final String sub;
   final String label;
+  final CallController controller;
 
   @override
   Widget build(BuildContext context) {
+    final cameraView = controller.buildRemoteCameraView(sub);
     return SizedBox(
       key: Key('participant-tile-$sub'),
       width: 76,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 56,
-            height: 56,
-            alignment: Alignment.center,
-            decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
-            child: Text(
-              initialsFor(label),
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
+          if (cameraView != null)
+            SizedBox(
+              key: Key('video-tile-$sub'),
+              width: 56,
+              height: 56,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(28),
+                child: cameraView,
+              ),
+            )
+          else
+            Container(
+              width: 56,
+              height: 56,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+              child: Text(
+                initialsFor(label),
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
+              ),
             ),
-          ),
           const SizedBox(height: 6),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -293,6 +365,105 @@ class _ParticipantTile extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The non-group (1:1 or solo memo) call's centerpiece -- the peer's live
+/// camera video when [CallController.buildRemoteCameraView] resolves one
+/// (never for a memo -- there's no peer), falling back to the same avatar
+/// circle this slot has always shown otherwise. A SEPARATE code path from
+/// [_ParticipantTile] (this call shape has no [CallParticipant] roster
+/// entry driving it -- just [CallSnapshot.peerSub]), so the same
+/// camera-vs-avatar branch is duplicated here rather than shared.
+class _SoloVisual extends StatelessWidget {
+  const _SoloVisual({
+    required this.isMemo,
+    required this.peer,
+    required this.peerSub,
+    required this.controller,
+  });
+
+  final bool isMemo;
+  final String peer;
+  final String? peerSub;
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final cameraView = (!isMemo && peerSub != null) ? controller.buildRemoteCameraView(peerSub!) : null;
+    if (cameraView != null) {
+      return SizedBox(
+        key: Key('video-tile-$peerSub'),
+        width: 200,
+        height: 200,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: cameraView,
+        ),
+      );
+    }
+    return Container(
+      width: 96,
+      height: 96,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+      child: isMemo
+          ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
+          : Text(
+              initialsFor(peer),
+              style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700, color: AppColors.accent),
+            ),
+    );
+  }
+}
+
+/// The big "main stage" shown above the grid/solo visual whenever anyone
+/// (a remote participant, or me) is screen-sharing -- CallScreen picks
+/// which [child]/[label] pair to pass in (remote share wins over a local
+/// one; see its call site's doc). A fixed 16:9 frame keeps the layout
+/// stable regardless of the shared content's actual aspect ratio.
+class _ScreenShareStage extends StatelessWidget {
+  const _ScreenShareStage({required this.child, required this.label});
+
+  final Widget child;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const Key('screen-share-stage'),
+      // A fixed footprint (not "fill the available width at 16:9", which
+      // overflows a short/narrow call screen -- the rest of the column
+      // already competes for the same vertical space via its `Spacer`s) --
+      // big enough to read text/shared content, small enough to always
+      // leave room for the grid/avatar, status text, and controls below it.
+      width: 280,
+      height: 158,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          child,
+          Positioned(
+            left: 8,
+            bottom: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppColors.overlay,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              child: Text(label, style: const TextStyle(fontSize: 11, color: AppColors.text)),
+            ),
           ),
         ],
       ),

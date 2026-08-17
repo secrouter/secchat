@@ -64,22 +64,46 @@ enum CallPhase {
 
 /// One other participant in a live GROUP call (voice-contracts.md group-call
 /// addendum's `call_roster`/`call_participant_joined`/`call_participant_left`
-/// -- never used for a 1:1/solo call, which stick with [CallSnapshot.peerSub]
-/// instead). Deliberately thin: the wire contract carries no per-participant
-/// mute/speaking signal today, so [CallScreen]'s roster tiles show identity
-/// only (avatar + name) -- there's nothing truthful to show for "is this
-/// specific remote party speaking right now" without that.
+/// PLUS the video-calls wire contract's `call_media`) -- ALSO used to track a
+/// 1:1 call's peer's live camera/screen state (see
+/// [CallSnapshot.participants]'s doc for why that map isn't group-only
+/// anymore). The wire contract carries no per-participant mute/speaking
+/// signal, so [CallScreen]'s roster tiles still show identity-only audio
+/// (avatar + name, static mic glyph) -- [cameraOn]/[screenOn] are the only
+/// TRUTHFUL live per-participant signals that exist today.
 @immutable
 class CallParticipant {
-  const CallParticipant({required this.sub});
+  const CallParticipant({
+    required this.sub,
+    this.cameraOn = false,
+    this.screenOn = false,
+    this.cameraTrackId,
+    this.screenTrackId,
+  });
 
   final String sub;
+  final bool cameraOn;
+  final bool screenOn;
+
+  /// This participant's own LOCAL video track ids (never mediad's relayed
+  /// `video-<originTrackID>` form) -- what an inbound relayed video track's
+  /// id suffix is matched against to tell a camera tile from a screen-share
+  /// tile (see the wire contract's naming section, and
+  /// `WebrtcCallController._remoteTrackView`).
+  final String? cameraTrackId;
+  final String? screenTrackId;
 
   @override
-  bool operator ==(Object other) => other is CallParticipant && other.sub == sub;
+  bool operator ==(Object other) =>
+      other is CallParticipant &&
+      other.sub == sub &&
+      other.cameraOn == cameraOn &&
+      other.screenOn == screenOn &&
+      other.cameraTrackId == cameraTrackId &&
+      other.screenTrackId == screenTrackId;
 
   @override
-  int get hashCode => sub.hashCode;
+  int get hashCode => Object.hash(sub, cameraOn, screenOn, cameraTrackId, screenTrackId);
 }
 
 /// Why a call reached [CallPhase.ended] (or never got past ringing).
@@ -116,6 +140,8 @@ class CallSnapshot {
     this.errorMessage,
     this.isGroup = false,
     this.participants = const {},
+    this.localCameraOn = false,
+    this.localScreenOn = false,
   });
 
   final CallPhase phase;
@@ -136,11 +162,31 @@ class CallSnapshot {
   /// [peerSub] null).
   final bool isGroup;
 
-  /// The OTHER participants currently on a group call, keyed by sub — seeded
-  /// from `call_roster` when [isGroup] joining/starting completes, kept live
-  /// by `call_participant_joined`/`call_participant_left`. Always empty for a
-  /// non-group call.
+  /// The OTHER participant(s)' live media state, keyed by sub. For a group
+  /// call ([isGroup]) this is the full roster — seeded from `call_roster`
+  /// when joining/starting completes, kept live by
+  /// `call_participant_joined`/`call_participant_left`/`call_media`. For a
+  /// 1:1 call it holds AT MOST one entry, for [peerSub] — there's no
+  /// `call_roster`/`call_participant_joined` for a 1:1 call, but `call_media`
+  /// (the video-calls wire contract) fires for a 1:1 peer's camera/screen
+  /// toggle the same as a group participant's, and reusing this map (rather
+  /// than a parallel `peerCameraOn`/`peerScreenOn` pair of fields) keeps
+  /// camera/screen-tile lookups ([CallScreen]'s
+  /// `CallController.buildRemoteCameraView`/`buildRemoteScreenView`) on ONE
+  /// code path for both call shapes. Always empty for a solo memo (no peer
+  /// to carry state for) and before the first roster/call_media push.
   final Map<String, CallParticipant> participants;
+
+  /// True while THIS side's camera is on -- driven by
+  /// [CallController.toggleCamera], mirrored to every other participant via
+  /// `call_media`. Always false for a solo memo (never requests video --
+  /// see [CallController.startSoloRecord]'s doc).
+  final bool localCameraOn;
+
+  /// True while THIS side is sharing its screen -- independent lifecycle
+  /// from [localCameraOn] (both can be true at once). Driven by
+  /// [CallController.toggleScreenShare].
+  final bool localScreenOn;
 
   /// Whether *I* am the caller on this call (drives which ring UI shows).
   final bool amCaller;
@@ -230,6 +276,8 @@ class CallSnapshot {
     Object? errorMessage = _unset,
     bool? isGroup,
     Map<String, CallParticipant>? participants,
+    bool? localCameraOn,
+    bool? localScreenOn,
   }) => CallSnapshot(
     phase: phase ?? this.phase,
     channelId: identical(channelId, _unset) ? this.channelId : channelId as String?,
@@ -248,6 +296,8 @@ class CallSnapshot {
     errorMessage: identical(errorMessage, _unset) ? this.errorMessage : errorMessage as String?,
     isGroup: isGroup ?? this.isGroup,
     participants: participants ?? this.participants,
+    localCameraOn: localCameraOn ?? this.localCameraOn,
+    localScreenOn: localScreenOn ?? this.localScreenOn,
   );
 }
 
@@ -313,6 +363,15 @@ abstract class CallController extends ChangeNotifier {
 
   void toggleMute();
 
+  /// Turns this side's camera on/off mid-call (never available for a solo
+  /// memo -- see [CallSnapshot.localCameraOn]'s doc). A no-op while not
+  /// live, same guard [toggleMute] uses.
+  void toggleCamera();
+
+  /// Turns this side's screen share on/off mid-call -- independent of
+  /// [toggleCamera] (both can be on at once). Same live-only guard.
+  void toggleScreenShare();
+
   /// Dismiss a just-[CallPhase.ended] call's banner, returning to idle.
   void dismiss();
 
@@ -321,6 +380,28 @@ abstract class CallController extends ChangeNotifier {
   /// party's audio (see [MediaSession]'s class doc). The base/fake
   /// implementation renders nothing.
   Widget buildRemoteAudioSink() => const SizedBox.shrink();
+
+  /// A visible preview of THIS side's own camera, or an empty widget while
+  /// [CallSnapshot.localCameraOn] is false -- mirrors [buildRemoteAudioSink]'s
+  /// pattern for exposing a live [MediaSession] renderer without leaking
+  /// WebRTC types into [CallSnapshot]. The base/fake implementation renders
+  /// nothing.
+  Widget buildLocalCameraPreview() => const SizedBox.shrink();
+
+  /// Same shape as [buildLocalCameraPreview] for THIS side's own screen
+  /// share.
+  Widget buildLocalScreenPreview() => const SizedBox.shrink();
+
+  /// A visible view of [sub]'s camera, or null if we don't have (or aren't
+  /// currently rendering) a camera track for them -- [CallScreen]'s
+  /// participant tile falls back to the avatar initials when this is null.
+  /// The base/fake implementation always returns null; tests that want to
+  /// simulate "a renderer is wired" override this rather than faking a real
+  /// `RTCVideoView` (see `FakeCallController.remoteCameraViewBuilder`).
+  Widget? buildRemoteCameraView(String sub) => null;
+
+  /// Same shape as [buildRemoteCameraView] for [sub]'s screen share.
+  Widget? buildRemoteScreenView(String sub) => null;
 }
 
 /// The real [CallController]: drives [MediaSession] and the `call_*` frames
@@ -577,6 +658,72 @@ class WebrtcCallController extends CallController {
   }
 
   @override
+  void toggleCamera() {
+    // Never for a solo memo -- [startSoloRecord] never requests video, so
+    // there's no camera to toggle, and [CallScreen] never shows the button.
+    if (!_snapshot.isLive || _snapshot.phase == CallPhase.recordingMemo) return;
+    unawaited(_setCamera(!_snapshot.localCameraOn));
+  }
+
+  @override
+  void toggleScreenShare() {
+    if (!_snapshot.isLive || _snapshot.phase == CallPhase.recordingMemo) return;
+    unawaited(_setScreenShare(!_snapshot.localScreenOn));
+  }
+
+  Future<void> _setCamera(bool on) async {
+    final media = _media;
+    final channelId = _snapshot.channelId;
+    if (media == null || channelId == null) return;
+    try {
+      if (on) {
+        await media.enableCamera();
+      } else {
+        await media.disableCamera();
+      }
+    } catch (_) {
+      // Camera permission denied / device error -- leave the snapshot as-is
+      // rather than claiming a track that doesn't exist. Unlike the initial
+      // mic (see [_beginMedia]'s catch), this never ends the call: the call
+      // itself is already live and unaffected by a camera failure.
+      return;
+    }
+    _emit(_snapshot.copyWith(localCameraOn: media.isCameraOn));
+    api.sendCallMedia(
+      channelId,
+      cameraOn: media.isCameraOn,
+      screenOn: _snapshot.localScreenOn,
+      cameraTrackId: media.localCameraTrackId,
+      screenTrackId: media.localScreenTrackId,
+    );
+  }
+
+  Future<void> _setScreenShare(bool on) async {
+    final media = _media;
+    final channelId = _snapshot.channelId;
+    if (media == null || channelId == null) return;
+    try {
+      if (on) {
+        await media.enableScreenShare();
+      } else {
+        await media.disableScreenShare();
+      }
+    } catch (_) {
+      // getDisplayMedia rejection (user cancelled the OS picker / denied
+      // Screen Recording permission) -- same non-fatal posture as [_setCamera].
+      return;
+    }
+    _emit(_snapshot.copyWith(localScreenOn: media.isScreenShareOn));
+    api.sendCallMedia(
+      channelId,
+      cameraOn: _snapshot.localCameraOn,
+      screenOn: media.isScreenShareOn,
+      cameraTrackId: media.localCameraTrackId,
+      screenTrackId: media.localScreenTrackId,
+    );
+  }
+
+  @override
   void dismiss() {
     if (_snapshot.phase != CallPhase.ended) return;
     _emit(const CallSnapshot());
@@ -586,20 +733,89 @@ class WebrtcCallController extends CallController {
   Widget buildRemoteAudioSink() {
     final media = _media;
     if (media == null || !_snapshot.isLive) return const SizedBox.shrink();
-    final renderers = media.remoteRenderers.values;
+    final renderers = media.remoteTracks.values.map((e) => e.renderer).toList();
     if (renderers.isEmpty) return const SizedBox.shrink();
     // Zero-size but mounted: on web this keeps every remote party's
     // underlying `<audio>`/`<video>` element attached to the DOM so their
     // track actually plays (see [MediaSession]'s class doc) without taking
-    // any layout space. ALL of [MediaSession.remoteRenderers] — one per
-    // remote participant on a group call, the usual single entry for a
-    // 1:1/solo call.
+    // any layout space. ALL of [MediaSession.remoteTracks] — one per remote
+    // TRACK (audio and video separately) on a group call, the usual single
+    // audio entry for a 1:1/solo call. Safe to mount the video-kind entries
+    // here too (they're each wired to their own single-track wrapper
+    // stream, not a shared multi-track one -- see
+    // `MediaSession._attachRemoteTrack`'s doc for why that matters).
     return SizedBox(
       width: 0,
       height: 0,
       child: Stack(children: [for (final renderer in renderers) RTCVideoView(renderer)]),
     );
   }
+
+  @override
+  Widget buildLocalCameraPreview() {
+    final media = _media;
+    if (media == null || !media.isCameraOn) return const SizedBox.shrink();
+    return RTCVideoView(media.localCameraRenderer, mirror: true);
+  }
+
+  @override
+  Widget buildLocalScreenPreview() {
+    final media = _media;
+    if (media == null || !media.isScreenShareOn) return const SizedBox.shrink();
+    return RTCVideoView(media.localScreenRenderer);
+  }
+
+  @override
+  Widget? buildRemoteCameraView(String sub) => _remoteTrackView(sub, screen: false);
+
+  @override
+  Widget? buildRemoteScreenView(String sub) => _remoteTrackView(sub, screen: true);
+
+  /// Resolves [sub]'s camera/screen [RTCVideoView] per the video-calls wire
+  /// contract's naming rules: a relayed/group inbound video track's id
+  /// arrives as `video-<originTrackID>` where `<originTrackID>` is the
+  /// SENDER's own local track id -- matched here against that participant's
+  /// announced `cameraTrackId`/`screenTrackId` ([CallParticipant], from
+  /// `call_roster`/`call_media`). p2p mode's track id arrives unchanged, so
+  /// the same match-by-announced-id logic works without a separate branch
+  /// (stripping a `video-` prefix that was never there is a no-op). An
+  /// announced id with no matching inbound track yet (renegotiation still
+  /// in flight) or an inbound video track with no matching announcement
+  /// both resolve to null -- callers (`CallScreen`) fall back to the avatar.
+  Widget? _remoteTrackView(String sub, {required bool screen}) {
+    final media = _media;
+    final participant = _snapshot.participants[sub];
+    if (media == null || participant == null) return null;
+    final wantedId = screen ? participant.screenTrackId : participant.cameraTrackId;
+    if (wantedId == null) return null;
+    for (final entry in media.remoteTracks.values) {
+      if (entry.kind != 'video') continue;
+      if (!_sourceMatchesSub(entry.streamId, sub)) continue;
+      if (_originTrackId(entry.trackId) == wantedId) {
+        return RTCVideoView(entry.renderer);
+      }
+    }
+    return null;
+  }
+
+  /// mediad-relayed stream ids are `mediad-<sourceLegID>`, and a group leg's
+  /// id is `leg_<sub>` (video-calls wire contract's naming rules) — so a
+  /// group participant's stream id is exactly `mediad-leg_<sub>`. A 1:1/solo
+  /// call only ever has one possible remote source, so there's nothing to
+  /// disambiguate by sub -- always matches (mirrors the contract's own
+  /// p2p rule: match track ids directly, no stream-id gymnastics needed).
+  bool _sourceMatchesSub(String streamId, String sub) {
+    if (!_snapshot.isGroup) return true;
+    return streamId == 'mediad-leg_$sub';
+  }
+
+  /// Strips mediad's `video-` prefix (wire contract's naming rule) so the
+  /// remainder is the sender's own local track id, comparable against
+  /// [CallParticipant.cameraTrackId]/[CallParticipant.screenTrackId]
+  /// verbatim. p2p mode's track id arrives WITHOUT that prefix -- returned
+  /// unchanged, since there's nothing to strip.
+  String _originTrackId(String rawTrackId) =>
+      rawTrackId.startsWith('video-') ? rawTrackId.substring('video-'.length) : rawTrackId;
 
   // ── Wire events ─────────────────────────────────────────────────────
 
@@ -634,6 +850,15 @@ class WebrtcCallController extends CallController {
         _onParticipantJoined(channelId, sub);
       case WsCallParticipantLeftEvent(:final channelId, :final sub):
         _onParticipantLeft(channelId, sub);
+      case WsCallMediaEvent(
+        :final channelId,
+        :final sub,
+        :final cameraOn,
+        :final screenOn,
+        :final cameraTrackId,
+        :final screenTrackId,
+      ):
+        _onCallMedia(channelId, sub, cameraOn, screenOn, cameraTrackId, screenTrackId);
       default:
         break; // not a call event
     }
@@ -869,16 +1094,31 @@ class WebrtcCallController extends CallController {
   /// rather than a one-shot flag so a duplicate/late roster push (should the
   /// server ever resend one) doesn't reopen media on top of an already-live
   /// call.
-  void _onRoster(String channelId, List<String> subs) {
+  void _onRoster(String channelId, List<CallRosterEntry> entries) {
     if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
-    _emit(_snapshot.copyWith(participants: {for (final sub in subs) sub: CallParticipant(sub: sub)}));
+    _emit(
+      _snapshot.copyWith(
+        participants: {
+          for (final e in entries)
+            e.sub: CallParticipant(
+              sub: e.sub,
+              cameraOn: e.cameraOn,
+              screenOn: e.screenOn,
+              cameraTrackId: e.cameraTrackId,
+              screenTrackId: e.screenTrackId,
+            ),
+        },
+      ),
+    );
     if (_media == null) unawaited(_beginMedia());
   }
 
   /// A participant joined the group call — add their roster tile. The
   /// server separately renegotiates the SFU's tracks for us (a fresh
   /// `call_sdp` offer, handled generically by [_onSdp]/[_applyRemoteSdp]);
-  /// this only updates the roster the UI reads for identity.
+  /// this only updates the roster the UI reads for identity. Always starts
+  /// camera/screen off (see [WsCallParticipantJoinedEvent]'s doc) --
+  /// [_onCallMedia] carries any live state that follows.
   void _onParticipantJoined(String channelId, String sub) {
     if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
     _emit(
@@ -893,6 +1133,40 @@ class WebrtcCallController extends CallController {
     if (_snapshot.channelId != channelId || !_snapshot.isGroup) return;
     final participants = Map<String, CallParticipant>.of(_snapshot.participants)..remove(sub);
     _emit(_snapshot.copyWith(participants: participants));
+  }
+
+  /// [sub] (a group participant OR a 1:1 peer -- see
+  /// [CallSnapshot.participants]'s doc) toggled their camera/screen
+  /// (`call_media`, the video-calls wire contract). Upserts their
+  /// [CallParticipant] entry regardless of [CallSnapshot.isGroup] -- a 1:1
+  /// call's peer never gets a roster/`call_participant_joined` entry, so
+  /// this is the only place that entry is ever created for one.
+  void _onCallMedia(
+    String channelId,
+    String sub,
+    bool cameraOn,
+    bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  ) {
+    if (_snapshot.channelId != channelId) return;
+    // Only a group participant or THE 1:1 peer is a valid target -- ignore
+    // anything else (e.g. a stray echo for a sub that isn't on this call).
+    if (!_snapshot.isGroup && sub != _snapshot.peerSub) return;
+    _emit(
+      _snapshot.copyWith(
+        participants: {
+          ..._snapshot.participants,
+          sub: CallParticipant(
+            sub: sub,
+            cameraOn: cameraOn,
+            screenOn: screenOn,
+            cameraTrackId: cameraTrackId,
+            screenTrackId: screenTrackId,
+          ),
+        },
+      ),
+    );
   }
 
   // ── Media lifecycle ─────────────────────────────────────────────────
@@ -911,11 +1185,20 @@ class WebrtcCallController extends CallController {
     media.onConnectionEstablished = () {
       if (_snapshot.mode == CallMode.p2p) _markActive();
     };
-    // A group call's roster tiles are identity-only (no per-participant
-    // audio-level signal exists on the wire, see [CallParticipant]'s doc) --
-    // but the audio itself still needs every new/removed remote renderer
-    // re-mounted into [buildRemoteAudioSink] as the SFU adds/drops tracks.
-    media.onRemoteRenderersChanged = notifyListeners;
+    // A group call's roster tiles carry TRUTHFUL camera/screen state (see
+    // [CallParticipant]'s doc), but no per-participant audio-level signal
+    // exists on the wire -- the audio (and any video) itself still needs
+    // every new/removed remote track re-mounted into [buildRemoteAudioSink]
+    // as the SFU adds/drops tracks.
+    media.onRemoteTracksChanged = notifyListeners;
+    media.onLocalPreviewChanged = notifyListeners;
+    media.onRenegotiationNeeded = () {
+      // Group mode is server-orchestrated (mediad notices our `call_media`
+      // announcement and pushes its own fresh offer, answered generically
+      // by [_applyRemoteSdp]'s "offer" branch) -- offering here too would
+      // race mediad's own re-offer. Only p2p needs to initiate.
+      if (_snapshot.mode == CallMode.p2p) unawaited(_renegotiateP2p());
+    };
 
     final mode = _snapshot.mode;
     if (mode == CallMode.p2p) {
@@ -962,6 +1245,27 @@ class WebrtcCallController extends CallController {
     _pendingRemoteOffer = null;
     if (pendingOffer != null && _snapshot.channelId == channelId) {
       await _applyRemoteSdp(channelId, 'offer', pendingOffer);
+    }
+  }
+
+  /// A p2p-mode mid-call renegotiation (camera/screen toggle after the
+  /// initial offer/answer already completed) -- same createOffer ->
+  /// [ApiClient.sendCallSdp] shape [_beginMedia]'s caller path uses for the
+  /// FIRST offer; the callee's fresh answer comes back through the ordinary
+  /// `call_sdp`/[_onSdp] handling (its "answer" branch), no separate code
+  /// path needed. Only reached for p2p -- see [_beginMedia]'s
+  /// `onRenegotiationNeeded` wiring.
+  Future<void> _renegotiateP2p() async {
+    final media = _media;
+    final channelId = _snapshot.channelId;
+    if (media == null || channelId == null) return;
+    try {
+      final offer = await media.createOffer();
+      api.sendCallSdp(channelId, sdpType: 'offer', sdp: offer);
+    } catch (_) {
+      // Best-effort -- a failed renegotiation leaves the call running with
+      // whatever tracks were already negotiated; never tear down a live
+      // call over it (mirrors [_setCamera]/[_setScreenShare]'s posture).
     }
   }
 

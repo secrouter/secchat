@@ -366,6 +366,19 @@ abstract class ApiClient {
   /// leg's own offer/answer exchange over [sendCallSdp].
   void sendCallJoin(String channelId);
 
+  /// Announce a camera/screen toggle in [channelId] (`call_media`, the
+  /// video-calls wire contract) -- send on EVERY toggle, group call or 1:1.
+  /// [cameraTrackId]/[screenTrackId] are THIS connection's own LOCAL video
+  /// track ids (`MediaSession.localCameraTrackId`/`localScreenTrackId`),
+  /// null when that source is off.
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  });
+
   /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
   /// arrive as `presence` WS events.
   Future<List<String>> getPresence();
@@ -1022,6 +1035,24 @@ class HttpApiClient implements ApiClient {
   @override
   void sendCallJoin(String channelId) {
     _sendCallFrame({'type': 'call_join', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  }) {
+    _sendCallFrame({
+      'type': 'call_media',
+      'channelId': channelId,
+      'cameraOn': cameraOn,
+      'screenOn': screenOn,
+      if (cameraTrackId != null) 'cameraTrackId': cameraTrackId,
+      if (screenTrackId != null) 'screenTrackId': screenTrackId,
+    });
   }
 
   @override

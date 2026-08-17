@@ -1100,21 +1100,53 @@ final class WsCallRecordingEvent extends WsEvent {
   final bool recording;
 }
 
+/// One `call_roster` entry's identity + live media state (video-calls wire
+/// contract addendum to voice-contracts.md's group-call section: a roster
+/// participant now carries camera/screen state alongside `sub`, not just
+/// `sub`). Kept here as a plain DTO (not `CallParticipant`, which lives in
+/// `calls/call_controller.dart`) purely to avoid a models.dart ->
+/// call_controller.dart import cycle -- `WebrtcCallController` maps this 1:1
+/// onto `CallParticipant` when it applies the roster.
+class CallRosterEntry {
+  const CallRosterEntry({
+    required this.sub,
+    this.cameraOn = false,
+    this.screenOn = false,
+    this.cameraTrackId,
+    this.screenTrackId,
+  });
+
+  final String sub;
+  final bool cameraOn;
+  final bool screenOn;
+
+  /// This participant's own LOCAL video track ids (never mediad's relayed
+  /// `video-<originTrackID>` form) -- see the wire contract's naming
+  /// section: a client matches an inbound relayed track's suffix against
+  /// these verbatim to tell a camera tile from a screen-share tile.
+  final String? cameraTrackId;
+  final String? screenTrackId;
+}
+
 /// The initial roster of a group (multi-party SFU) call, sent once when this
 /// connection's `call_start`/`call_join` takes hold -- who's already in the
-/// call (voice-contracts.md group-call addendum). Later membership changes
-/// arrive one at a time via [WsCallParticipantJoinedEvent]/
-/// [WsCallParticipantLeftEvent], not another roster push.
+/// call, and their current camera/screen state (voice-contracts.md
+/// group-call addendum + the video-calls wire contract). Later membership
+/// changes arrive one at a time via [WsCallParticipantJoinedEvent]/
+/// [WsCallParticipantLeftEvent], not another roster push; live camera/screen
+/// toggles arrive via [WsCallMediaEvent].
 final class WsCallRosterEvent extends WsEvent {
   const WsCallRosterEvent({required this.participants, required super.channelId});
 
-  /// The subs already in the call (mine is never included).
-  final List<String> participants;
+  /// The participants already in the call (mine is never included).
+  final List<CallRosterEntry> participants;
 }
 
 /// A participant joined the live group call in [channelId] -- add a roster
 /// tile. Fired for everyone already in the call, not the joiner themselves
-/// (they get [WsCallRosterEvent] instead).
+/// (they get [WsCallRosterEvent] instead). Always starts camera/screen off
+/// -- a genuinely fresh join never carries pre-existing media state; a
+/// [WsCallMediaEvent] follows separately if/when they turn either on.
 final class WsCallParticipantJoinedEvent extends WsEvent {
   const WsCallParticipantJoinedEvent({required this.sub, required super.channelId});
   final String sub;
@@ -1125,6 +1157,30 @@ final class WsCallParticipantJoinedEvent extends WsEvent {
 final class WsCallParticipantLeftEvent extends WsEvent {
   const WsCallParticipantLeftEvent({required this.sub, required super.channelId});
   final String sub;
+}
+
+/// A participant's camera/screen state changed (`call_media`, the
+/// video-calls wire contract) -- sent on EVERY toggle, group call OR 1:1
+/// (unlike [WsCallRosterEvent]/[WsCallParticipantJoinedEvent], this fires
+/// for a 1:1 call's peer too: [CallController] tracks a 1:1 peer's live
+/// media state the same way it tracks a group roster entry, see
+/// `CallSnapshot.participants`'s doc). [cameraTrackId]/[screenTrackId] are
+/// THAT participant's own local track ids -- null when the corresponding
+/// source is off.
+final class WsCallMediaEvent extends WsEvent {
+  const WsCallMediaEvent({
+    required this.sub,
+    required this.cameraOn,
+    required this.screenOn,
+    this.cameraTrackId,
+    this.screenTrackId,
+    required super.channelId,
+  });
+  final String sub;
+  final bool cameraOn;
+  final bool screenOn;
+  final String? cameraTrackId;
+  final String? screenTrackId;
 }
 
 /// A `call_*` frame this connection sent was rejected -- sent to the ONE
@@ -1304,14 +1360,22 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       return WsCallMissedEvent(channelId: channelId);
     case 'call_roster':
       final raw = json['participants'];
-      final subs = raw is List
+      final entries = raw is List
           ? raw
                 .whereType<Map<String, dynamic>>()
-                .map((p) => p['sub'] as String? ?? '')
-                .where((sub) => sub.isNotEmpty)
+                .map(
+                  (p) => CallRosterEntry(
+                    sub: p['sub'] as String? ?? '',
+                    cameraOn: p['cameraOn'] as bool? ?? false,
+                    screenOn: p['screenOn'] as bool? ?? false,
+                    cameraTrackId: p['cameraTrackId'] as String?,
+                    screenTrackId: p['screenTrackId'] as String?,
+                  ),
+                )
+                .where((entry) => entry.sub.isNotEmpty)
                 .toList()
-          : <String>[];
-      return WsCallRosterEvent(participants: subs, channelId: channelId);
+          : <CallRosterEntry>[];
+      return WsCallRosterEvent(participants: entries, channelId: channelId);
     case 'call_participant_joined':
       return WsCallParticipantJoinedEvent(
         sub: json['sub'] as String? ?? '',
@@ -1320,6 +1384,15 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
     case 'call_participant_left':
       return WsCallParticipantLeftEvent(
         sub: json['sub'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_media':
+      return WsCallMediaEvent(
+        sub: json['sub'] as String? ?? '',
+        cameraOn: json['cameraOn'] as bool? ?? false,
+        screenOn: json['screenOn'] as bool? ?? false,
+        cameraTrackId: json['cameraTrackId'] as String?,
+        screenTrackId: json['screenTrackId'] as String?,
         channelId: channelId,
       );
     case 'call_recording':

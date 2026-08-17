@@ -324,6 +324,8 @@ class FakeApiClient implements ApiClient {
   final List<({String channelId, bool wantRecording, bool? enroll})> callSoloStartCalls = [];
   final List<String> callStartCalls = [];
   final List<String> callJoinCalls = [];
+  final List<({String channelId, bool cameraOn, bool screenOn, String? cameraTrackId, String? screenTrackId})>
+  callMediaCalls = [];
 
   @override
   void sendCallInvite(String channelId, {required bool wantRecording}) =>
@@ -362,6 +364,21 @@ class FakeApiClient implements ApiClient {
 
   @override
   void sendCallJoin(String channelId) => callJoinCalls.add(channelId);
+
+  @override
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  }) => callMediaCalls.add((
+    channelId: channelId,
+    cameraOn: cameraOn,
+    screenOn: screenOn,
+    cameraTrackId: cameraTrackId,
+    screenTrackId: screenTrackId,
+  ));
 
   @override
   Future<List<String>> getPresence() async {

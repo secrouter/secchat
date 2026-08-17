@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:secchat_app/calls/call_controller.dart';
 import 'package:secchat_app/models.dart';
 
@@ -27,7 +28,19 @@ class FakeCallController extends CallController {
   int declineOrCancelCalls = 0;
   int hangUpCalls = 0;
   int toggleMuteCalls = 0;
+  int toggleCameraCalls = 0;
+  int toggleScreenShareCalls = 0;
   int dismissCalls = 0;
+
+  /// Test-controllable seams for the video widgets a real
+  /// [WebrtcCallController] would resolve from a live [MediaSession]
+  /// renderer -- widget tests can't fake a real `RTCVideoView`, so a test
+  /// that wants to simulate "a renderer is wired for this sub" sets one of
+  /// these to a plain marker widget instead (see `call_screen_test.dart`).
+  Widget? Function(String sub)? remoteCameraViewBuilder;
+  Widget? Function(String sub)? remoteScreenViewBuilder;
+  Widget localCameraPreviewWidget = const SizedBox.shrink();
+  Widget localScreenPreviewWidget = const SizedBox.shrink();
 
   @override
   void handleEvent(WsEvent event) {
@@ -83,7 +96,29 @@ class FakeCallController extends CallController {
   }
 
   @override
+  void toggleCamera() {
+    toggleCameraCalls++;
+  }
+
+  @override
+  void toggleScreenShare() {
+    toggleScreenShareCalls++;
+  }
+
+  @override
   void dismiss() {
     dismissCalls++;
   }
+
+  @override
+  Widget buildLocalCameraPreview() => localCameraPreviewWidget;
+
+  @override
+  Widget buildLocalScreenPreview() => localScreenPreviewWidget;
+
+  @override
+  Widget? buildRemoteCameraView(String sub) => remoteCameraViewBuilder?.call(sub);
+
+  @override
+  Widget? buildRemoteScreenView(String sub) => remoteScreenViewBuilder?.call(sub);
 }
