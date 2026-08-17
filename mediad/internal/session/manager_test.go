@@ -3,9 +3,12 @@ package session
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 
 	"secchat-mediad/internal/config"
 )
@@ -133,6 +136,40 @@ func TestCreateSessionEnforcesCapUnderConcurrency(t *testing.T) {
 	}
 	if got := mgr.Health().ActiveSessions; got != cfg.SessionCap {
 		t.Fatalf("ActiveSessions after concurrent creates = %d, want %d", got, cfg.SessionCap)
+	}
+}
+
+// TestManagerRegistersVP8Codec is the regression test for live-only video forwarding's codec
+// registration (manager.go's mediaEngine.RegisterCodec(VP8) addition). MediaEngine isn't exposed
+// off webrtc.API, so the only way to observe registration from outside the webrtc package is
+// behavioral: a PeerConnection built from the Manager's shared API must be able to add a video
+// transceiver and produce an offer that actually advertises VP8 at the registered payload type
+// (96) and clock rate (90000).
+func TestManagerRegistersVP8Codec(t *testing.T) {
+	mgr := newTestManager(t)
+
+	pc, err := mgr.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		t.Fatalf("AddTransceiverFromKind(video): %v", err)
+	}
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+
+	if !strings.Contains(offer.SDP, "a=rtpmap:96 VP8/90000") {
+		t.Fatalf("offer SDP does not advertise VP8 at payload type 96/90000:\n%s", offer.SDP)
+	}
+	if !strings.Contains(offer.SDP, "a=rtcp-fb:96 nack") || !strings.Contains(offer.SDP, "a=rtcp-fb:96 nack pli") {
+		t.Fatalf("offer SDP does not advertise the registered nack/nack-pli RTCP feedback for VP8:\n%s", offer.SDP)
 	}
 }
 

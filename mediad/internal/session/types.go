@@ -44,6 +44,12 @@ type SessionState struct {
 	Recording string     `json:"recording"` // "none" | "on" — mediad's ACTUAL writer state
 }
 
+// ManifestFile.Kind values — see ManifestFile.Kind's doc comment.
+const (
+	ManifestFileKindAudio = "audio"
+	ManifestFileKindMixed = "mixed"
+)
+
 // ManifestFile is one entry in a finalize manifest's files[] (docs/plans/voice-contracts.md
 // §2.4). LegID is omitted (absent, not empty-string) for the mixed playback file.
 type ManifestFile struct {
@@ -51,6 +57,12 @@ type ManifestFile struct {
 	Path          string `json:"path"`
 	StartOffsetMs int64  `json:"startOffsetMs"`
 	DurationMs    int64  `json:"durationMs"`
+	// Kind is "audio" for a per-leg file (mediad only ever records audio — see session.go's
+	// onInboundRTP recording-isolation branch) or "mixed" for the mixed playback file.
+	// Future-proofing only: no lookup logic discriminates by this field today (LegID=="" already
+	// identifies the mixed entry) — it unblocks a future video writer without a wire-shape change;
+	// the TS backend tolerates unknown/absent fields.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Manifest is the DELETE /sessions/:id response body, and what's persisted as manifest.json in

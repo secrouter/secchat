@@ -79,7 +79,8 @@ func (s *Session) AddLeg(legID, sub string) error {
 	l := &leg{
 		id: legID, sub: sub, rec: rec, path: path,
 		iceState:       webrtc.ICEConnectionStateNew,
-		outboundTracks: make(map[string]*outboundTrack),
+		outboundTracks: make(map[outboundTrackKey]*outboundTrack),
+		inboundTracks:  make(map[string]*inboundTrackInfo),
 	}
 
 	s.mu.Lock()
@@ -114,10 +115,14 @@ func (s *Session) AddLeg(legID, sub string) error {
 			continue
 		}
 		// A peer with no PeerConnection yet (never offered) has nothing to add a track TO right
-		// now — ensureOutboundTrack requires a live pc. It gets this leg's outbound track lazily
-		// from newPeerConnectionForLeg instead, once it eventually does offer (s.legs already
-		// carries this leg by then, so peerLegs picks it up).
-		if _, err := s.ensureOutboundTrack(peer, legID); err != nil {
+		// now — ensureOutboundTrack requires a live pc. It gets this leg's outbound track(s)
+		// lazily from newPeerConnectionForLeg instead, once it eventually does offer (s.legs
+		// already carries this leg by then, so peerLegs picks it up). provisionPeerOutboundTracks
+		// provisions audio unconditionally (l has no active tracks of its own yet — it hasn't
+		// even offered) plus any of l's already-active video tracks (none, at this point in
+		// AddLeg) — kept as a shared helper with newPeerConnectionForLeg's peer loop rather than
+		// a bespoke audio-only call here.
+		if err := s.provisionPeerOutboundTracks(peer, l); err != nil {
 			continue
 		}
 	}
@@ -182,13 +187,23 @@ func (s *Session) RemoveLeg(legID string) error {
 
 	for _, other := range others {
 		other.mu.Lock()
-		ot, hadTrack := other.outboundTracks[legID]
-		otherPC := other.pc
-		if hadTrack {
-			delete(other.outboundTracks, legID)
+		// A leaving leg may have had UP TO THREE inbound tracks (audio + up to two video), each
+		// with its own outbound track on every other leg's PC — remove ALL of them, not just the
+		// single (audio-only, pre-video) one.
+		var toRemove []*outboundTrack
+		for key, ot := range other.outboundTracks {
+			if key.legID != legID {
+				continue
+			}
+			toRemove = append(toRemove, ot)
+			delete(other.outboundTracks, key)
 		}
+		otherPC := other.pc
 		other.mu.Unlock()
-		if hadTrack && otherPC != nil {
+		if otherPC == nil {
+			continue
+		}
+		for _, ot := range toRemove {
 			if err := otherPC.RemoveTrack(ot.sender); err != nil {
 				// Non-fatal: the track's underlying sender is torn down along with the whole PC
 				// if otherPC itself is closing/closed concurrently — RemoveTrack failing here just

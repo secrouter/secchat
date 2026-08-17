@@ -91,6 +91,7 @@ func (s *Session) finalize(forced bool) (Manifest, error) {
 			Path:          filepath.Base(l.path),
 			StartOffsetMs: l.rec.StartOffsetMs(),
 			DurationMs:    durationMs,
+			Kind:          ManifestFileKindAudio,
 		})
 	}
 
@@ -107,7 +108,7 @@ func (s *Session) finalize(forced bool) (Manifest, error) {
 		slog.Error("mediad: ffmpeg mix failed, finalizing with a legs-only manifest",
 			"session", s.id, "err", mixErr)
 	} else {
-		files = append(files, ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs})
+		files = append(files, ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs, Kind: ManifestFileKindMixed})
 	}
 
 	manifest := Manifest{SessionID: s.id, Files: files, Truncated: forced}
@@ -288,7 +289,7 @@ func (m *Manager) remixIfMissing(sessionID, dir string, manifest Manifest) (Mani
 
 	updated := manifest
 	updated.Files = append(append([]ManifestFile{}, manifest.Files...),
-		ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs})
+		ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs, Kind: ManifestFileKindMixed})
 	if err := writeManifest(dir, updated); err != nil {
 		return Manifest{}, fmt.Errorf("session: write remixed manifest: %w", err)
 	}
@@ -332,7 +333,7 @@ func (m *Manager) remixFromDisk(sessionID, dir string) (Manifest, error) {
 		}
 		legID := strings.TrimSuffix(filepath.Base(p), ".ogg")
 		startOffsetMs := offsets.Legs[legID]
-		files = append(files, ManifestFile{LegID: legID, Path: filepath.Base(p), StartOffsetMs: startOffsetMs, DurationMs: durationMs})
+		files = append(files, ManifestFile{LegID: legID, Path: filepath.Base(p), StartOffsetMs: startOffsetMs, DurationMs: durationMs, Kind: ManifestFileKindAudio})
 		recovered = append(recovered, &leg{id: legID, path: p, durationMs: durationMs, startOffsetMs: startOffsetMs, rec: nil})
 	}
 
@@ -342,7 +343,7 @@ func (m *Manager) remixFromDisk(sessionID, dir string) (Manifest, error) {
 			slog.Error("mediad: recovery ffmpeg mix failed, finalizing with a legs-only manifest",
 				"session", sessionID, "err", err)
 		} else {
-			files = append(files, ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs})
+			files = append(files, ManifestFile{Path: mixedFileName, StartOffsetMs: 0, DurationMs: mixedDurationMs, Kind: ManifestFileKindMixed})
 		}
 	}
 

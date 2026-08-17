@@ -112,6 +112,131 @@ func TestDTLSIdentityChangedDifferentFingerprintIsChanged(t *testing.T) {
 	}
 }
 
+// TestNewPeerConnectionForLegAddsAudioAndTwoVideoTransceivers is the regression test for the
+// live-only video forwarding transceiver pre-add (offer.go's newPeerConnectionForLeg): every
+// leg's PeerConnection must carry exactly one recvonly audio transceiver plus TWO recvonly video
+// transceivers (camera + screen share) from the moment it's created — added upfront so a client
+// can start sending video mid-call without needing to renegotiate its OWN PeerConnection first.
+func TestNewPeerConnectionForLegAddsAudioAndTwoVideoTransceivers(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", oneLeg("alice"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sess.mu.Lock()
+	l := sess.legs["leg_alice"]
+	sess.mu.Unlock()
+
+	pc, err := sess.newPeerConnectionForLeg(l)
+	if err != nil {
+		t.Fatalf("newPeerConnectionForLeg: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	transceivers := pc.GetTransceivers()
+	if len(transceivers) != 3 {
+		t.Fatalf("got %d transceivers, want 3 (1 audio + 2 video)", len(transceivers))
+	}
+
+	var audioCount, videoCount int
+	for _, tr := range transceivers {
+		if tr.Direction() != webrtc.RTPTransceiverDirectionRecvonly {
+			t.Errorf("transceiver kind %s has direction %s, want recvonly", tr.Kind(), tr.Direction())
+		}
+		switch tr.Kind() {
+		case webrtc.RTPCodecTypeAudio:
+			audioCount++
+		case webrtc.RTPCodecTypeVideo:
+			videoCount++
+		}
+	}
+	if audioCount != 1 {
+		t.Errorf("audio transceiver count = %d, want 1", audioCount)
+	}
+	if videoCount != 2 {
+		t.Errorf("video transceiver count = %d, want 2", videoCount)
+	}
+}
+
+// TestEnsureOutboundTrackNamingContract is the regression test for the LOCKED outbound track
+// naming contract the Flutter app parses (offer.go's ensureOutboundTrack doc comment): the
+// stream ID is always "mediad-"+sourceLegID regardless of kind, the audio track's ID is exactly
+// "audio", and a video track's ID is exactly "video-<inboundTrackID>" using the origin
+// TrackRemote's ID() verbatim — plus the codec capability actually handed out must be Opus for
+// audio and VP8 for video (ensureOutboundTrack derives kind from sourceTrackKey, not a
+// separately-passed parameter — this also proves that derivation is correct).
+func TestEnsureOutboundTrackNamingContract(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sess.mu.Lock()
+	alice := sess.legs["leg_alice"]
+	sess.mu.Unlock()
+
+	if _, err := sess.newPeerConnectionForLeg(alice); err != nil {
+		t.Fatalf("newPeerConnectionForLeg: %v", err)
+	}
+	t.Cleanup(func() {
+		alice.mu.Lock()
+		pc := alice.pc
+		alice.mu.Unlock()
+		if pc != nil {
+			_ = pc.Close()
+		}
+	})
+
+	audioOT, err := sess.ensureOutboundTrack(alice, "leg_bob", audioTrackKey)
+	if err != nil {
+		t.Fatalf("ensureOutboundTrack(audio): %v", err)
+	}
+	if got := audioOT.track.ID(); got != "audio" {
+		t.Errorf("audio outbound track ID = %q, want %q", got, "audio")
+	}
+	if got := audioOT.track.StreamID(); got != "mediad-leg_bob" {
+		t.Errorf("audio outbound track StreamID = %q, want %q", got, "mediad-leg_bob")
+	}
+	if got := audioOT.track.Codec().MimeType; !strings.EqualFold(got, webrtc.MimeTypeOpus) {
+		t.Errorf("audio outbound track MimeType = %q, want %s", got, webrtc.MimeTypeOpus)
+	}
+	if audioOT.kind != webrtc.RTPCodecTypeAudio {
+		t.Errorf("audio outboundTrack.kind = %s, want audio", audioOT.kind)
+	}
+
+	videoOT, err := sess.ensureOutboundTrack(alice, "leg_bob", videoTrackKey("camXYZ"))
+	if err != nil {
+		t.Fatalf("ensureOutboundTrack(video): %v", err)
+	}
+	if got := videoOT.track.ID(); got != "video-camXYZ" {
+		t.Errorf("video outbound track ID = %q, want %q", got, "video-camXYZ")
+	}
+	if got := videoOT.track.StreamID(); got != "mediad-leg_bob" {
+		t.Errorf("video outbound track StreamID = %q, want %q (must match the audio track's stream ID — same participant identity)", got, "mediad-leg_bob")
+	}
+	if got := videoOT.track.Codec().MimeType; !strings.EqualFold(got, webrtc.MimeTypeVP8) {
+		t.Errorf("video outbound track MimeType = %q, want %s", got, webrtc.MimeTypeVP8)
+	}
+	if videoOT.kind != webrtc.RTPCodecTypeVideo {
+		t.Errorf("video outboundTrack.kind = %s, want video", videoOT.kind)
+	}
+
+	// A second video track from the SAME source leg (e.g. a screen share alongside the camera)
+	// must be a DISTINCT outbound track, not collide with the camera's.
+	videoOT2, err := sess.ensureOutboundTrack(alice, "leg_bob", videoTrackKey("screenABC"))
+	if err != nil {
+		t.Fatalf("ensureOutboundTrack(video 2): %v", err)
+	}
+	if got := videoOT2.track.ID(); got != "video-screenABC" {
+		t.Errorf("second video outbound track ID = %q, want %q", got, "video-screenABC")
+	}
+	if videoOT2 == videoOT {
+		t.Fatalf("camera and screen-share outbound tracks must be distinct instances")
+	}
+}
+
 func TestDTLSIdentityChangedNoPriorRemoteDescriptionIsUnchanged(t *testing.T) {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {

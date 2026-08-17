@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -493,6 +494,253 @@ func TestHealthEndpointRequiresNoAuth(t *testing.T) {
 	}
 	if body.Status != "ok" {
 		t.Fatalf("health status = %q, want ok", body.Status)
+	}
+}
+
+// fakeVideoBrowser is dialFakeBrowser's video-call counterpart: adds a VP8 send track and a
+// recvonly video transceiver alongside the audio ones (mirroring offer.go's newPeerConnectionForLeg
+// pre-added audio+2-video shape on mediad's side), and exposes remoteVideo — fed by OnTrack for
+// any VP8 track mediad forwards to this fake browser.
+type fakeVideoBrowser struct {
+	pc          *webrtc.PeerConnection
+	audioTrack  *webrtc.TrackLocalStaticRTP
+	videoTrack  *webrtc.TrackLocalStaticRTP
+	remoteVideo chan *webrtc.TrackRemote
+}
+
+func dialFakeVideoBrowser(t *testing.T, client *controlClient, sessionID, legID string) *fakeVideoBrowser {
+	t.Helper()
+
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		"audio", "fake-"+legID,
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticRTP(audio): %v", err)
+	}
+	if _, err := pc.AddTrack(audioTrack); err != nil {
+		t.Fatalf("AddTrack(audio): %v", err)
+	}
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		t.Fatalf("AddTransceiverFromKind(audio): %v", err)
+	}
+
+	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		"video-cam", "fake-"+legID,
+	)
+	if err != nil {
+		t.Fatalf("NewTrackLocalStaticRTP(video): %v", err)
+	}
+	if _, err := pc.AddTrack(videoTrack); err != nil {
+		t.Fatalf("AddTrack(video): %v", err)
+	}
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		t.Fatalf("AddTransceiverFromKind(video): %v", err)
+	}
+
+	remoteVideo := make(chan *webrtc.TrackRemote, 4)
+	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if track.Kind() == webrtc.RTPCodecTypeVideo {
+			remoteVideo <- track
+		}
+	})
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatalf("SetLocalDescription: %v", err)
+	}
+	select {
+	case <-gatherComplete:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("client ICE gathering did not complete")
+	}
+
+	var resp struct {
+		SDP string `json:"sdp"`
+	}
+	status := client.do(t, http.MethodPost,
+		fmt.Sprintf("/sessions/%s/legs/%s/offer", sessionID, legID),
+		map[string]string{"sdp": pc.LocalDescription().SDP}, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("offer for leg %s: status %d", legID, status)
+	}
+
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: resp.SDP}); err != nil {
+		t.Fatalf("SetRemoteDescription: %v", err)
+	}
+
+	return &fakeVideoBrowser{pc: pc, audioTrack: audioTrack, videoTrack: videoTrack, remoteVideo: remoteVideo}
+}
+
+// sendVideoFrames is sendFrames' VP8 counterpart — mediad never decodes VP8 either, so the
+// payload bytes are arbitrary, same as the Opus fixture.
+func sendVideoFrames(t *testing.T, track *webrtc.TrackLocalStaticRTP, n int) {
+	t.Helper()
+
+	const tsStep = 3000 // 90kHz clock, ~33ms/frame
+	baseTS := uint32(20000)
+	for i := range n {
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				SequenceNumber: uint16(i), //nolint:gosec // n is small in tests
+				Timestamp:      baseTS + uint32(i)*tsStep,
+			},
+			Payload: []byte{0x90, 0x01, 0x02, 0x03},
+		}
+		if err := track.WriteRTP(pkt); err != nil {
+			t.Fatalf("WriteRTP video frame %d: %v", i, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestIntegration_VideoTrackForwardedBetweenLegs is the end-to-end regression test for live-only
+// video forwarding: a leg that starts sending VP8 AFTER both legs are already connected (the
+// realistic "camera turned on mid-call" case, exercised through fanOutNewVideoTrack rather than
+// the join-time path) must have that video reach the other leg — via the SAME
+// renegotiate/answer control-plane round trip AddLeg's joiner path already uses
+// (TestAddLegThenRenegotiateOffersNewTrackForJoiner), driven here over the real HTTP control API
+// with two real (offline, loopback) Pion PeerConnections standing in for two browsers. Also
+// confirms video traffic doesn't disturb the existing audio-recording contract (leg .ogg files +
+// manifest legs/mixed shape, unchanged from TestIntegration_TwoLegCallProducesPerLegOggAndManifest).
+func TestIntegration_VideoTrackForwardedBetweenLegs(t *testing.T) {
+	baseURL, recordingsDir := startTestMediad(t)
+	client := &controlClient{baseURL: baseURL, token: testToken, http: &http.Client{Timeout: 20 * time.Second}}
+
+	var createResp struct {
+		SessionID string `json:"sessionId"`
+	}
+	status := client.do(t, http.MethodPost, "/sessions", map[string]any{
+		"callId": "call_video",
+		"legs": []map[string]string{
+			{"legId": "leg_caller", "sub": "alice"},
+			{"legId": "leg_callee", "sub": "bob"},
+		},
+	}, &createResp)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /sessions: status %d", status)
+	}
+	sessionID := createResp.SessionID
+
+	caller := dialFakeVideoBrowser(t, client, sessionID, "leg_caller")
+	waitDTLSConnected(t, caller.pc)
+	callee := dialFakeVideoBrowser(t, client, sessionID, "leg_callee")
+	waitDTLSConnected(t, callee.pc)
+
+	// Basic audio, same as the plain two-leg test, so this also proves video doesn't break the
+	// existing audio path.
+	sendFrames(t, caller.audioTrack, 5)
+	sendFrames(t, callee.audioTrack, 5)
+
+	// Caller starts video: mediad's OnTrack/readInboundTrack admits it and fans it out to the
+	// already-connected callee's PeerConnection (offer.go's fanOutNewVideoTrack) — but that only
+	// ADDS the outbound track; it takes an explicit renegotiate/answer round trip (mediad never
+	// pushes) before RTP can actually flow to the callee, same as a joiner's audio track.
+	sendVideoFrames(t, caller.videoTrack, 5)
+	time.Sleep(300 * time.Millisecond) // let mediad's OnTrack goroutine admit + fan out
+
+	var renegResp struct {
+		SDP string `json:"sdp"`
+	}
+	status = client.do(t, http.MethodPost,
+		fmt.Sprintf("/sessions/%s/legs/leg_callee/renegotiate", sessionID), nil, &renegResp)
+	if status != http.StatusOK {
+		t.Fatalf("renegotiate leg_callee: status %d", status)
+	}
+	if !strings.Contains(renegResp.SDP, "mediad-leg_caller") {
+		t.Fatalf("renegotiation offer for leg_callee does not reference the caller's forwarded stream:\n%s", renegResp.SDP)
+	}
+	if !strings.Contains(renegResp.SDP, "VP8") {
+		t.Fatalf("renegotiation offer for leg_callee does not advertise VP8:\n%s", renegResp.SDP)
+	}
+
+	if err := callee.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: renegResp.SDP}); err != nil {
+		t.Fatalf("callee client SetRemoteDescription(offer): %v", err)
+	}
+	answer, err := callee.pc.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("callee client CreateAnswer: %v", err)
+	}
+	gatherComplete := webrtc.GatheringCompletePromise(callee.pc)
+	if err := callee.pc.SetLocalDescription(answer); err != nil {
+		t.Fatalf("callee client SetLocalDescription(answer): %v", err)
+	}
+	select {
+	case <-gatherComplete:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("callee client ICE gathering did not complete")
+	}
+
+	status = client.do(t, http.MethodPost,
+		fmt.Sprintf("/sessions/%s/legs/leg_callee/answer", sessionID),
+		map[string]string{"sdp": callee.pc.LocalDescription().SDP}, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("answer leg_callee: status %d", status)
+	}
+
+	// NOW send more video frames — the earlier ones (pre-renegotiation) landed on an unbound
+	// outbound track and were silently dropped (TrackLocalStaticRTP.WriteRTP against a track with
+	// no bound senders yet is a documented no-op success), same reasoning
+	// TestOnInboundRTPFansOutToAllPeersThreeWay documents for audio.
+	sendVideoFrames(t, caller.videoTrack, 15)
+
+	select {
+	case track := <-callee.remoteVideo:
+		pkt, _, err := track.ReadRTP()
+		if err != nil {
+			t.Fatalf("ReadRTP on forwarded video track: %v", err)
+		}
+		if len(pkt.Payload) == 0 {
+			t.Errorf("forwarded video packet has empty payload")
+		}
+		if !strings.HasPrefix(track.ID(), "video-") {
+			t.Errorf("forwarded video track ID = %q, want a video-<inboundTrackID> shape", track.ID())
+		}
+		if track.StreamID() != "mediad-leg_caller" {
+			t.Errorf("forwarded video track StreamID = %q, want %q", track.StreamID(), "mediad-leg_caller")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("callee never received a forwarded video track from caller")
+	}
+
+	// Video must never disturb the audio-recording contract: DELETE still produces exactly the
+	// legs-only + mixed manifest shape, and the video track leaves no manifest/on-disk trace.
+	time.Sleep(200 * time.Millisecond)
+	var manifest struct {
+		Files []struct {
+			LegID string `json:"legId,omitempty"`
+			Path  string `json:"path"`
+			Kind  string `json:"kind,omitempty"`
+		} `json:"files"`
+	}
+	status = client.do(t, http.MethodDelete, "/sessions/"+sessionID, nil, &manifest)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE /sessions/%s: status %d", sessionID, status)
+	}
+	if len(manifest.Files) != 3 {
+		t.Fatalf("expected exactly 3 manifest files (2 legs + mixed, no video entry), got %d: %+v", len(manifest.Files), manifest.Files)
+	}
+	sessionDir := filepath.Join(recordingsDir, sessionID)
+	for _, name := range []string{"leg_caller.ogg", "leg_callee.ogg", "mixed.m4a", "manifest.json"} {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); err != nil {
+			t.Errorf("expected %s to exist: %v", filepath.Join(sessionDir, name), err)
+		}
 	}
 }
 

@@ -96,6 +96,30 @@ func NewManager(cfg config.Config) (*Manager, error) {
 		return nil, fmt.Errorf("session: register opus codec: %w", err)
 	}
 
+	// VP8 (live-only video forwarding — no recording, see session.go's onInboundRTP kind branch).
+	// NewAPI below deliberately omits WithInterceptorRegistry: Pion auto-registers its default
+	// interceptor set for a bare MediaEngine, which for video includes the NACK
+	// generator/responder (RTCPFeedback "nack" below) — a custom registry is NOT needed and would
+	// have to duplicate that wiring by hand.
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeVP8,
+			ClockRate: 90000,
+			RTCPFeedback: []webrtc.RTCPFeedback{
+				{Type: "nack"},
+				{Type: "nack", Parameter: "pli"},
+				{Type: "goog-remb"},
+				{Type: "transport-cc"},
+			},
+		},
+		PayloadType: 96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		_ = udpConn.Close()
+		_ = tcpLn.Close()
+
+		return nil, fmt.Errorf("session: register vp8 codec: %w", err)
+	}
+
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine), webrtc.WithMediaEngine(mediaEngine))
 
 	return &Manager{

@@ -112,7 +112,7 @@ func TestOnInboundRTPFansOutToAllPeersThreeWay(t *testing.T) {
 		sess.mu.Unlock()
 		l.mu.Lock()
 		n := len(l.outboundTracks)
-		_, self := l.outboundTracks[legID]
+		_, self := l.outboundTracks[outboundTrackKey{legID: legID, trackKey: audioTrackKey}]
 		l.mu.Unlock()
 		if n != 2 {
 			t.Errorf("%s has %d outbound tracks, want 2 (one per other peer)", legID, n)
@@ -126,14 +126,14 @@ func TestOnInboundRTPFansOutToAllPeersThreeWay(t *testing.T) {
 		Header:  rtp.Header{SequenceNumber: 1, Timestamp: 10000, SSRC: 0xAAAA},
 		Payload: []byte{0xfc, 0x01, 0x02},
 	}
-	sess.onInboundRTP("leg_alice", pkt)
+	sess.onInboundRTP("leg_alice", audioTrackKey, webrtc.RTPCodecTypeAudio, pkt)
 
 	for _, legID := range []string{"leg_bob", "leg_carol"} {
 		sess.mu.Lock()
 		l := sess.legs[legID]
 		sess.mu.Unlock()
 		l.mu.Lock()
-		ot := l.outboundTracks["leg_alice"]
+		ot := l.outboundTracks[outboundTrackKey{legID: "leg_alice", trackKey: audioTrackKey}]
 		l.mu.Unlock()
 		if ot == nil {
 			t.Fatalf("%s missing outbound track for leg_alice", legID)
@@ -155,9 +155,9 @@ func TestOnInboundRTPFansOutToAllPeersThreeWay(t *testing.T) {
 	aliceLeg := sess.legs["leg_alice"]
 	sess.mu.Unlock()
 	aliceLeg.mu.Lock()
-	for peerID, ot := range aliceLeg.outboundTracks {
+	for key, ot := range aliceLeg.outboundTracks {
 		if ot.sentPackets.Load() != 0 {
-			t.Errorf("leg_alice's outbound track for %s: sentPackets = %d, want 0 (alice's own packet must not loop back through her)", peerID, ot.sentPackets.Load())
+			t.Errorf("leg_alice's outbound track for %s/%s: sentPackets = %d, want 0 (alice's own packet must not loop back through her)", key.legID, key.trackKey, ot.sentPackets.Load())
 		}
 	}
 	aliceLeg.mu.Unlock()
@@ -190,7 +190,7 @@ func TestAddLegThenRenegotiateOffersNewTrackForJoiner(t *testing.T) {
 		l := sess.legs[legID]
 		sess.mu.Unlock()
 		l.mu.Lock()
-		_, ok := l.outboundTracks["leg_carol"]
+		_, ok := l.outboundTracks[outboundTrackKey{legID: "leg_carol", trackKey: audioTrackKey}]
 		l.mu.Unlock()
 		if !ok {
 			t.Fatalf("%s missing an outbound track for leg_carol after AddLeg", legID)
@@ -253,9 +253,11 @@ func TestRenegotiateLegUnconnectedLegIsError(t *testing.T) {
 }
 
 // TestRemoveLegDropsOutboundTrackFromPeers is the regression test for the remove-leg control
-// plane addition: removing a leaver must drop the outbound track every OTHER live leg was using
-// for its audio, exclude it from further fan-out (peerLegs), yet keep it in s.legs/legOrder so
-// finalize's manifest/mixLegs still cover its already-recorded audio.
+// plane addition: removing a leaver must drop EVERY outbound track every OTHER live leg was
+// using for its media — audio AND any video tracks (a leaver may have had up to three inbound
+// tracks: mic + camera + screen share, each with its own outbound track on every peer) — exclude
+// it from further fan-out (peerLegs), yet keep it in s.legs/legOrder so finalize's
+// manifest/mixLegs still cover its already-recorded audio.
 func TestRemoveLegDropsOutboundTrackFromPeers(t *testing.T) {
 	mgr := newTestManager(t)
 	sess, err := mgr.CreateSession("call1", threeLegs("alice", "bob", "carol"))
@@ -269,13 +271,27 @@ func TestRemoveLegDropsOutboundTrackFromPeers(t *testing.T) {
 
 	sess.mu.Lock()
 	alice := sess.legs["leg_alice"]
+	carol := sess.legs["leg_carol"]
 	sess.mu.Unlock()
 
+	// Give carol a video track too (the mid-call path: admitted, then fanned out to already-
+	// connected peers — see readInboundTrack/fanOutNewVideoTrack in offer.go), so removal must
+	// clean up BOTH her audio and video outbound tracks from alice, not just audio.
+	carolVideoKey := videoTrackKey("carol-cam")
+	if !sess.admitInboundTrack(carol, carolVideoKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(0xC0C0)) {
+		t.Fatalf("admitInboundTrack(carol video): rejected, want admitted")
+	}
+	sess.fanOutNewVideoTrack(carol, carolVideoKey)
+
 	alice.mu.Lock()
-	_, hadTrack := alice.outboundTracks["leg_carol"]
+	_, hadTrack := alice.outboundTracks[outboundTrackKey{legID: "leg_carol", trackKey: audioTrackKey}]
+	_, hadVideoTrack := alice.outboundTracks[outboundTrackKey{legID: "leg_carol", trackKey: carolVideoKey}]
 	alice.mu.Unlock()
 	if !hadTrack {
-		t.Fatalf("expected leg_alice to have an outbound track for leg_carol before removal")
+		t.Fatalf("expected leg_alice to have an outbound track for leg_carol's audio before removal")
+	}
+	if !hadVideoTrack {
+		t.Fatalf("expected leg_alice to have an outbound track for leg_carol's video before removal")
 	}
 
 	if err := sess.RemoveLeg("leg_carol"); err != nil {
@@ -283,10 +299,23 @@ func TestRemoveLegDropsOutboundTrackFromPeers(t *testing.T) {
 	}
 
 	alice.mu.Lock()
-	_, stillHasTrack := alice.outboundTracks["leg_carol"]
+	_, stillHasTrack := alice.outboundTracks[outboundTrackKey{legID: "leg_carol", trackKey: audioTrackKey}]
+	_, stillHasVideoTrack := alice.outboundTracks[outboundTrackKey{legID: "leg_carol", trackKey: carolVideoKey}]
+	var leftoverCarolKeys int
+	for key := range alice.outboundTracks {
+		if key.legID == "leg_carol" {
+			leftoverCarolKeys++
+		}
+	}
 	alice.mu.Unlock()
 	if stillHasTrack {
-		t.Fatalf("expected leg_alice's outbound track for leg_carol to be dropped after RemoveLeg")
+		t.Fatalf("expected leg_alice's outbound track for leg_carol's audio to be dropped after RemoveLeg")
+	}
+	if stillHasVideoTrack {
+		t.Fatalf("expected leg_alice's outbound track for leg_carol's video to be dropped after RemoveLeg")
+	}
+	if leftoverCarolKeys != 0 {
+		t.Fatalf("expected ALL of leg_carol's outbound tracks to be dropped from leg_alice after RemoveLeg, %d remain", leftoverCarolKeys)
 	}
 
 	for _, p := range sess.peerLegs("leg_alice") {
@@ -364,6 +393,179 @@ func TestAddLegDuplicateLegIDIsError(t *testing.T) {
 
 	if err := sess.AddLeg("leg_alice", "alice"); !errors.Is(err, ErrLegAlreadyExists) {
 		t.Fatalf("AddLeg with a duplicate legId = %v, want ErrLegAlreadyExists", err)
+	}
+}
+
+// TestAdmitInboundTrackEnforcesPerLegCap is the regression test for the per-leg inbound track
+// cap (offer.go's admitInboundTrack): defense against a misbehaving client sending more tracks
+// than the UI ever offers — at most 1 audio + 2 video (camera + screen) per leg. Excess tracks
+// must be rejected (not admitted into leg.inboundTracks), not silently accepted or panicked on.
+func TestAdmitInboundTrackEnforcesPerLegCap(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", oneLeg("alice"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess.mu.Lock()
+	alice := sess.legs["leg_alice"]
+	sess.mu.Unlock()
+
+	if !sess.admitInboundTrack(alice, audioTrackKey, webrtc.RTPCodecTypeAudio, webrtc.SSRC(1)) {
+		t.Fatalf("first audio track: expected admitted")
+	}
+	if sess.admitInboundTrack(alice, "audio-2", webrtc.RTPCodecTypeAudio, webrtc.SSRC(2)) {
+		t.Fatalf("second audio track: expected rejected (cap is 1 audio per leg)")
+	}
+
+	camKey := videoTrackKey("cam")
+	screenKey := videoTrackKey("screen")
+	thirdKey := videoTrackKey("third")
+	if !sess.admitInboundTrack(alice, camKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(3)) {
+		t.Fatalf("first video track: expected admitted")
+	}
+	if !sess.admitInboundTrack(alice, screenKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(4)) {
+		t.Fatalf("second video track: expected admitted")
+	}
+	if sess.admitInboundTrack(alice, thirdKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(5)) {
+		t.Fatalf("third video track: expected rejected (cap is 2 video per leg)")
+	}
+
+	alice.mu.Lock()
+	n := len(alice.inboundTracks)
+	alice.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("leg_alice.inboundTracks has %d entries, want exactly 3 (1 audio + 2 video admitted)", n)
+	}
+
+	// Re-admitting an already-admitted track key is idempotent (true), not a second rejection —
+	// defensive only, shouldn't normally happen (a track ID is unique per OnTrack firing).
+	if !sess.admitInboundTrack(alice, camKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(3)) {
+		t.Fatalf("re-admitting an already-admitted track key: expected true (idempotent), not a rejection")
+	}
+}
+
+// TestNewPeerConnectionForLegProvisionsAlreadyActiveVideoTracks is the regression test for the
+// peer-provisioning loop's generalization (offer.go's newPeerConnectionForLeg, via
+// provisionPeerOutboundTracks): a leg whose PC is created AFTER a peer already has an active
+// video track must have that video track wired up immediately — audio unconditionally, video for
+// whichever of the peer's tracks are already active by then.
+func TestNewPeerConnectionForLegProvisionsAlreadyActiveVideoTracks(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess.mu.Lock()
+	alice := sess.legs["leg_alice"]
+	bob := sess.legs["leg_bob"]
+	sess.mu.Unlock()
+
+	// Alice is already sending a camera track BEFORE bob's PeerConnection is ever created.
+	aliceCamKey := videoTrackKey("alice-cam")
+	if !sess.admitInboundTrack(alice, aliceCamKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(0xA11CE)) {
+		t.Fatalf("admitInboundTrack(alice video): rejected, want admitted")
+	}
+
+	bobPC, err := sess.newPeerConnectionForLeg(bob)
+	if err != nil {
+		t.Fatalf("newPeerConnectionForLeg(bob): %v", err)
+	}
+	t.Cleanup(func() { _ = bobPC.Close() })
+
+	bob.mu.Lock()
+	_, hasAudio := bob.outboundTracks[outboundTrackKey{legID: "leg_alice", trackKey: audioTrackKey}]
+	_, hasVideo := bob.outboundTracks[outboundTrackKey{legID: "leg_alice", trackKey: aliceCamKey}]
+	bob.mu.Unlock()
+	if !hasAudio {
+		t.Fatalf("expected bob to have an unconditional outbound audio track for alice")
+	}
+	if !hasVideo {
+		t.Fatalf("expected bob to have an outbound video track for alice's already-active camera track")
+	}
+}
+
+// TestFanOutNewVideoTrackProvisionsExistingPeers is the regression test for the mid-call video
+// path (offer.go's fanOutNewVideoTrack, invoked from readInboundTrack once a video track is
+// admitted): a video track that starts AFTER a peer's PeerConnection already exists must still
+// get an outbound track provisioned on that peer — not just on peers who join/connect later.
+func TestFanOutNewVideoTrackProvisionsExistingPeers(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess.mu.Lock()
+	alice := sess.legs["leg_alice"]
+	bob := sess.legs["leg_bob"]
+	sess.mu.Unlock()
+
+	// Both already connected — neither has sent video yet.
+	alicePC, err := sess.newPeerConnectionForLeg(alice)
+	if err != nil {
+		t.Fatalf("newPeerConnectionForLeg(alice): %v", err)
+	}
+	t.Cleanup(func() { _ = alicePC.Close() })
+	bobPC, err := sess.newPeerConnectionForLeg(bob)
+	if err != nil {
+		t.Fatalf("newPeerConnectionForLeg(bob): %v", err)
+	}
+	t.Cleanup(func() { _ = bobPC.Close() })
+
+	bob.mu.Lock()
+	_, hadVideoBeforeFanOut := bob.outboundTracks[outboundTrackKey{legID: "leg_alice", trackKey: videoTrackKey("alice-screen")}]
+	bob.mu.Unlock()
+	if hadVideoBeforeFanOut {
+		t.Fatalf("bob should have no outbound track yet for a video track alice hasn't started sending")
+	}
+
+	// Alice starts a screen share mid-call.
+	aliceScreenKey := videoTrackKey("alice-screen")
+	if !sess.admitInboundTrack(alice, aliceScreenKey, webrtc.RTPCodecTypeVideo, webrtc.SSRC(0x5CEEEA)) {
+		t.Fatalf("admitInboundTrack(alice screen share): rejected, want admitted")
+	}
+	sess.fanOutNewVideoTrack(alice, aliceScreenKey)
+
+	bob.mu.Lock()
+	_, hasVideoAfterFanOut := bob.outboundTracks[outboundTrackKey{legID: "leg_alice", trackKey: aliceScreenKey}]
+	bob.mu.Unlock()
+	if !hasVideoAfterFanOut {
+		t.Fatalf("expected bob to gain an outbound track for alice's mid-call screen share after fanOutNewVideoTrack")
+	}
+}
+
+// TestOnInboundRTPVideoNeverReachesRecorder is the regression test for RECORDING ISOLATION:
+// video must never touch the recorder (session.go's onInboundRTP kind branch) — finalize.go/
+// recorder/ must stay byte-identical in behavior, audio path unchanged. A video-only packet must
+// leave the leg's recorder untouched; the SAME leg's recorder DOES record an audio packet through
+// the identical code path, proving this isn't just an always-silent recorder.
+func TestOnInboundRTPVideoNeverReachesRecorder(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess.mu.Lock()
+	alice := sess.legs["leg_alice"]
+	sess.mu.Unlock()
+
+	videoPkt := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, Timestamp: 90000, SSRC: 0xC0FFEE},
+		Payload: []byte{0x00, 0x01, 0x02, 0x03},
+	}
+	sess.onInboundRTP("leg_alice", videoTrackKey("alice-cam"), webrtc.RTPCodecTypeVideo, videoPkt)
+
+	if alice.hasRecordedAny() {
+		t.Fatalf("video RTP must never reach the recorder — leg_alice.hasRecordedAny() = true after a video-only packet")
+	}
+
+	audioPkt := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, Timestamp: 48000, SSRC: 0xA0D10},
+		Payload: []byte{0xfc, 0x01, 0x02},
+	}
+	sess.onInboundRTP("leg_alice", audioTrackKey, webrtc.RTPCodecTypeAudio, audioPkt)
+
+	if !alice.hasRecordedAny() {
+		t.Fatalf("expected an audio packet through onInboundRTP to be recorded (same code path, kind=audio)")
 	}
 }
 

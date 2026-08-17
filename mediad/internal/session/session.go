@@ -19,11 +19,35 @@ import (
 
 const rtcpSenderReportInterval = 5 * time.Second
 
+// audioTrackKey is the sourceTrackKey for a leg's single audio track — stable across the
+// lifetime of a leg (a leg is assumed to send at most one audio track). Video tracks use
+// videoTrackKey instead, since a leg may send up to two (camera + screen) and kind alone isn't a
+// sufficient key — see outboundTrackKey.
+const audioTrackKey = "audio"
+
+// videoTrackKey derives the sourceTrackKey for a video track from its ORIGIN TrackRemote.ID(),
+// verbatim — this is also the LOCKED outbound track ID the Flutter app parses (see
+// ensureOutboundTrack), so inboundTrackID must never be transformed here.
+func videoTrackKey(inboundTrackID string) string {
+	return "video-" + inboundTrackID
+}
+
+// outboundTrackKey identifies one outbound forwarding track on some leg's PeerConnection: which
+// OTHER leg it originates from, plus which of that leg's inbound tracks it carries
+// (audioTrackKey or a videoTrackKey(...)). Keying by sourceLegID alone (the pre-video shape) is
+// not enough once a leg can send TWO video tracks (camera + screen) plus audio — three distinct
+// inbound tracks from the same source leg would otherwise collide onto one outbound track,
+// mixing camera+screen+mic RTP together on the wire.
+type outboundTrackKey struct {
+	legID    string
+	trackKey string
+}
+
 // leg is the runtime state for one participant of a call: its PeerConnection, one outbound
-// track PER remote participant mediad forwards that participant's audio through (see
+// track PER (remote participant, remote participant's track) mediad forwards media through (see
 // outboundTrack — a single mixed track is forbidden by the no-decode design), and this leg's own
-// recorder (which records what THIS leg's participant says — the audio mediad receives on its
-// inbound track).
+// recorder (which records what THIS leg's participant says — the AUDIO mediad receives on its
+// inbound track; video is forwarding-only and never reaches the recorder, see onInboundRTP).
 type leg struct {
 	id  string
 	sub string
@@ -41,11 +65,26 @@ type leg struct {
 	pc       *webrtc.PeerConnection
 	iceState webrtc.ICEConnectionState
 
-	// outboundTracks is keyed by SOURCE leg id: outboundTracks["leg_bob"] is the track this leg's
-	// PeerConnection uses to carry leg_bob's forwarded audio. One TrackLocalStaticRTP (and one
-	// SSRC) per remote source — mediad never decodes, so it can never mix multiple sources onto
-	// one track; each stays a distinct RTP stream all the way to the client, which mixes locally.
-	outboundTracks map[string]*outboundTrack
+	// outboundTracks is keyed by (source leg id, source track key): outboundTracks[{legID:
+	// "leg_bob", trackKey: "audio"}] is the track this leg's PeerConnection uses to carry
+	// leg_bob's forwarded microphone audio; outboundTracks[{legID: "leg_bob", trackKey:
+	// "video-<id>"}] carries one of leg_bob's forwarded video tracks. One TrackLocalStaticRTP
+	// (and one SSRC) per (remote source, remote source's track) — mediad never decodes, so it can
+	// never mix multiple sources (or multiple tracks from the same source) onto one track; each
+	// stays a distinct RTP stream all the way to the client, which mixes/renders locally.
+	outboundTracks map[outboundTrackKey]*outboundTrack
+
+	// inboundTracks records metadata about THIS leg's OWN inbound tracks (what this leg's client
+	// sends to mediad), keyed by the same trackKey scheme as outboundTracks. Populated by
+	// admitInboundTrack as each track's OnTrack fires. Consulted by:
+	//   - provisionPeerOutboundTracks, to know which of this leg's video tracks are already
+	//     active when some OTHER leg's PeerConnection is created (offer.go's peer-provisioning
+	//     loop) — audio is provisioned unconditionally regardless of this map (every leg is
+	//     assumed to eventually send audio).
+	//   - forwardPLIToOrigin, to find this leg's live inbound SSRC + live pc to reverse-route a
+	//     viewer's PLI/FIR to.
+	//   - admitInboundTrack itself, to enforce the per-leg inbound cap (1 audio + 2 video).
+	inboundTracks map[string]*inboundTrackInfo
 
 	// left marks a leg RemoveLeg has torn down: it stays in Session.legs/legOrder forever (so
 	// finalize's manifest/mixLegs still include its already-recorded audio) but is excluded from
@@ -65,6 +104,18 @@ type leg struct {
 	startOffsetMs int64
 }
 
+// inboundTrackInfo is one entry in leg.inboundTracks — see its doc comment for what consults it.
+type inboundTrackInfo struct {
+	kind webrtc.RTPCodecType
+	ssrc webrtc.SSRC
+
+	// lastPLISentAtUnixNano rate-limits forwarded PLIs onto THIS inbound track (forwardPLIToOrigin
+	// in offer.go): N viewers' drainRTCP goroutines can all observe loss concurrently and must not
+	// storm the one originating sender with N PLIs. Zero means "never sent yet". Lock-free
+	// (atomic) since it's written from every viewer's drainRTCP goroutine concurrently.
+	lastPLISentAtUnixNano atomic.Int64
+}
+
 // outboundTrack is one leg's outbound RTP stream carrying a SINGLE remote source's forwarded
 // audio (see leg.outboundTracks). Bundles the track itself with the per-stream RTCP Sender
 // Report bookkeeping that used to live directly on leg back when each leg had exactly one
@@ -73,6 +124,12 @@ type outboundTrack struct {
 	track  *webrtc.TrackLocalStaticRTP
 	sender *webrtc.RTPSender
 	ssrc   webrtc.SSRC
+
+	// kind determines drainRTCP's behavior on this track's sender RTCP: video tracks are
+	// inspected for PLI/FIR and reverse-routed to the origin leg (offer.go's forwardPLIToOrigin);
+	// audio tracks keep the original discard-only behavior (mediad ignores audio PLI/FIR by
+	// construction).
+	kind webrtc.RTPCodecType
 
 	sentPackets atomic.Uint32
 	sentOctets  atomic.Uint32
@@ -167,7 +224,8 @@ func newSession(mgr *Manager, id, callID, dir string, specs []LegSpec, t0 time.T
 			// ICEConnectionState strings ("new", "checking", ...) — "new" until a PC exists
 			// (OfferLeg creates it lazily on the first offer), not Go's zero-value "unknown".
 			iceState:       webrtc.ICEConnectionStateNew,
-			outboundTracks: make(map[string]*outboundTrack),
+			outboundTracks: make(map[outboundTrackKey]*outboundTrack),
+			inboundTracks:  make(map[string]*inboundTrackInfo),
 		}
 		s.legOrder = append(s.legOrder, spec.LegID)
 	}
@@ -248,12 +306,15 @@ func (l *leg) hasRecordedAny() bool {
 	return l.rec != nil && l.rec.Segments() > 0
 }
 
-// onInboundRTP is called for every RTP packet read from legID's inbound track: forwards it
-// packet-level (no decode) to every OTHER live leg's outbound track keyed by legID (its
-// per-source track carrying THIS leg's audio), and feeds it to this leg's own recorder. Order
-// matches docs/plans/voice-calls-plan.md §2.3: the reorder/dedup buffer sits in front of the OGG
-// writer ONLY — forwarding is real-time and unbuffered.
-func (s *Session) onInboundRTP(legID string, pkt *rtp.Packet) {
+// onInboundRTP is called for every RTP packet read from legID's inbound track identified by
+// trackKey (audioTrackKey or a videoTrackKey(...)): forwards it packet-level (no decode) to every
+// OTHER live leg's outbound track keyed by (legID, trackKey) — its per-(source,track) track
+// carrying THIS specific inbound stream — and, for AUDIO ONLY, feeds it to this leg's own
+// recorder. Video packets never reach the recorder: recording isolation is required (video must
+// never touch finalize.go/recorder/, byte-identical audio behavior otherwise) — see the kind
+// check at the bottom. Order matches docs/plans/voice-calls-plan.md §2.3: the reorder/dedup
+// buffer sits in front of the OGG writer ONLY — forwarding is real-time and unbuffered.
+func (s *Session) onInboundRTP(legID, trackKey string, kind webrtc.RTPCodecType, pkt *rtp.Packet) {
 	s.mu.Lock()
 	self, ok := s.legs[legID]
 	s.mu.Unlock()
@@ -261,9 +322,10 @@ func (s *Session) onInboundRTP(legID string, pkt *rtp.Packet) {
 		return
 	}
 
+	key := outboundTrackKey{legID: legID, trackKey: trackKey}
 	for _, peer := range s.peerLegs(legID) {
 		peer.mu.Lock()
-		ot := peer.outboundTracks[legID]
+		ot := peer.outboundTracks[key]
 		peer.mu.Unlock()
 		if ot == nil {
 			// Not wired up yet — shouldn't normally happen (ensureOutboundTrack provisions this
@@ -274,7 +336,7 @@ func (s *Session) onInboundRTP(legID string, pkt *rtp.Packet) {
 
 		if err := ot.track.WriteRTP(pkt); err != nil {
 			if !errors.Is(err, io.ErrClosedPipe) {
-				slog.Debug("mediad: forward RTP failed", "session", s.id, "leg", legID, "peer", peer.id, "err", err)
+				slog.Debug("mediad: forward RTP failed", "session", s.id, "leg", legID, "trackKey", trackKey, "peer", peer.id, "err", err)
 			}
 
 			continue
@@ -290,7 +352,11 @@ func (s *Session) onInboundRTP(legID string, pkt *rtp.Packet) {
 		ot.haveLastForwardedRTP.Store(true)
 	}
 
-	self.rec.Push(pkt)
+	// RECORDING ISOLATION: video must never touch the recorder — forwarding-only. Audio behavior
+	// is unchanged from before video existed.
+	if kind == webrtc.RTPCodecTypeAudio {
+		self.rec.Push(pkt)
+	}
 }
 
 // rtcpLoop periodically emits a Sender Report per leg's outbound stream

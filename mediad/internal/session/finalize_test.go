@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 )
 
 // TestRecoverFromDiskRejectsPathTraversalSessionID is the regression test for v3.1 finding #2:
@@ -96,6 +97,83 @@ func TestEndSessionMixFailureReturnsLegsOnlyManifestAndForgetsSession(t *testing
 	}
 	if got := mgr.Health().ActiveSessions; got != 0 {
 		t.Fatalf("ActiveSessions after a mix-failure finalize = %d, want 0", got)
+	}
+}
+
+// TestFinalizeManifestFilesCarryKind is the regression test for the FUTURE-PROOFING
+// ManifestFile.Kind field (types.go): every per-leg file in a finalize manifest must carry
+// Kind:"audio" (mediad only ever records audio) and the mixed playback file must carry
+// Kind:"mixed" — added without changing the existing LegID=="" discrimination logic.
+func TestFinalizeManifestFilesCarryKind(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	pushOnePacket(t, sess, "leg_alice", 0xAAAA)
+	pushOnePacket(t, sess, "leg_bob", 0xBBBB)
+
+	manifest, err := mgr.EndSession(sess.ID())
+	if err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	var sawAudio, sawMixed int
+	for _, f := range manifest.Files {
+		switch {
+		case f.LegID != "":
+			if f.Kind != ManifestFileKindAudio {
+				t.Errorf("leg file %s Kind = %q, want %q", f.LegID, f.Kind, ManifestFileKindAudio)
+			}
+			sawAudio++
+		case f.Path == mixedFileName:
+			if f.Kind != ManifestFileKindMixed {
+				t.Errorf("mixed file Kind = %q, want %q", f.Kind, ManifestFileKindMixed)
+			}
+			sawMixed++
+		default:
+			t.Errorf("unexpected manifest file with neither a LegID nor the mixed path: %+v", f)
+		}
+	}
+	if sawAudio != 2 {
+		t.Fatalf("expected 2 audio-kind leg files, got %d: %+v", sawAudio, manifest.Files)
+	}
+	if sawMixed != 1 {
+		t.Fatalf("expected 1 mixed-kind file, got %d: %+v", sawMixed, manifest.Files)
+	}
+}
+
+// TestFinalizeManifestNeverContainsVideoEntries confirms video RTP flowing through onInboundRTP
+// never produces a manifest entry — mediad has no video writer (the Kind field exists so one can
+// be added later without a wire-shape change, but today ONLY "audio" and "mixed" are ever
+// written; finalize.go/recorder/ must stay byte-identical for audio regardless of video traffic).
+func TestFinalizeManifestNeverContainsVideoEntries(t *testing.T) {
+	mgr := newTestManager(t)
+	sess, err := mgr.CreateSession("call1", twoLegs("alice", "bob"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	pushOnePacket(t, sess, "leg_alice", 0xAAAA)
+	sess.onInboundRTP("leg_alice", videoTrackKey("alice-cam"), webrtc.RTPCodecTypeVideo, &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 1, Timestamp: 1000, SSRC: 0xC0FFEE},
+		Payload: []byte{0x00, 0x01},
+	})
+	pushOnePacket(t, sess, "leg_bob", 0xBBBB)
+
+	manifest, err := mgr.EndSession(sess.ID())
+	if err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	for _, f := range manifest.Files {
+		if f.Kind != "" && f.Kind != ManifestFileKindAudio && f.Kind != ManifestFileKindMixed {
+			t.Errorf("unexpected manifest file kind %q (video must never be written): %+v", f.Kind, f)
+		}
+	}
+	if len(manifest.Files) != 3 {
+		t.Fatalf("expected exactly 3 manifest files (2 legs + mixed, no video entry), got %d: %+v", len(manifest.Files), manifest.Files)
 	}
 }
 
