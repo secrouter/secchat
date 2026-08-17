@@ -32,15 +32,16 @@ func startTestMediad(t *testing.T) (baseURL string, recordingsDir string) {
 
 	recordingsDir = t.TempDir()
 	cfg := config.Config{
-		ControlAddr:     "127.0.0.1:0", // unused directly — we drive the api.Handler via httptest
-		MediaAddr:       "127.0.0.1:0", // ephemeral UDP+TCP mux ports
-		AdvertiseAddr:   "127.0.0.1",
-		Token:           testToken,
-		RecordingsDir:   recordingsDir,
-		FfmpegPath:      ffmpegPathForTest(t),
-		SessionCap:      8,
-		ActiveDeadline:  time.Hour,
-		JanitorInterval: time.Hour,
+		ControlAddr:       "127.0.0.1:0", // unused directly — we drive the api.Handler via httptest
+		MediaAddr:         "127.0.0.1:0", // ephemeral UDP+TCP mux ports
+		AdvertiseAddr:     "127.0.0.1",
+		Token:             testToken,
+		RecordingsDir:     recordingsDir,
+		FfmpegPath:        ffmpegPathForTest(t),
+		SessionCap:        8,
+		MaxLegsPerSession: 8,
+		ActiveDeadline:    time.Hour,
+		JanitorInterval:   time.Hour,
 	}
 
 	mgr, err := session.NewManager(cfg)

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"secchat-mediad/internal/session"
@@ -29,11 +30,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	// One leg = a solo self-DM voice memo (record yourself); two legs = a 1:1 call. A session
-	// records + mixes N legs (N>=1) — the RTP forwarding between legs is peer-nil-safe, so a
-	// single leg simply records with nothing to forward to.
-	if req.CallID == "" || len(req.Legs) < 1 || len(req.Legs) > 2 {
-		writeError(w, http.StatusBadRequest, "bad_request", "callId and one or two legs are required")
+	// One leg = a solo self-DM voice memo (record yourself); two-or-more legs = a relayed group
+	// call (SFU: N participants, one outbound track per remote source — see internal/session).
+	// The initial-legs cap is the SAME configured per-session participant cap POST
+	// /sessions/:id/legs joiners are checked against (session.Manager.MaxLegsPerSession),
+	// not a hardcoded "exactly two".
+	maxLegs := s.mgr.MaxLegsPerSession()
+	if req.CallID == "" || len(req.Legs) < 1 || len(req.Legs) > maxLegs {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			fmt.Sprintf("callId and 1-%d legs are required", maxLegs))
 
 		return
 	}
@@ -119,4 +124,123 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, manifest)
+}
+
+// addLegRequest/response back POST /sessions/{id}/legs — add a joiner to a live session
+// (multi-party SFU). Mirrors createSessionRequest/response's shape (legId/sub in, legId echoed
+// back) for one leg instead of the initial batch.
+type addLegRequest struct {
+	LegID string `json:"legId"`
+	Sub   string `json:"sub"`
+}
+
+type addLegResponse struct {
+	LegID string `json:"legId"`
+}
+
+func (s *Server) handleAddLeg(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+
+	var req addLegRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.LegID == "" || req.Sub == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: legId and sub are required")
+
+		return
+	}
+
+	sess, ok := s.mgr.Get(sessionID)
+	if !ok {
+		mapSessionErr(w, session.ErrSessionNotFound)
+
+		return
+	}
+
+	if err := sess.AddLeg(req.LegID, req.Sub); err != nil {
+		mapSessionErr(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, addLegResponse{LegID: req.LegID})
+}
+
+// renegotiateResponse backs POST /sessions/{id}/legs/{legId}/renegotiate — mediad's fresh
+// server-initiated SDP OFFER for legID (same {sdp} shape as offerResponse, but this direction
+// carries an offer, not an answer — see Session.RenegotiateLeg).
+type renegotiateResponse struct {
+	SDP string `json:"sdp"`
+}
+
+func (s *Server) handleRenegotiateLeg(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	legID := r.PathValue("legId")
+
+	sess, ok := s.mgr.Get(sessionID)
+	if !ok {
+		mapSessionErr(w, session.ErrSessionNotFound)
+
+		return
+	}
+
+	offer, err := sess.RenegotiateLeg(legID)
+	if err != nil {
+		mapSessionErr(w, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, renegotiateResponse{SDP: offer})
+}
+
+// answerRequest backs POST /sessions/{id}/legs/{legId}/answer — the client's answer to a
+// server-initiated offer from RenegotiateLeg.
+type answerRequest struct {
+	SDP string `json:"sdp"`
+}
+
+func (s *Server) handleAnswerLeg(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	legID := r.PathValue("legId")
+
+	var req answerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SDP == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: sdp is required")
+
+		return
+	}
+
+	sess, ok := s.mgr.Get(sessionID)
+	if !ok {
+		mapSessionErr(w, session.ErrSessionNotFound)
+
+		return
+	}
+
+	if err := sess.AnswerLeg(legID, req.SDP); err != nil {
+		mapSessionErr(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRemoveLeg(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	legID := r.PathValue("legId")
+
+	sess, ok := s.mgr.Get(sessionID)
+	if !ok {
+		mapSessionErr(w, session.ErrSessionNotFound)
+
+		return
+	}
+
+	if err := sess.RemoveLeg(legID); err != nil {
+		mapSessionErr(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

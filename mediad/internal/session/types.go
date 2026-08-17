@@ -14,6 +14,15 @@ var (
 	ErrLegBusy           = errors.New("leg_already_connected")
 	ErrSessionCapReached = errors.New("session_cap_reached")
 	ErrSessionEnded      = errors.New("session_ended")
+	// ErrLegAlreadyExists is returned by AddLeg for a legId already present in the session (live
+	// or previously left — legIDs are never reused within a session).
+	ErrLegAlreadyExists = errors.New("leg_already_exists")
+	// ErrTooManyLegs is returned by AddLeg when the session already holds
+	// config.MaxLegsPerSession ACTIVE (non-left) legs.
+	ErrTooManyLegs = errors.New("session_full")
+	// ErrLegNotConnected is returned by RenegotiateLeg/AnswerLeg for a leg with no live
+	// PeerConnection yet (never offered) or one that has already left the call.
+	ErrLegNotConnected = errors.New("leg_not_connected")
 )
 
 // LegSpec is one leg of a POST /sessions request (docs/plans/voice-contracts.md §2.1).

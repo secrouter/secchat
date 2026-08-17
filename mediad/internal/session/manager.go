@@ -221,6 +221,13 @@ func (m *Manager) forget(sessionID string) {
 	m.mu.Unlock()
 }
 
+// MaxLegsPerSession returns the configured cap on how many ACTIVE participants (legs) a single
+// session may hold at once — enforced by both POST /sessions' initial legs (handlers.go) and
+// POST /sessions/:id/legs joiners (Session.AddLeg).
+func (m *Manager) MaxLegsPerSession() int {
+	return m.cfg.MaxLegsPerSession
+}
+
 // Health backs GET /health (docs/plans/voice-contracts.md §2.5).
 func (m *Manager) Health() Health {
 	m.mu.Lock()

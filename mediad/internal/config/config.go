@@ -32,6 +32,10 @@ type Config struct {
 	FfmpegPath string
 	// SessionCap bounds how many concurrent sessions mediad will accept (hardening: session cap).
 	SessionCap int
+	// MaxLegsPerSession bounds how many participants (legs) a single session may hold at once —
+	// both POST /sessions' initial legs and POST /sessions/:id/legs joiners count against it
+	// (multi-party SFU cap; was a hardcoded "exactly two legs" before group calls).
+	MaxLegsPerSession int
 	// ActiveDeadline bounds how long any one session may stay open before mediad force-ends it
 	// (hardening: per-session activeDeadline; also R4's 2h call-length default).
 	ActiveDeadline time.Duration
@@ -57,6 +61,9 @@ func FromEnv() (Config, error) {
 
 	var err error
 	if cfg.SessionCap, err = getEnvInt("MEDIAD_SESSION_CAP", 64); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxLegsPerSession, err = getEnvInt("MEDIAD_MAX_LEGS_PER_SESSION", 8); err != nil {
 		return Config{}, err
 	}
 	if cfg.ActiveDeadline, err = getEnvDuration("MEDIAD_ACTIVE_DEADLINE", 2*time.Hour); err != nil {

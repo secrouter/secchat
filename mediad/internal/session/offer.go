@@ -109,8 +109,11 @@ func (s *Session) OfferLeg(legID, offerSDP string) (string, error) {
 }
 
 // newPeerConnectionForLeg builds a fresh PeerConnection for a leg: a recvonly audio transceiver
-// (receives the client's mic — what gets recorded and forwarded to the peer leg) plus an
-// outbound track (what this leg's client hears: the OTHER leg's forwarded audio).
+// (receives the client's mic — what gets recorded and forwarded to every OTHER live leg) plus
+// one outbound track PER already-present peer leg (what this leg's client hears — each remote
+// participant's forwarded audio on its own track/SSRC; see leg.outboundTracks). A peer that
+// joins LATER gets its outbound track added here on-demand by AddLeg instead, once this PC
+// already exists.
 func (s *Session) newPeerConnectionForLeg(l *leg) (*webrtc.PeerConnection, error) {
 	pc, err := s.mgr.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -125,34 +128,6 @@ func (s *Session) newPeerConnectionForLeg(l *leg) (*webrtc.PeerConnection, error
 		return nil, fmt.Errorf("add recvonly audio transceiver: %w", err)
 	}
 
-	outboundTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
-		"audio", "mediad-"+l.id,
-	)
-	if err != nil {
-		_ = pc.Close()
-
-		return nil, fmt.Errorf("new outbound track: %w", err)
-	}
-
-	sender, err := pc.AddTrack(outboundTrack)
-	if err != nil {
-		_ = pc.Close()
-
-		return nil, fmt.Errorf("add outbound track: %w", err)
-	}
-	l.mu.Lock()
-	l.outboundTrack = outboundTrack
-	if params := sender.GetParameters(); len(params.Encodings) > 0 {
-		l.outboundSSRC = params.Encodings[0].SSRC
-	}
-	l.mu.Unlock()
-
-	// Drain RTCP on the sender (required by Pion so the underlying buffers don't fill and
-	// stall) — mediad has nothing to act on here (PLI/FIR are video-only and audio-only mediad
-	// ignores them by construction, simply by never inspecting sender RTCP content).
-	go drainRTCP(sender)
-
 	legID := l.id
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		l.mu.Lock()
@@ -165,7 +140,83 @@ func (s *Session) newPeerConnectionForLeg(l *leg) (*webrtc.PeerConnection, error
 		s.readInboundTrack(legID, track)
 	})
 
+	// l.pc must be set BEFORE provisioning outbound tracks below — ensureOutboundTrack requires a
+	// non-nil l.pc to add a track against.
+	l.mu.Lock()
+	l.pc = pc
+	l.mu.Unlock()
+
+	for _, peer := range s.peerLegs(legID) {
+		if _, err := s.ensureOutboundTrack(l, peer.id); err != nil {
+			_ = pc.Close()
+			l.mu.Lock()
+			l.pc = nil
+			l.mu.Unlock()
+
+			return nil, fmt.Errorf("provision outbound track for peer %s: %w", peer.id, err)
+		}
+	}
+
 	return pc, nil
+}
+
+// ensureOutboundTrack lazily creates (or returns the already-existing) outbound
+// TrackLocalStaticRTP on l's PeerConnection carrying sourceLegID's forwarded audio — the "one
+// outbound track PER remote source" no-decode SFU design (a single mixed track would require
+// decoding Opus, which mediad forbids by construction). l.pc must already be non-nil; callers
+// only invoke this against a leg that HAS a PeerConnection (newPeerConnectionForLeg for a
+// brand-new PC, AddLeg for an already-connected peer gaining a new joiner).
+func (s *Session) ensureOutboundTrack(l *leg, sourceLegID string) (*outboundTrack, error) {
+	l.mu.Lock()
+	pc := l.pc
+	if ot, ok := l.outboundTracks[sourceLegID]; ok {
+		l.mu.Unlock()
+
+		return ot, nil
+	}
+	l.mu.Unlock()
+
+	if pc == nil {
+		return nil, fmt.Errorf("session: leg %s has no PeerConnection yet", l.id)
+	}
+
+	track, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		"audio", "mediad-"+sourceLegID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new outbound track for %s: %w", sourceLegID, err)
+	}
+
+	sender, err := pc.AddTrack(track)
+	if err != nil {
+		return nil, fmt.Errorf("add outbound track for %s: %w", sourceLegID, err)
+	}
+	// Drain RTCP on the sender (required by Pion so the underlying buffers don't fill and
+	// stall) — mediad has nothing to act on here (PLI/FIR are video-only and audio-only mediad
+	// ignores them by construction, simply by never inspecting sender RTCP content).
+	go drainRTCP(sender)
+
+	ot := &outboundTrack{track: track, sender: sender}
+	if params := sender.GetParameters(); len(params.Encodings) > 0 {
+		ot.ssrc = params.Encodings[0].SSRC
+	}
+
+	l.mu.Lock()
+	// Re-check under lock: a concurrent caller (e.g. AddLeg racing this leg's own OfferLeg) may
+	// have provisioned the same source's track first. Keep whichever won rather than
+	// last-writer-wins overwriting a track Pion already attached to the PC (that would orphan the
+	// loser's sender/goroutine with nothing referencing it).
+	if existing, ok := l.outboundTracks[sourceLegID]; ok {
+		l.mu.Unlock()
+		_ = pc.RemoveTrack(sender)
+
+		return existing, nil
+	}
+	l.outboundTracks[sourceLegID] = ot
+	l.mu.Unlock()
+
+	return ot, nil
 }
 
 func drainRTCP(sender *webrtc.RTPSender) {

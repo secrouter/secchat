@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,23 +124,24 @@ func (s *Session) finalize(forced bool) (Manifest, error) {
 	return manifest, nil
 }
 
-// mixLegs runs ffmpeg's amix over the two legs' Ogg files, delaying whichever leg started later
-// (per its StartOffsetMs) so the mixed output has both participants aligned in real time —
+// mixLegs runs ffmpeg's amix over N legs' Ogg files, delaying whichever legs started later (per
+// each one's StartOffsetMs) so the mixed output has every participant aligned in real time —
 // docs/plans/voice-contracts.md §2.4's "mixed file's own startOffsetMs is always 0 (ffmpeg's
-// amix output starts at the earliest leg, padding the other)". Returns the mixed file's
-// duration in ms (computed analytically from the two legs' offsets/durations rather than
-// re-probing the output, since ffmpeg's own timeline arithmetic is exactly what this mirrors).
-// Shared by the live finalize path (legs carry a *recorder.Leg) and remixFromDisk's crash-
-// recovery path (legs carry only a startOffsetMs field recovered from the offsets.json sidecar,
-// v3.1 suggested #6) — leg.legStartOffsetMs() abstracts the difference.
+// amix output starts at the earliest leg, padding the others)". Returns the mixed file's
+// duration in ms (computed analytically from the legs' offsets/durations rather than re-probing
+// the output, since ffmpeg's own timeline arithmetic is exactly what this mirrors). Shared by the
+// live finalize path (legs carry a *recorder.Leg) and remixFromDisk's crash-recovery path (legs
+// carry only a startOffsetMs field recovered from the offsets.json sidecar, v3.1 suggested #6) —
+// leg.legStartOffsetMs() abstracts the difference.
 func mixLegs(ffmpegPath string, legs []*leg, outPath string) (int64, error) {
-	if len(legs) < 1 || len(legs) > 2 {
-		return 0, fmt.Errorf("session: mix requires one or two legs, got %d", len(legs))
+	if len(legs) < 1 {
+		return 0, fmt.Errorf("session: mix requires at least one leg, got %d", len(legs))
 	}
 
-	// Solo self-DM voice memo: a single leg has nothing to mix — just transcode it to the playback
-	// file (same AAC output shape a 2-leg mix produces, so the manifest's mixed entry + the backend's
-	// ingest are identical for both).
+	// Solo self-DM voice memo (or an N-way call reduced to its last remaining leg): a single leg
+	// has nothing to mix — just transcode it to the playback file (same AAC output shape a multi-
+	// leg mix produces, so the manifest's mixed entry + the backend's ingest are identical either
+	// way).
 	if len(legs) == 1 {
 		l := legs[0]
 		//nolint:gosec // ffmpegPath is operator-configured; leg path is a server-generated session-dir filename
@@ -152,33 +154,52 @@ func mixLegs(ffmpegPath string, legs []*leg, outPath string) (int64, error) {
 		return l.durationMs, nil
 	}
 
-	a, b := legs[0], legs[1]
-	startA, startB := a.legStartOffsetMs(), b.legStartOffsetMs()
-	minStart := startA
-	if startB < minStart {
-		minStart = startB
+	starts := make([]int64, len(legs))
+	minStart := int64(math.MaxInt64)
+	for i, l := range legs {
+		starts[i] = l.legStartOffsetMs()
+		if starts[i] < minStart {
+			minStart = starts[i]
+		}
 	}
-	delayA := startA - minStart
-	delayB := startB - minStart
 
-	filter := fmt.Sprintf(
-		"[0:a]adelay=%d|%d[a0];[1:a]adelay=%d|%d[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0[aout]",
-		delayA, delayA, delayB, delayB,
-	)
+	args := make([]string, 0, 2+2*len(legs))
+	args = append(args, "-y")
+	for _, l := range legs {
+		args = append(args, "-i", l.path)
+	}
+
+	// N-input filter graph: per-leg adelay (each leg's real join-time offset, relative to
+	// whichever leg started earliest) feeding an N-way amix — the direct generalization of the
+	// fixed 2-input "[0:a]adelay=...[a0];[1:a]adelay=...[a1];[a0][a1]amix=inputs=2..." graph this
+	// replaces.
+	var filter strings.Builder
+	labels := make([]string, len(legs))
+	for i := range legs {
+		delay := starts[i] - minStart
+		label := fmt.Sprintf("a%d", i)
+		fmt.Fprintf(&filter, "[%d:a]adelay=%d|%d[%s];", i, delay, delay, label)
+		labels[i] = "[" + label + "]"
+	}
+	filter.WriteString(strings.Join(labels, ""))
+	fmt.Fprintf(&filter, "amix=inputs=%d:duration=longest:dropout_transition=0[aout]", len(legs))
+
+	args = append(args, "-filter_complex", filter.String(), "-map", "[aout]", "-c:a", "aac", outPath)
 
 	//nolint:gosec // ffmpegPath is operator-configured; leg paths are server-generated session-dir filenames
-	cmd := exec.Command(ffmpegPath, "-y", "-i", a.path, "-i", b.path, "-filter_complex", filter, "-map", "[aout]", "-c:a", "aac", outPath)
+	cmd := exec.Command(ffmpegPath, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return 0, fmt.Errorf("session: ffmpeg mix failed: %w: %s", err, stderr.String())
 	}
 
-	endA := startA + a.durationMs
-	endB := startB + b.durationMs
-	maxEnd := endA
-	if endB > maxEnd {
-		maxEnd = endB
+	maxEnd := int64(math.MinInt64)
+	for i, l := range legs {
+		end := starts[i] + l.durationMs
+		if end > maxEnd {
+			maxEnd = end
+		}
 	}
 
 	return maxEnd - minStart, nil
@@ -233,8 +254,8 @@ func (m *Manager) recoverFromDisk(sessionID string) (Manifest, error) {
 // Reuses the leg entries' own persisted Path/StartOffsetMs/DurationMs from the manifest — they're
 // already correct from the original finalize, unlike remixFromDisk's from-scratch
 // reconstruction (which exists for the no-manifest-at-all crash case and still re-probes/reads
-// the offsets sidecar). A manifest that already has a mixed entry, or doesn't have exactly two
-// leg entries, is returned unchanged (nothing to retry).
+// the offsets sidecar). A manifest that already has a mixed entry, or has no leg entries at all,
+// is returned unchanged (nothing to retry).
 func (m *Manager) remixIfMissing(sessionID, dir string, manifest Manifest) (Manifest, error) {
 	var legFiles []ManifestFile
 	for _, f := range manifest.Files {
@@ -247,7 +268,7 @@ func (m *Manager) remixIfMissing(sessionID, dir string, manifest Manifest) (Mani
 		}
 		legFiles = append(legFiles, f)
 	}
-	if len(legFiles) != 2 {
+	if len(legFiles) < 1 {
 		return manifest, nil // not the legs-present/mixed-missing shape this retry handles
 	}
 
@@ -315,7 +336,7 @@ func (m *Manager) remixFromDisk(sessionID, dir string) (Manifest, error) {
 		recovered = append(recovered, &leg{id: legID, path: p, durationMs: durationMs, startOffsetMs: startOffsetMs, rec: nil})
 	}
 
-	if len(recovered) == 2 {
+	if len(recovered) >= 1 {
 		mixedPath := filepath.Join(dir, mixedFileName)
 		if mixedDurationMs, err := mixLegs(m.cfg.FfmpegPath, recovered, mixedPath); err != nil {
 			slog.Error("mediad: recovery ffmpeg mix failed, finalizing with a legs-only manifest",

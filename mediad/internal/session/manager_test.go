@@ -14,15 +14,16 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 
 	return config.Config{
-		ControlAddr:     "127.0.0.1:0",
-		MediaAddr:       "127.0.0.1:0",
-		AdvertiseAddr:   "127.0.0.1",
-		Token:           "test-token",
-		RecordingsDir:   t.TempDir(),
-		FfmpegPath:      "ffmpeg",
-		SessionCap:      2,
-		ActiveDeadline:  time.Hour,
-		JanitorInterval: time.Hour,
+		ControlAddr:       "127.0.0.1:0",
+		MediaAddr:         "127.0.0.1:0",
+		AdvertiseAddr:     "127.0.0.1",
+		Token:             "test-token",
+		RecordingsDir:     t.TempDir(),
+		FfmpegPath:        "ffmpeg",
+		SessionCap:        2,
+		MaxLegsPerSession: 8,
+		ActiveDeadline:    time.Hour,
+		JanitorInterval:   time.Hour,
 	}
 }
 
@@ -61,8 +62,8 @@ func TestCreateSessionSingleLeg(t *testing.T) {
 	if st.Legs[0].LegID != "leg_alice" {
 		t.Fatalf("want leg_alice, got %q", st.Legs[0].LegID)
 	}
-	if peer := sess.peerLeg("leg_alice"); peer != nil {
-		t.Fatalf("a solo leg must have no forwarding peer, got %v", peer)
+	if peers := sess.peerLegs("leg_alice"); len(peers) != 0 {
+		t.Fatalf("a solo leg must have no forwarding peers, got %v", peers)
 	}
 }
 

@@ -39,7 +39,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 
 	s.mux.Handle("POST /sessions", s.auth(http.HandlerFunc(s.handleCreateSession)))
+	s.mux.Handle("POST /sessions/{id}/legs", s.auth(http.HandlerFunc(s.handleAddLeg)))
 	s.mux.Handle("POST /sessions/{id}/legs/{legId}/offer", s.auth(http.HandlerFunc(s.handleOfferLeg)))
+	s.mux.Handle("POST /sessions/{id}/legs/{legId}/renegotiate", s.auth(http.HandlerFunc(s.handleRenegotiateLeg)))
+	s.mux.Handle("POST /sessions/{id}/legs/{legId}/answer", s.auth(http.HandlerFunc(s.handleAnswerLeg)))
+	s.mux.Handle("DELETE /sessions/{id}/legs/{legId}", s.auth(http.HandlerFunc(s.handleRemoveLeg)))
 	s.mux.Handle("GET /sessions/{id}", s.auth(http.HandlerFunc(s.handleGetSession)))
 	s.mux.Handle("DELETE /sessions/{id}", s.auth(http.HandlerFunc(s.handleEndSession)))
 }
@@ -93,6 +97,12 @@ func mapSessionErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "session_cap_reached", "")
 	case errors.Is(err, session.ErrSessionEnded):
 		writeError(w, http.StatusGone, "session_ended", "")
+	case errors.Is(err, session.ErrLegAlreadyExists):
+		writeError(w, http.StatusConflict, "leg_already_exists", "")
+	case errors.Is(err, session.ErrTooManyLegs):
+		writeError(w, http.StatusConflict, "session_full", "")
+	case errors.Is(err, session.ErrLegNotConnected):
+		writeError(w, http.StatusConflict, "leg_not_connected", "")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 	}
