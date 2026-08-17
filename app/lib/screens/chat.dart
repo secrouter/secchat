@@ -1720,7 +1720,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final showCallTab = isCallTabPhase(_callController.snapshot.phase);
     final body = showCallTab
         ? IndexedStack(
+            // StackFit.expand gives both children the SAME tight, fill-the-body
+            // constraints the chat gets when it's the Scaffold body directly --
+            // without it the default loose sizing lets the chat lay out at its
+            // content size (top-left, not filling), so it looked off-centre while
+            // / after a call. topCenter keeps it centred if a child is smaller.
             index: _callTab,
+            sizing: StackFit.expand,
+            alignment: Alignment.topCenter,
             children: [chatBody, CallScreen(controller: _callController, labelForSub: _labelForSub)],
           )
         : chatBody;
