@@ -133,8 +133,23 @@ func (s *Session) finalize(forced bool) (Manifest, error) {
 // recovery path (legs carry only a startOffsetMs field recovered from the offsets.json sidecar,
 // v3.1 suggested #6) — leg.legStartOffsetMs() abstracts the difference.
 func mixLegs(ffmpegPath string, legs []*leg, outPath string) (int64, error) {
-	if len(legs) != 2 {
-		return 0, fmt.Errorf("session: mix requires exactly 2 legs, got %d", len(legs))
+	if len(legs) < 1 || len(legs) > 2 {
+		return 0, fmt.Errorf("session: mix requires one or two legs, got %d", len(legs))
+	}
+
+	// Solo self-DM voice memo: a single leg has nothing to mix — just transcode it to the playback
+	// file (same AAC output shape a 2-leg mix produces, so the manifest's mixed entry + the backend's
+	// ingest are identical for both).
+	if len(legs) == 1 {
+		l := legs[0]
+		//nolint:gosec // ffmpegPath is operator-configured; leg path is a server-generated session-dir filename
+		cmd := exec.Command(ffmpegPath, "-y", "-i", l.path, "-c:a", "aac", outPath)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return 0, fmt.Errorf("session: ffmpeg transcode failed: %w: %s", err, stderr.String())
+		}
+		return l.durationMs, nil
 	}
 
 	a, b := legs[0], legs[1]

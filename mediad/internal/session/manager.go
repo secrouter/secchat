@@ -168,10 +168,23 @@ func (m *Manager) CreateSession(callID string, legs []LegSpec) (*Session, error)
 
 	sessionID := "sess_" + uuid.NewString()
 	dir := filepath.Join(m.cfg.RecordingsDir, sessionID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	// 0770, not 0750: the recordings volume is SHARED with the secchat backend, which ingests +
+	// transcribes + deletes these files as a DIFFERENT uid. mediad runs with secchat's gid (compose
+	// `user: "<uid>:<secchat-gid>"`), so group-rwx on the session dir lets secchat traverse, read,
+	// and clean up. Without the group bits secchat hits EACCES on every ingest/transcribe read.
+	if err := os.MkdirAll(dir, 0o770); err != nil {
 		release()
 
 		return nil, fmt.Errorf("session: create session dir: %w", err)
+	}
+	// MkdirAll honors the process umask (typically 022), which strips the group-write bit and would
+	// leave secchat unable to CLEAN UP the session dir after transcription (deleteSessionDir → EACCES,
+	// which then mis-marks the just-posted transcript as failed). Chmod is umask-independent, so the
+	// shared group (secchat's gid, see the compose `user:`) gets full rwx.
+	if err := os.Chmod(dir, 0o770); err != nil {
+		release()
+
+		return nil, fmt.Errorf("session: chmod session dir: %w", err)
 	}
 
 	s, err := newSession(m, sessionID, callID, dir, legs, m.now())
