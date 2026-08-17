@@ -57,6 +57,7 @@ import type {
   AppendMessageInput,
   Attachment,
   AuditEvent,
+  CallParticipantRow,
   CallRecordingState,
   CallRow,
   Channel,
@@ -760,6 +761,38 @@ export class MemoryStore implements Store, SessionStore {
    * exists on the shared volume (mediad-client.ts's reconcileUnclaimedSessions). */
   async listUnclaimedEndedCalls(): Promise<CallRow[]> {
     return [...this.#callsById.values()].filter((c) => c.endedAt && !c.recordingAttachmentId);
+  }
+
+  // ── Call participants (db/migrations/0021_call_participants.sql) ─────────────────────────────
+  #callParticipants = new Map<Id, CallParticipantRow[]>(); // callId -> rows, join order
+
+  async addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow> {
+    let rows = this.#callParticipants.get(input.callId);
+    if (!rows) {
+      rows = [];
+      this.#callParticipants.set(input.callId, rows);
+    }
+    const existing = rows.find((r) => r.sub === input.sub);
+    const joinedAt = new Date().toISOString();
+    if (existing) {
+      // A rejoin (group participant who left and came back) — refresh in place.
+      existing.legId = input.legId;
+      existing.joinedAt = joinedAt;
+      existing.leftAt = undefined;
+      return existing;
+    }
+    const row: CallParticipantRow = { callId: input.callId, sub: input.sub, legId: input.legId, joinedAt };
+    rows.push(row);
+    return row;
+  }
+
+  async setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void> {
+    const row = this.#callParticipants.get(callId)?.find((r) => r.sub === sub);
+    if (row) row.leftAt = leftAt;
+  }
+
+  async listCallParticipants(callId: Id): Promise<CallParticipantRow[]> {
+    return [...(this.#callParticipants.get(callId) ?? [])];
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a

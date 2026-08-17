@@ -15,3 +15,13 @@
 
 export const LEG_CALLER_ID = "leg_caller";
 export const LEG_CALLEE_ID = "leg_callee";
+
+/** Group-call (N-participant, relayed-only) leg id: `leg_<sub>` — fixed per participant like
+ * LEG_CALLER_ID/LEG_CALLEE_ID above (never random, same reconciliation-without-a-side-mapping
+ * reasoning), but keyed by sub rather than a fixed caller/callee role since a group call has no
+ * caller/callee pair — any member can start it, any member can join it. Still a backend-side
+ * routing label (§2.3/§11), never a client credential. Not used by the 1:1 DM/solo paths, which
+ * keep the two fixed constants above unchanged. */
+export function groupLegId(sub: string): string {
+  return `leg_${sub}`;
+}

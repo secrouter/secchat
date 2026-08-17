@@ -12,12 +12,16 @@
 // mediad session directory via `CallRow.mediadSessionId` (db/migrations/0020_calls_mediad_session_id.sql,
 // persisted by `calls/registry.ts`'s `accept()` the moment `createSession` succeeds — well before the
 // call ever ends) — no guessing, unlike the earlier scaffold that refused to match at all without it.
-// Per-leg files are identified by the FIXED `LEG_CALLER_ID`/`LEG_CALLEE_ID` labels (calls/leg-ids.ts)
-// rather than a random id, so which finalize-manifest file belongs to which participant is always
-// derivable from the `calls` row alone (`caller`/`callee`), no extra persisted mapping needed. The
-// re-ingest itself reuses `endSession` (idempotent per voice-contracts.md §2.4: "a second DELETE on
-// an already-ended session returns the SAME manifest... this is what backs the backend's startup
-// reconciliation sweep") rather than reading `manifest.json` off disk by hand.
+// Per-leg files are identified by `call_participants` (db/migrations/0021_call_participants.sql —
+// see src/types.ts's `CallParticipantRow` doc comment), populated by the live pipeline the moment
+// each leg exists (well before the call ever ends), so which finalize-manifest file belongs to which
+// participant is always derivable without guessing — generalizes the earlier fixed
+// `LEG_CALLER_ID`/`LEG_CALLEE_ID` (calls/leg-ids.ts) + `calls.caller`/`calls.callee` scheme to an
+// arbitrary N-participant (group) call; those two constants are still what the 1:1 DM/solo paths
+// persist their leg ids as, just no longer the ONLY place this file looks. The re-ingest itself
+// reuses `endSession` (idempotent per voice-contracts.md §2.4: "a second DELETE on an already-ended
+// session returns the SAME manifest... this is what backs the backend's startup reconciliation
+// sweep") rather than reading `manifest.json` off disk by hand.
 
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -27,7 +31,6 @@ import { formatTranscript, mergeTranscripts, type LegTranscript, type Transcript
 import type { TranscribeClient } from "../transcribe/client.ts";
 import type { DlpPolicy } from "../dlp/policy.ts";
 import type { MarkingPolicy } from "../marking/policy.ts";
-import { LEG_CALLEE_ID, LEG_CALLER_ID } from "./leg-ids.ts";
 import {
   editPendingIfClaimed,
   postPendingRecordingMessage,
@@ -144,9 +147,25 @@ export interface MediadFinalizeManifest {
 
 export interface MediadClient {
   createSession(input: MediadCreateSessionInput): Promise<{ sessionId: string }>;
+  /** Group calls only (voice-call plan's group-calling extension): add a new leg to an ALREADY-LIVE
+   * session — a participant joining. Wires the leg into the SFU's existing tracks; the caller is
+   * still responsible for separately renegotiating every OTHER already-connected leg (below) so
+   * their downstream actually picks up the new leg's track. */
+  addLeg(sessionId: string, leg: MediadLeg): Promise<void>;
+  /** Group calls only: remove a leg from a still-live session — a participant leaving while others
+   * remain (as opposed to `endSession`, which tears down the whole session for the LAST leg out). */
+  removeLeg(sessionId: string, legId: string): Promise<void>;
   /** Broker one leg's client SDP OFFER to mediad; returns its single-response ANSWER (§2.2's
    * non-trickle exchange — no candidate trickling crosses this client). */
   offerLeg(sessionId: string, legId: string, offerSdp: string): Promise<MediadSdpAnswer>;
+  /** Group calls only: ask mediad for a FRESH, SERVER-initiated offer for one already-connected leg
+   * (a roster change elsewhere — another leg was added/removed and this leg's downstream tracks need
+   * to change). The caller relays this offer to the participant via a server-sent `call_sdp` frame
+   * and brokers their answer back through `answerLeg` once it arrives. */
+  renegotiate(sessionId: string, legId: string): Promise<{ sdp: string }>;
+  /** Group calls only: complete a server-initiated renegotiation — the participant's answer to the
+   * offer `renegotiate` produced. */
+  answerLeg(sessionId: string, legId: string, answerSdp: string): Promise<void>;
   getState(sessionId: string): Promise<MediadSessionState>;
   /** Ends the session (mediad finalizes: reorder/dedup-buffered OGG close + ffmpeg mix, §2.3) and
    * returns the finalize manifest. Pure HTTP — attachment ingest is the CALLER's job (see
@@ -236,14 +255,26 @@ export function makeMediadClient(deps: MediadClientDeps): MediadClient {
       }
       throw new MediadError(response.status, parsed.error ?? `http_${response.status}`, parsed.detail);
     }
-    // DELETE/GET with a 204 (no body) would fail JSON parsing — every mediad response this client
-    // makes DOES carry a body (§2), so parse unconditionally; a truly empty 200 is a protocol bug
-    // mediad shouldn't produce, not something to silently paper over here.
+    // Most mediad responses carry a JSON body (§2) — parsed unconditionally. `answerLeg`/`removeLeg`
+    // (the group-calling extension's `POST .../answer` / `DELETE .../legs/{legId}`) are the two
+    // exceptions: mediad answers those with a bare `204 No Content`, which has no body to parse —
+    // `.json()` on an empty body throws, so a 204 short-circuits to `undefined` instead. Every other
+    // endpoint this client calls always carries a body; a truly empty 200 elsewhere would be a
+    // protocol bug mediad shouldn't produce, not something to silently paper over here.
+    if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 
   async function createSession(input: MediadCreateSessionInput): Promise<{ sessionId: string }> {
     return request<{ sessionId: string }>("POST", "/sessions", input);
+  }
+
+  async function addLeg(sessionId: string, leg: MediadLeg): Promise<void> {
+    await request<unknown>("POST", `/sessions/${encodeURIComponent(sessionId)}/legs`, leg);
+  }
+
+  async function removeLeg(sessionId: string, legId: string): Promise<void> {
+    await request<unknown>("DELETE", `/sessions/${encodeURIComponent(sessionId)}/legs/${encodeURIComponent(legId)}`);
   }
 
   async function offerLeg(sessionId: string, legId: string, offerSdp: string): Promise<MediadSdpAnswer> {
@@ -253,6 +284,21 @@ export function makeMediadClient(deps: MediadClientDeps): MediadClient {
       { sdp: offerSdp },
     );
     return { legId, sdp: res.sdp };
+  }
+
+  async function renegotiate(sessionId: string, legId: string): Promise<{ sdp: string }> {
+    return request<{ sdp: string }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/legs/${encodeURIComponent(legId)}/renegotiate`,
+    );
+  }
+
+  async function answerLeg(sessionId: string, legId: string, answerSdp: string): Promise<void> {
+    await request<unknown>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/legs/${encodeURIComponent(legId)}/answer`,
+      { sdp: answerSdp },
+    );
   }
 
   async function getState(sessionId: string): Promise<MediadSessionState> {
@@ -282,14 +328,19 @@ export function makeMediadClient(deps: MediadClientDeps): MediadClient {
    * `pendingMessageId` — the message `reconcileOneCall` already claimed the recording attachment
    * onto (undefined if that claim itself failed or `deps.pendingRecording` isn't configured) — is
    * edited in place to the final outcome at every exit, mirroring `runPostCallPipeline`'s own
-   * `editPendingIfClaimed` calls exactly (same shared helper, calls/pending-recording.ts). */
+   * `editPendingIfClaimed` calls exactly (same shared helper, calls/pending-recording.ts).
+   *
+   * Reads `call_participants` (db/migrations/0021_call_participants.sql) for the leg->sub map
+   * instead of the fixed LEG_CALLER_ID/LEG_CALLEE_ID constants + `call.caller`/`call.callee` — this
+   * generalizes reconciliation to an arbitrary N-participant (group) call, not just a 1:1 DM pair;
+   * `transcription.store` is a full `Store`, so this is the same table the live pipeline populates. */
   async function kickReconciledTranscription(call: CallRow, manifest: MediadFinalizeManifest, pendingMessageId: Id | undefined): Promise<void> {
     const transcription = deps.transcription;
     if (!transcription || !deps.recordingsDir || !call.mediadSessionId) return;
 
-    const callerFile = manifest.files.find((f) => f.legId === LEG_CALLER_ID);
-    const calleeFile = manifest.files.find((f) => f.legId === LEG_CALLEE_ID);
-    if (!callerFile || !calleeFile) {
+    const participants = await transcription.store.listCallParticipants(call.id);
+    const legFiles = participants.map((p) => ({ sub: p.sub, legId: p.legId, file: manifest.files.find((f) => f.legId === p.legId) }));
+    if (legFiles.length === 0 || legFiles.some((l) => !l.file)) {
       console.error(`mediad-client: reconciled session ${call.mediadSessionId} (call ${call.id}) is missing a leg file — no transcript`);
       if (deps.pendingRecording) {
         await editPendingIfClaimed(deps.pendingRecording, call, pendingMessageId, "🎙️ Recording stored — transcription failed (missing leg audio).");
@@ -299,18 +350,15 @@ export function makeMediadClient(deps: MediadClientDeps): MediadClient {
     const sessionDir = join(deps.recordingsDir, call.mediadSessionId);
 
     try {
-      const [callerResult, calleeResult] = await Promise.all([
-        transcription.transcribe.transcribeLeg({ legId: LEG_CALLER_ID, filePath: join(sessionDir, callerFile.path) }),
-        transcription.transcribe.transcribeLeg({ legId: LEG_CALLEE_ID, filePath: join(sessionDir, calleeFile.path) }),
-      ]);
-      const [callerUser, calleeUser] = await Promise.all([
-        transcription.store.getUser(call.caller),
-        transcription.store.getUser(call.callee),
-      ]);
-      const legs: LegTranscript[] = [
-        { speaker: callerUser?.displayName || call.caller, startOffsetMs: callerFile.startOffsetMs, result: callerResult },
-        { speaker: calleeUser?.displayName || call.callee, startOffsetMs: calleeFile.startOffsetMs, result: calleeResult },
-      ];
+      const results = await Promise.all(
+        legFiles.map((l) => transcription.transcribe.transcribeLeg({ legId: l.legId, filePath: join(sessionDir, l.file!.path) })),
+      );
+      const users = await Promise.all(legFiles.map((l) => transcription.store.getUser(l.sub)));
+      const legs: LegTranscript[] = legFiles.map((l, i) => ({
+        speaker: users[i]?.displayName || l.sub,
+        startOffsetMs: l.file!.startOffsetMs,
+        result: results[i]!,
+      }));
       const turns = mergeTranscripts(legs);
       const header: TranscriptHeaderInput = {
         callDurationMs: call.endedAt ? Date.parse(call.endedAt) - Date.parse(call.startedAt) : 0,
@@ -433,5 +481,5 @@ export function makeMediadClient(deps: MediadClientDeps): MediadClient {
     }
   }
 
-  return { createSession, offerLeg, getState, endSession, health, reconcileUnclaimedSessions };
+  return { createSession, addLeg, removeLeg, offerLeg, renegotiate, answerLeg, getState, endSession, health, reconcileUnclaimedSessions };
 }

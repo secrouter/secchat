@@ -40,8 +40,8 @@ import {
 import type { MediadClient, MediadFinalizeManifest } from "./mediad-client.ts";
 import { formatTranscript, mergeTranscripts, type LegTranscript, type MergedTurn, type TranscriptHeaderInput } from "../transcribe/merge.ts";
 import type { TranscribeClient } from "../transcribe/client.ts";
-import type { AddAttachmentInput, Attachment, CallMode, CallRecordingState, Id, Store } from "../types.ts";
-import { LEG_CALLEE_ID, LEG_CALLER_ID } from "./leg-ids.ts";
+import type { AddAttachmentInput, Attachment, CallMode, CallParticipantRow, CallRecordingState, Id, Store } from "../types.ts";
+import { groupLegId, LEG_CALLEE_ID, LEG_CALLER_ID } from "./leg-ids.ts";
 
 /** Injected per-connection send (ws/hub.ts's `Hub.sendToConnection`) — CallRegistry never touches
  * a raw socket itself, matching how the rest of the backend takes its transport by injection
@@ -160,6 +160,22 @@ export interface LiveCall {
    * broadcasts even if mediad's actual state happens to already be `"none"` (the client's initial
    * assumption). Never set for a p2p call (mediad is never involved). */
   recordingKnown?: CallRecordingState;
+
+  // ── Group calls (N participants, `kind:"human"` channel, join-on-demand) ───────────────────────
+  /** True for a group call started via `startGroup`/joined via `joinGroup`, as opposed to a 1:1 DM
+   * call (`invite`/`accept`) or a solo self-DM memo (`startSolo`). When set, `caller`/`callee`/
+   * `callerConnId`/`calleeConnId`/`legCaller`/`legCallee` above are VESTIGIAL (mirrors `startSolo`'s
+   * `callee = caller` convention — `caller` is whoever started the call, `callee` equals `caller`,
+   * `callerConnId` is the starter's connection) — `participants` below is the actual source of truth
+   * for who's on the call, their bound connection, and their mediad leg id. Always `mode: "relayed"`/
+   * `consent: true` (no p2p mesh for a group call). */
+  group?: boolean;
+  /** GROUP calls only — the live participant set, keyed by sub (one entry per participant currently
+   * on the call; a participant who left has their entry removed here but survives as a
+   * `call_participants` row with `leftAt` stamped, for the post-call pipeline). Each participant's
+   * mediad leg id is `groupLegId(sub)` (`leg_<sub>`, calls/leg-ids.ts) — NOT the DM/solo path's fixed
+   * LEG_CALLER_ID/LEG_CALLEE_ID constants, since a group call has more than two possible legs. */
+  participants?: Map<string, { connId: string; legId: string; joinedAt: number }>;
 }
 
 export interface CallRegistry {
@@ -226,6 +242,38 @@ export interface CallRegistry {
    * `invite` needs and a reconnecting client's state read (see http/server.ts's `GET /calls/:id`). */
   getActiveCall(channelId: Id): LiveCall | undefined;
 
+  // ── Group calls (N participants, `kind:"human"` channel, join-on-demand) ───────────────────────
+
+  /** A member -> server: start a group call on a `kind:"human"` channel (channel membership
+   * required). Relayed-only (no p2p mesh, D5's p2p path is DM-only) — fails LOUD if mediad is
+   * unavailable (`recording_unavailable`), the same "no live conversation to keep alive without it"
+   * posture as `startSolo`, not the 1:1 DM path's fail-open-calling downgrade. Rejected
+   * (`call_active`) if the channel already has a live call — a member should `joinGroup` it instead.
+   * Posts a content-free "call started — tap to join" system chat line (mirrors the missed-call /
+   * declined-call notices) and creates the durable `CallRow` immediately (`caller`/`callee` both the
+   * starter's sub — vestigial, see `LiveCall.group`'s doc comment). Throws {@link CallSignalError} on
+   * a validation/policy rejection. */
+  startGroup(input: { channelId: Id; connId: string; sub: string }): Promise<LiveCall>;
+
+  /** A member -> server: join an already-live group call. Adds a leg (MediadClient.addLeg), sends
+   * the joiner a `call_roster` snapshot, fans a `call_participant_joined` out to every OTHER bound
+   * participant connection, and kicks off server-orchestrated renegotiation
+   * (MediadClient.renegotiate -> a server-sent `call_sdp` offer -> the participant's `call_sdp`
+   * answer, relayed back via `relay()` -> MediadClient.answerLeg) for every OTHER live leg so their
+   * downstream picks up the new participant's track. Throws {@link CallSignalError} if there's no
+   * live group call in this channel, the caller isn't a member, they're already on the call, or
+   * they're busy in another call. */
+  joinGroup(input: { channelId: Id; connId: string; sub: string }): Promise<LiveCall>;
+
+  /** A participant -> server: leave a group call they're on. A thin wrapper over `end()`'s group
+   * branch (LEAVE when other participants remain: drop the leg, fan `call_participant_left` out,
+   * MediadClient.removeLeg, renegotiate the rest; LAST-OUT when they're the last one: tear the whole
+   * call down and run the post-call pipeline) — exposed as its own method for callers (ws/hub.ts's
+   * `call_end` handling on a group channel) that want the group-specific name rather than reaching
+   * for the shared `end()` entry point directly. No-op if the caller isn't currently on this
+   * channel's live call. */
+  leaveGroup(input: { channelId: Id; connId: string; sub: string }): Promise<void>;
+
   /** Sweeps every ringing call whose deadline has passed: ends it, audits `call.missed`, posts the
    * `call_missed` chat line into the DM (a plain, content-free system message — no DLP scan needed,
    * matches the plan's "a normal governed chat message" framing without needing governedCallAppend's
@@ -251,6 +299,16 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     const live = liveCalls.get(channelId);
     if (!live) return;
     liveCalls.delete(channelId);
+    if (live.group) {
+      // Group calls: `caller`/`callee` are vestigial (see LiveCall.group's doc comment) and MUST
+      // NOT be used to clear busyBySub/connToChannel here — `endGroupParticipant` already cleared
+      // every real participant's entry as they left, one at a time, well before this (LAST-OUT-only)
+      // call runs. Blindly deleting by `live.caller`/`live.callee` (the starter's sub) would be
+      // WRONG once the starter has already left this call and since started a DIFFERENT one
+      // elsewhere: their busyBySub entry would then belong to that other call, and this delete would
+      // incorrectly free them as "not busy" out from under it.
+      return;
+    }
     connToChannel.delete(live.callerConnId);
     if (live.calleeConnId) connToChannel.delete(live.calleeConnId);
     busyBySub.delete(live.caller);
@@ -374,6 +432,11 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     } catch (err) {
       console.error(`calls/registry: setCallMediadSessionId failed for solo call ${row.id}:`, describeError(err));
     }
+    try {
+      await deps.store.addCallParticipant({ callId: row.id, sub, legId: LEG_CALLER_ID });
+    } catch (err) {
+      console.error(`calls/registry: addCallParticipant failed for solo call ${row.id}:`, describeError(err));
+    }
     await deps.store.appendAudit({ actor: sub, action: "call.start", target: channelId, detail: "solo" });
     return live;
   }
@@ -439,6 +502,15 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       } catch (err) {
         console.error(`calls/registry: setCallMediadSessionId failed for call ${row.id}:`, describeError(err));
       }
+      // Generalizes the leg->sub map (db/migrations/0021_call_participants.sql) that crash-recovery
+      // reconciliation and the post-call pipeline read instead of the fixed caller/callee pair —
+      // never blocks accept() on failure, same posture as setCallMediadSessionId above.
+      try {
+        await deps.store.addCallParticipant({ callId: row.id, sub: live.caller, legId: legCaller! });
+        await deps.store.addCallParticipant({ callId: row.id, sub: live.callee, legId: legCallee! });
+      } catch (err) {
+        console.error(`calls/registry: addCallParticipant failed for call ${row.id}:`, describeError(err));
+      }
     }
     await deps.store.appendAudit({
       actor: live.callee,
@@ -466,10 +538,259 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     return live;
   }
 
+  // ── Group calls (N participants, `kind:"human"` channel, join-on-demand) ───────────────────────
+
+  async function startGroup(input: { channelId: Id; connId: string; sub: string }): Promise<LiveCall> {
+    const { channelId, connId, sub } = input;
+
+    const channel = await deps.store.getChannel(channelId);
+    if (!channel || channel.kind !== "human") throw new CallSignalError("not_group_channel", "group calls are for channels only");
+    const members = (await deps.store.listMembers(channelId)).filter((m) => m.memberType === "user").map((m) => m.memberRef);
+    if (!members.includes(sub)) throw new CallSignalError("not_member", "you are not a member of this channel");
+
+    if (liveCalls.get(channelId)) throw new CallSignalError("call_active", "a call is already active in this channel — join it instead");
+    const busy = busyBySub.get(sub);
+    if (busy && busy !== channelId) throw new CallSignalError("user_busy", "you're already in a call");
+
+    // Relayed-only, fail LOUD (no p2p mesh, no fail-open-calling downgrade) — same "no live
+    // conversation to keep alive without it" reasoning as `startSolo`.
+    if (!deps.mediad) throw new CallSignalError("recording_unavailable", "server-side calling is not configured");
+    const healthy = await deps.mediad.health().catch(() => false);
+    if (!healthy) throw new CallSignalError("recording_unavailable", "the calling service is unavailable");
+
+    const legId = groupLegId(sub);
+    let session: { sessionId: string };
+    try {
+      session = await deps.mediad.createSession({ callId: channelId, legs: [{ legId, sub }] });
+    } catch (err) {
+      throw new CallSignalError("recording_unavailable", `could not start a call session: ${describeError(err)}`);
+    }
+
+    const live: LiveCall = {
+      channelId,
+      caller: sub, // vestigial — see LiveCall.group's doc comment
+      callee: sub,
+      state: "active",
+      wantRecording: true,
+      group: true,
+      mode: "relayed",
+      consent: true,
+      callerConnId: connId,
+      mediadSessionId: session.sessionId,
+      participants: new Map([[sub, { connId, legId, joinedAt: deps.now() }]]),
+    };
+    liveCalls.set(channelId, live);
+    connToChannel.set(connId, channelId);
+    busyBySub.set(sub, channelId);
+
+    const row = await deps.store.createCall({ channelId, caller: sub, callee: sub, consent: true, mode: "relayed" });
+    live.callId = row.id;
+    try {
+      await deps.store.setCallMediadSessionId(row.id, session.sessionId);
+    } catch (err) {
+      console.error(`calls/registry: setCallMediadSessionId failed for group call ${row.id}:`, describeError(err));
+    }
+    try {
+      await deps.store.addCallParticipant({ callId: row.id, sub, legId });
+    } catch (err) {
+      console.error(`calls/registry: addCallParticipant failed for group call ${row.id}:`, describeError(err));
+    }
+
+    await deps.store.appendAudit({ actor: sub, action: "call.start", target: channelId, detail: "group" });
+
+    // "call started — tap to join" — a content-free system chat line, same posture as the
+    // missed-call/declined-call notices (no DLP scan needed, fixed text).
+    const marking = await resolveChannelMarking(channelId);
+    const content = "📞 Call started — tap to join.";
+    const posted = await deps.store.appendMessage({ channelId, authorRef: "system", authorType: "system", content, marking });
+    deps.broadcast(channelId, { type: "message", message: { ...posted, content } });
+
+    return live;
+  }
+
+  async function joinGroup(input: { channelId: Id; connId: string; sub: string }): Promise<LiveCall> {
+    const { channelId, connId, sub } = input;
+    const live = liveCalls.get(channelId);
+    if (!live || !live.group || live.state !== "active") throw new CallSignalError("not_active", "no active call to join in this channel");
+    const participants = live.participants!;
+
+    const members = (await deps.store.listMembers(channelId)).filter((m) => m.memberType === "user").map((m) => m.memberRef);
+    if (!members.includes(sub)) throw new CallSignalError("not_member", "you are not a member of this channel");
+    if (participants.has(sub)) throw new CallSignalError("already_in_call", "you are already on this call");
+    const busy = busyBySub.get(sub);
+    if (busy && busy !== channelId) throw new CallSignalError("user_busy", "you're already in a call");
+    if (!deps.mediad || !live.mediadSessionId) throw new CallSignalError("recording_unavailable", "the calling service is unavailable");
+
+    const legId = groupLegId(sub);
+    try {
+      await deps.mediad.addLeg(live.mediadSessionId, { legId, sub });
+    } catch (err) {
+      throw new CallSignalError("join_failed", `could not add you to the call: ${describeError(err)}`);
+    }
+
+    participants.set(sub, { connId, legId, joinedAt: deps.now() });
+    connToChannel.set(connId, channelId);
+    busyBySub.set(sub, channelId);
+
+    if (live.callId) {
+      try {
+        await deps.store.addCallParticipant({ callId: live.callId, sub, legId });
+      } catch (err) {
+        console.error(`calls/registry: addCallParticipant failed for call ${live.callId}:`, describeError(err));
+      }
+    }
+    await deps.store.appendAudit({ actor: sub, action: "call.participant_joined", target: live.callId ?? channelId });
+
+    // Roster snapshot to the joiner (everyone currently on the call, including themselves).
+    deps.send(connId, { type: "call_roster", channelId, participants: [...participants.keys()].map((s) => ({ sub: s })) });
+
+    // Announce the join to every OTHER bound participant connection.
+    const joinedFrame = { type: "call_participant_joined", channelId, sub };
+    for (const [otherSub, p] of participants) {
+      if (otherSub !== sub) deps.send(p.connId, joinedFrame);
+    }
+
+    // Server-orchestrated renegotiation: every OTHER live leg gets a fresh mediad offer so its
+    // downstream picks up the new participant's track. The corresponding answer arrives later via a
+    // normal `call_sdp` frame from that connection, handled by `relayGroup`'s "answer" branch.
+    void renegotiateOthers(live, sub).catch((err) => {
+      console.error(`calls/registry: renegotiation after join failed for call ${live.callId}:`, describeError(err));
+    });
+
+    return live;
+  }
+
+  /** Ask mediad for a fresh offer for every participant OTHER than `exceptSub` and push it to their
+   * bound connection as a server-initiated `call_sdp` offer (§ Group calls' renegotiation
+   * orchestration) — fire-and-forget per leg; one leg's renegotiation failing must not block the
+   * others (logged, not thrown). The matching answer, once the client sends it, is brokered back to
+   * mediad by `relayGroup`'s "answer" branch — this function only sends the offer half. */
+  async function renegotiateOthers(live: LiveCall, exceptSub: string): Promise<void> {
+    if (!deps.mediad || !live.mediadSessionId || !live.participants) return;
+    const mediad = deps.mediad;
+    const sessionId = live.mediadSessionId;
+    for (const [sub, p] of live.participants) {
+      if (sub === exceptSub) continue;
+      try {
+        const offer = await mediad.renegotiate(sessionId, p.legId);
+        deps.send(p.connId, { type: "call_sdp", channelId: live.channelId, sdpType: "offer", sdp: offer.sdp });
+      } catch (err) {
+        console.error(`calls/registry: renegotiate leg ${p.legId} failed for call ${live.callId}:`, describeError(err));
+      }
+    }
+  }
+
+  /** `relay()`'s group branch: relayed-only (no candidate trickling, no p2p — same as a 1:1 relayed
+   * call), but `call_sdp` is now genuinely bidirectional per-leg (see types.ts's `CallSdpFrame` doc
+   * comment) — an "offer" from a participant is their OWN leg's initial offer (brokered exactly like
+   * a 1:1 relayed call's offer); an "answer" is their response to a SERVER-initiated renegotiation
+   * offer (`renegotiateOthers`, above), brokered back to mediad via `answerLeg`. */
+  async function relayGroup(live: LiveCall, fromConnId: string, frame: unknown): Promise<void> {
+    if (!live.participants || !deps.mediad || !live.mediadSessionId) return;
+    let fromSub: string | undefined;
+    let fromLegId: string | undefined;
+    for (const [sub, p] of live.participants) {
+      if (p.connId === fromConnId) {
+        fromSub = sub;
+        fromLegId = p.legId;
+        break;
+      }
+    }
+    if (!fromSub || !fromLegId) return; // unbound connection for this call — drop, never forward
+
+    const f = frame as { type?: unknown; sdpType?: unknown; sdp?: unknown };
+    if (f.type !== "call_sdp" || typeof f.sdp !== "string") return; // no candidate trickling for group
+
+    if (f.sdpType === "offer") {
+      try {
+        const answer = await deps.mediad.offerLeg(live.mediadSessionId, fromLegId, f.sdp);
+        deps.send(fromConnId, { type: "call_sdp", channelId: live.channelId, sdpType: "answer", sdp: answer.sdp });
+      } catch (err) {
+        deps.send(fromConnId, { type: "call_error", channelId: live.channelId, error: "mediad_broker_failed", detail: describeError(err) });
+      }
+      return;
+    }
+
+    if (f.sdpType === "answer") {
+      try {
+        await deps.mediad.answerLeg(live.mediadSessionId, fromLegId, f.sdp);
+      } catch (err) {
+        console.error(`calls/registry: answerLeg failed for call ${live.callId} leg ${fromLegId}:`, describeError(err));
+      }
+      return;
+    }
+  }
+
+  /** `end()`'s group branch, shared by an explicit `leaveGroup`/`call_end`, a socket drop
+   * (`untrackConnection`), and — indirectly — nothing else (a group call never rings, so there's no
+   * "decline"/timeout path here). LEAVE (participants remain): drops the leg, fans
+   * `call_participant_left` out, removes the leg from mediad, and renegotiates the rest.
+   * LAST-OUT (this was the only participant left): tears down like a 1:1 call ending — stamps
+   * `endCall`, audits `call.end`, and runs the post-call pipeline. */
+  async function endGroupParticipant(live: LiveCall, sub: string, reason: "hangup" | "timeout" | "disconnect"): Promise<void> {
+    const participants = live.participants!;
+    const p = participants.get(sub);
+    if (!p) return; // not currently on this call — no-op (a race with an already-processed leave)
+
+    participants.delete(sub);
+    connToChannel.delete(p.connId);
+    busyBySub.delete(sub);
+
+    if (live.callId) {
+      try {
+        await deps.store.setCallParticipantLeft(live.callId, sub, new Date(deps.now()).toISOString());
+      } catch (err) {
+        console.error(`calls/registry: setCallParticipantLeft failed for call ${live.callId}:`, describeError(err));
+      }
+    }
+    await deps.store.appendAudit({ actor: sub, action: "call.participant_left", target: live.callId ?? live.channelId, detail: reason });
+
+    if (participants.size === 0) {
+      // LAST OUT.
+      teardown(live.channelId);
+      if (live.callId) await deps.store.endCall(live.callId, new Date(deps.now()).toISOString());
+      await deps.store.appendAudit({ actor: sub, action: "call.end", target: live.callId ?? live.channelId, detail: reason });
+
+      if (live.callId && live.mediadSessionId) {
+        const callId = live.callId;
+        const channelId = live.channelId;
+        const mediadSessionId = live.mediadSessionId;
+        void runPostCallPipeline({ callId, channelId, mediadSessionId }).catch((err) => {
+          console.error(`calls/registry: post-call pipeline failed for group call ${callId}:`, describeError(err));
+        });
+      }
+      return;
+    }
+
+    // Others remain: notify them, drop the leg, and renegotiate.
+    const dismiss = { type: "call_participant_left", channelId: live.channelId, sub };
+    for (const [, rp] of participants) deps.send(rp.connId, dismiss);
+
+    if (deps.mediad && live.mediadSessionId) {
+      try {
+        await deps.mediad.removeLeg(live.mediadSessionId, p.legId);
+      } catch (err) {
+        console.error(`calls/registry: removeLeg failed for call ${live.callId} leg ${p.legId}:`, describeError(err));
+      }
+    }
+    void renegotiateOthers(live, sub).catch((err) => {
+      console.error(`calls/registry: renegotiation after leave failed for call ${live.callId}:`, describeError(err));
+    });
+  }
+
+  async function leaveGroup(input: { channelId: Id; connId: string; sub: string }): Promise<void> {
+    await end({ channelId: input.channelId, connId: input.connId, sub: input.sub, reason: "hangup" });
+  }
+
   async function relay(input: { channelId: Id; fromConnId: string; frame: unknown }): Promise<void> {
     const { channelId, fromConnId, frame } = input;
     const live = liveCalls.get(channelId);
     if (!live || live.state !== "active") return; // no active call, or still ringing — drop
+
+    if (live.group) {
+      await relayGroup(live, fromConnId, frame);
+      return;
+    }
 
     const isCaller = fromConnId === live.callerConnId;
     const isCallee = live.calleeConnId != null && fromConnId === live.calleeConnId;
@@ -535,6 +856,17 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     const live = liveCalls.get(channelId);
     if (!live) return; // nothing live for this channel — no-op (a race with an already-ended call)
 
+    if (live.group) {
+      // Group calls never ring (they go straight to `active`, like a solo memo), so there's no
+      // decline/glare shape to recognize here — just resolve WHICH participant is leaving, by
+      // `sub` when given (an explicit `leaveGroup`/`call_end`) or by connId (a socket-drop
+      // teardown, `untrackConnection`, which only ever passes a connId).
+      const resolvedSub = sub ?? (connId ? [...live.participants!.entries()].find(([, p]) => p.connId === connId)?.[0] : undefined);
+      if (!resolvedSub) return; // unbound connection / unknown participant — ignore
+      await endGroupParticipant(live, resolvedSub, reason);
+      return;
+    }
+
     const isBoundCaller = connId != null && connId === live.callerConnId;
     const isBoundCallee = connId != null && live.calleeConnId != null && connId === live.calleeConnId;
     // Finding #1: a ringing call's callee is NEVER bound (only the caller's inviting connection is,
@@ -590,10 +922,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       void runPostCallPipeline({
         callId: live.callId,
         channelId: live.channelId,
-        caller: live.caller,
-        callee: live.callee,
         mediadSessionId: live.mediadSessionId,
-        solo: live.solo,
         enroll: live.enroll,
       }).catch((err) => {
         console.error(`calls/registry: post-call pipeline failed for call ${live.callId}:`, describeError(err));
@@ -642,17 +971,18 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
    * `LiveCall` (the live path, right after `end()`) or a bare `CallRow` read back from the store
    * (mediad-client.ts's `reconcileUnclaimedSessions`, after a backend crash — §2.4 v3.1 REQUIRED
    * #5). `LiveCall` is a structural superset of this, so it's passed as-is from `end()` with no
-   * extra mapping. */
+   * extra mapping. Deliberately carries NO caller/callee/solo fields — every leg this pipeline needs
+   * (1:1, solo, OR group) comes from `Store.listCallParticipants(call.callId)`
+   * (db/migrations/0021_call_participants.sql) instead, generalizing this to an arbitrary
+   * N-participant call rather than a hardcoded pair. */
   interface PostCallInput {
     callId: Id;
     channelId: Id;
-    caller: string;
-    callee: string;
     mediadSessionId: string;
-    /** A solo self-DM memo — one leg (the caller) instead of two. */
-    solo?: boolean;
     /** Solo-memo-only opt-in voiceprint enrollment flag — see `LiveCall.enroll`'s doc comment.
-     * Ignored when `solo` isn't set. */
+     * Applied below only when the call turns out to have had exactly one participant (true for a
+     * solo memo by construction; a group/1:1 call never sets this field in the first place, so the
+     * "exactly one participant" check alone would never misfire for them either). */
     enroll?: boolean;
   }
 
@@ -661,13 +991,14 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
    * `addAttachment` all configured on `deps` — see CallRegistryDeps' doc comments. Returns the new
    * (still UNCLAIMED) attachment row — the caller claims it immediately onto a pending-status chat
    * line, below, rather than leaving it unclaimed until (if ever) a transcript posts. */
-  async function ingestMixedFile(call: PostCallInput, manifest: MediadFinalizeManifest): Promise<Attachment | undefined> {
+  async function ingestMixedFile(call: PostCallInput, participants: CallParticipantRow[], manifest: MediadFinalizeManifest): Promise<Attachment | undefined> {
     if (!deps.recordingsDir || !deps.blobs || !deps.addAttachment) return undefined;
-    // The mixed playback file (legId absent). For a solo memo, if mediad's mix step didn't emit one
-    // (e.g. ffmpeg amix declined a single input), fall back to the sole per-leg file so the memo
-    // still gets a playable attachment.
+    // The mixed playback file (legId absent). For a single-participant call (a solo memo, or a
+    // group call that happened to end back down to one participant), if mediad's mix step didn't
+    // emit one (e.g. ffmpeg amix declined a single input), fall back to that sole participant's
+    // per-leg file so the recording still gets a playable attachment.
     const mixed = manifest.files.find((f) => !f.legId)
-      ?? (call.solo ? manifest.files.find((f) => f.legId === LEG_CALLER_ID) : undefined);
+      ?? (participants.length === 1 ? manifest.files.find((f) => f.legId === participants[0]!.legId) : undefined);
     if (!mixed) return undefined;
     const bytes = await readFile(join(deps.recordingsDir, call.mediadSessionId, mixed.path));
     const sha256 = sha256Hex(bytes);
@@ -700,6 +1031,10 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
   async function runPostCallPipeline(call: PostCallInput): Promise<void> {
     if (!deps.mediad) return;
 
+    // The leg->sub map for every participant this call ever had (join order; includes anyone who
+    // left mid-call — their leg's audio still exists in the finalize manifest below).
+    const participants = await deps.store.listCallParticipants(call.callId);
+
     let manifest: MediadFinalizeManifest;
     try {
       manifest = await deps.mediad.endSession(call.mediadSessionId);
@@ -710,7 +1045,7 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
 
     let attachment: Attachment | undefined;
     try {
-      attachment = await ingestMixedFile(call, manifest);
+      attachment = await ingestMixedFile(call, participants, manifest);
     } catch (err) {
       // The finalize manifest still exists on the shared volume even if THIS ingest attempt failed
       // (e.g. a transient blob-write error) — mediad-client.ts's reconciliation sweep is the
@@ -745,12 +1080,10 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
 
     if (!deps.transcribe) return; // SecRecorder not configured — the pending line already says "unavailable"
 
-    // The legs to transcribe: a solo memo has just the caller's leg; a 2-party call has both.
-    const legSpecs = call.solo
-      ? [{ legId: LEG_CALLER_ID, sub: call.caller }]
-      : [{ legId: LEG_CALLER_ID, sub: call.caller }, { legId: LEG_CALLEE_ID, sub: call.callee }];
-    const legFiles = legSpecs.map((l) => ({ ...l, file: manifest.files.find((f) => f.legId === l.legId) }));
-    if (legFiles.some((l) => !l.file)) {
+    // The legs to transcribe: every participant this call ever had (1:1's caller+callee, solo's
+    // sole leg, or a group call's N legs — all uniformly from `call_participants` now).
+    const legFiles = participants.map((p) => ({ legId: p.legId, sub: p.sub, file: manifest.files.find((f) => f.legId === p.legId) }));
+    if (legFiles.length === 0 || legFiles.some((l) => !l.file)) {
       await deps.store.appendAudit({ actor: "system", action: "call.transcribe_failed", target: call.callId, detail: "manifest missing a leg file" });
       await editPendingIfClaimed(call, pendingMessageId, "🎙️ Recording stored — transcription failed (missing leg audio).");
       return;
@@ -800,18 +1133,18 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
       // not duplicated here.
       await editPendingIfClaimed(call, pendingMessageId, "🎙️ Recording stored.");
 
-      // Opt-in voiceprint enrollment (solo memos only, `enroll:true`): best-effort, same
-      // failure-isolation posture as the rest of this pipeline — an enrollment failure must never
-      // crash the pipeline or take the transcript down with it (the transcript has already posted
-      // by this point either way). MUST run before `deleteSessionDir` below — that's what deletes
-      // the very leg file this reads.
-      if (call.solo && call.enroll && deps.enrollVoiceprint) {
+      // Opt-in voiceprint enrollment (solo memos only, `enroll:true` — a solo memo always has
+      // EXACTLY one participant by construction, so that's the guard, rather than a `solo` flag on
+      // `call` which no longer exists): best-effort, same failure-isolation posture as the rest of
+      // this pipeline — an enrollment failure must never crash the pipeline or take the transcript
+      // down with it (the transcript has already posted by this point either way). MUST run before
+      // `deleteSessionDir` below — that's what deletes the very leg file this reads.
+      if (call.enroll && participants.length === 1 && deps.enrollVoiceprint) {
         try {
-          // `users[0]` is always the caller's `getUser` result (legFiles[0]/legSpecs[0] is always
-          // the caller leg, solo or not — see legSpecs above), so this reuses the lookup already
+          // `users[0]`/`legFiles[0]` are always the sole participant's — reuses the lookup already
           // done for the transcript's speaker labels rather than a second `store.getUser` call.
-          const callerName = users[0]?.displayName || call.caller;
-          await deps.enrollVoiceprint({ name: callerName, filePath: join(sessionDir, legFiles[0]!.file!.path) });
+          const soloName = users[0]?.displayName || legFiles[0]!.sub;
+          await deps.enrollVoiceprint({ name: soloName, filePath: join(sessionDir, legFiles[0]!.file!.path) });
           await deps.store.appendAudit({ actor: "system", action: "call.voiceprint_enrolled", target: call.callId });
         } catch (err) {
           await deps.store.appendAudit({ actor: "system", action: "call.voiceprint_enroll_failed", target: call.callId, detail: describeError(err) });
@@ -837,7 +1170,19 @@ export function makeCallRegistry(deps: CallRegistryDeps): CallRegistry {
     return sharedEditPendingIfClaimed(pendingRecordingDeps, call, pendingMessageId, content);
   }
 
-  return { invite, startSolo, accept, relay, end, untrackConnection, getActiveCall, checkRingingTimeouts };
+  return {
+    invite,
+    startSolo,
+    accept,
+    relay,
+    end,
+    untrackConnection,
+    getActiveCall,
+    checkRingingTimeouts,
+    startGroup,
+    joinGroup,
+    leaveGroup,
+  };
 }
 
 function describeError(err: unknown): string {

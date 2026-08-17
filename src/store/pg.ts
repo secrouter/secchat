@@ -66,6 +66,7 @@ import type {
   AuditEvent,
   AuthorType,
   CallMode,
+  CallParticipantRow,
   CallRecordingState,
   CallRow,
   Channel,
@@ -275,6 +276,16 @@ interface CallsRow {
   mediad_session_id: string | null;
 }
 
+/** Row shape for `call_participants` (db/migrations/0021_call_participants.sql) — see
+ * src/types.ts's `CallParticipantRow` doc comment. */
+interface CallParticipantsRow {
+  call_id: string;
+  sub: string;
+  leg_id: string;
+  joined_at: Date;
+  left_at: Date | null;
+}
+
 interface AuditRow {
   id: string;
   seq: number;
@@ -468,6 +479,16 @@ function rowToCall(row: CallsRow): CallRow {
     transcriptMessageId: row.transcript_message_id ?? undefined,
     mediadSessionId: row.mediad_session_id ?? undefined,
   }) as CallRow;
+}
+
+function rowToCallParticipant(row: CallParticipantsRow): CallParticipantRow {
+  return compact({
+    callId: row.call_id,
+    sub: row.sub,
+    legId: row.leg_id,
+    joinedAt: iso(row.joined_at),
+    leftAt: row.left_at ? iso(row.left_at) : undefined,
+  }) as CallParticipantRow;
 }
 
 function rowToAuditEvent(row: AuditRow): AuditEvent {
@@ -1519,6 +1540,36 @@ export class PgStore implements Store, SessionStore {
          FROM calls WHERE ended_at IS NOT NULL AND recording_attachment_id IS NULL`,
     );
     return rows.map(rowToCall);
+  }
+
+  // ── Call participants (db/migrations/0021_call_participants.sql) ─────────────────────────────
+
+  async addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow> {
+    const joinedAt = new Date().toISOString();
+    const { rows } = await this.#pool.query<CallParticipantsRow>(
+      `INSERT INTO call_participants (call_id, sub, leg_id, joined_at, left_at)
+       VALUES ($1, $2, $3, $4, NULL)
+       ON CONFLICT (call_id, sub) DO UPDATE
+         SET leg_id = excluded.leg_id, joined_at = excluded.joined_at, left_at = NULL
+       RETURNING call_id, sub, leg_id, joined_at, left_at`,
+      [input.callId, input.sub, input.legId, joinedAt],
+    );
+    return rowToCallParticipant(rows[0]!);
+  }
+
+  async setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void> {
+    await this.#pool.query(
+      `UPDATE call_participants SET left_at = $3 WHERE call_id = $1 AND sub = $2`,
+      [callId, sub, leftAt],
+    );
+  }
+
+  async listCallParticipants(callId: Id): Promise<CallParticipantRow[]> {
+    const { rows } = await this.#pool.query<CallParticipantsRow>(
+      `SELECT call_id, sub, leg_id, joined_at, left_at FROM call_participants WHERE call_id = $1 ORDER BY joined_at ASC`,
+      [callId],
+    );
+    return rows.map(rowToCallParticipant);
   }
 
   /** Purges plaintext, stamps the tombstone, and appends the audit event — all in ONE transaction

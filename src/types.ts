@@ -419,7 +419,15 @@ export interface CallTakenFrame {
  * per-frame size + rate caps, §2.1/§4). `mode: "relayed"` — the backend TERMINATES this client's
  * SDP and brokers it against secchat-mediad's control API (MediadClient.offerLeg, a single-response
  * non-trickle exchange, §2.3); the client still only ever sees `call_sdp` frames, never mediad's
- * URL/token. */
+ * URL/token.
+ *
+ * BIDIRECTIONAL for a GROUP call (see the "Group calls" section below): a client still sends its own
+ * leg's `sdpType: "offer"` the first time it joins (brokered via MediadClient.offerLeg exactly like
+ * a 1:1 relayed call), but the SERVER may also now SEND this frame with `sdpType: "offer"` to an
+ * already-connected participant — a roster-change RENEGOTIATION (another participant joined/left,
+ * MediadClient.renegotiate) — which the client answers with its own `call_sdp` `sdpType: "answer"`,
+ * brokered server-side via MediadClient.answerLeg. A 1:1/solo call never sends a server-initiated
+ * offer (§2.1's O5 deferral still holds there — no mid-call renegotiation outside group rosters). */
 export interface CallSdpFrame {
   type: "call_sdp";
   channelId: Id;
@@ -501,6 +509,78 @@ export interface CreateCallInput {
   callee: string;
   consent: boolean;
   mode: CallMode;
+}
+
+// ── Voice calls: N-participant GROUP calls (a `kind:"human"` channel, relayed-only) ────────────
+// Extends the 1:1 DM calls above to a JOIN-ON-DEMAND model: `call_start` (first participant) /
+// `call_join` (every later one) on a group channel, server-orchestrated renegotiation on every
+// roster change, `call_end` per-participant LEAVE vs the last participant out (LAST-OUT) tearing
+// the whole call down + running the post-call pipeline — see src/calls/registry.ts's `startGroup`/
+// `joinGroup`/`leaveGroup`. Always `mode: "relayed"`/`consent: true` (no p2p mesh, D5's DM-only p2p
+// path doesn't extend here) — a group call is recorded by construction, same fail-loud-if-mediad-
+// unavailable posture as a solo memo (no live conversation to keep alive without it, unlike a 1:1
+// call's fail-open-calling downgrade). The durable `calls` row (CallRow above) is still created for
+// a group call — `caller`/`callee` both equal the STARTER's sub (vestigial, mirroring `startSolo`'s
+// `callee = caller` convention) — `call_participants` below is the actual source of truth for who
+// was on the call and when.
+
+/** caller -> server: start a group call on a `kind:"human"` channel (channel membership required).
+ * Rejected (`call_active`) if the channel already has a live call — a member should `call_join` it
+ * instead. */
+export interface CallStartFrame {
+  type: "call_start";
+  channelId: Id;
+}
+
+/** A member -> server: join an already-live group call. Adds a leg (MediadClient.addLeg) and
+ * triggers server-orchestrated renegotiation of every OTHER live leg (MediadClient.renegotiate) so
+ * their downstream picks up the new participant's track. */
+export interface CallJoinFrame {
+  type: "call_join";
+  channelId: Id;
+}
+
+/** server -> the JOINER's bound connection only, right after a winning `call_join`: who else is
+ * currently on the call (including the joiner itself) — the roster snapshot a client needs to render
+ * its participant list without a second round trip. */
+export interface CallRosterFrame {
+  type: "call_roster";
+  channelId: Id;
+  participants: Array<{ sub: string }>;
+}
+
+/** server -> every OTHER bound participant connection: a member joined the call. */
+export interface CallParticipantJoinedFrame {
+  type: "call_participant_joined";
+  channelId: Id;
+  sub: string;
+}
+
+/** server -> every remaining bound participant connection: a member left the call (an explicit
+ * `call_end`, or their bound connection dropping) — the call itself stays up as long as at least one
+ * participant remains; the LAST one out is a normal `call_end`-style teardown (see CallEndFrame),
+ * not this frame. */
+export interface CallParticipantLeftFrame {
+  type: "call_participant_left";
+  channelId: Id;
+  sub: string;
+}
+
+/** The durable record of one participant's leg on a call (db/migrations/0021_call_participants.sql)
+ * — generalizes the DM/solo path's fixed caller/callee (+ LEG_CALLER_ID/LEG_CALLEE_ID) leg->sub map
+ * to an arbitrary N-participant call. Populated for EVERY relayed call (1:1, solo, AND group) the
+ * moment its mediad leg exists (`CallRegistry.accept`/`startSolo`/`startGroup`/`joinGroup`), so the
+ * crash-recovery reconciliation sweep (mediad-client.ts's `reconcileUnclaimedSessions` ->
+ * `kickReconciledTranscription`) and the live post-call pipeline (registry.ts's
+ * `runPostCallPipeline`) both read the SAME table instead of assuming exactly two legs. A row
+ * persists (with `leftAt` stamped) even after the participant leaves mid-call — their leg's audio
+ * still exists in mediad's finalize manifest and still needs transcribing. */
+export interface CallParticipantRow {
+  callId: Id;
+  sub: string;
+  legId: string;
+  joinedAt: string; // ISO-8601 UTC
+  leftAt?: string; // ISO-8601 UTC — set once this participant's leg is removed (leave, or call end)
 }
 
 export interface AppendAuditInput {
@@ -683,6 +763,21 @@ export interface Store {
    * filters to rows whose mediad session directory still exists on the shared volume; an unrecorded
    * (`mode: "p2p"`) call has no mediad session and is naturally never actionable here. */
   listUnclaimedEndedCalls(): Promise<CallRow[]>;
+
+  // Call participants (db/migrations/0021_call_participants.sql — see CallParticipantRow's doc
+  // comment). Populated for every relayed call (1:1, solo, group), not just group calls.
+  /** Record a participant's leg on a call — an UPSERT keyed on (callId, sub): a rejoin (a group
+   * participant who left and comes back) refreshes `legId`/`joinedAt` and clears `leftAt` rather
+   * than erroring, since a real client reconnect is expected to look exactly like this. */
+  addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow>;
+  /** Stamp a participant's departure (their leg was removed — a group LEAVE, or the whole call
+   * ending). No-op if the participant/call is unknown (a race with an already-torn-down call is not
+   * an error here, matching endCall's "caller owns at-most-once" posture). */
+  setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void>;
+  /** Every participant a call ever had, join order, INCLUDING ones who already left (their leg's
+   * audio still needs transcribing) — the leg->sub map `runPostCallPipeline`/
+   * `kickReconciledTranscription` iterate instead of a fixed caller/callee pair. */
+  listCallParticipants(callId: Id): Promise<CallParticipantRow[]>;
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

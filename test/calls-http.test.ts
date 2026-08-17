@@ -40,6 +40,13 @@ function fakeCallsWith(live: LiveCall | undefined): CallRegistry {
     async checkRingingTimeouts() {
       return [];
     },
+    async startGroup() {
+      throw new Error("not used by this test");
+    },
+    async joinGroup() {
+      throw new Error("not used by this test");
+    },
+    async leaveGroup() {},
   };
 }
 

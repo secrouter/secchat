@@ -17,7 +17,7 @@ import type { TranscribeClient, TranscribeResult } from "../src/transcribe/clien
 import { MemoryStore } from "../src/store/memory.ts";
 import { MemoryBlobStore } from "../src/attachments/blobs.ts";
 import { makeMarkingPolicy } from "../src/marking/policy.ts";
-import type { AppendAuditInput, AppendMessageInput, CallRow, Channel, CreateCallInput, Id, Member, Store } from "../src/types.ts";
+import type { AppendAuditInput, AppendMessageInput, CallParticipantRow, CallRow, Channel, CreateCallInput, Id, Member, Store } from "../src/types.ts";
 
 const MARKING = makeMarkingPolicy(["UNCLASSIFIED", "CUI"], "UNCLASSIFIED", []);
 
@@ -26,6 +26,7 @@ function makeFakeStore(opts: { channels: Record<string, { kind: Channel["kind"];
   const audits: Array<AppendAuditInput & { at: string }> = [];
   const calls = new Map<Id, CallRow>();
   const messages: Array<AppendMessageInput & { id: Id; seq: number }> = [];
+  const participants = new Map<Id, CallParticipantRow[]>(); // callId -> rows, join order
   let callSeq = 0;
 
   const store = {
@@ -81,6 +82,31 @@ function makeFakeStore(opts: { channels: Record<string, { kind: Channel["kind"];
       row.transcriptMessageId = messageId;
       return row;
     },
+    async addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow> {
+      let rows = participants.get(input.callId);
+      if (!rows) {
+        rows = [];
+        participants.set(input.callId, rows);
+      }
+      const existing = rows.find((r) => r.sub === input.sub);
+      const joinedAt = new Date().toISOString();
+      if (existing) {
+        existing.legId = input.legId;
+        existing.joinedAt = joinedAt;
+        existing.leftAt = undefined;
+        return existing;
+      }
+      const row: CallParticipantRow = { callId: input.callId, sub: input.sub, legId: input.legId, joinedAt };
+      rows.push(row);
+      return row;
+    },
+    async setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void> {
+      const row = participants.get(callId)?.find((r) => r.sub === sub);
+      if (row) row.leftAt = leftAt;
+    },
+    async listCallParticipants(callId: Id): Promise<CallParticipantRow[]> {
+      return [...(participants.get(callId) ?? [])];
+    },
     async appendMessage(input: AppendMessageInput) {
       const row = { ...input, id: `msg-${messages.length + 1}`, seq: messages.length + 1 };
       messages.push(row);
@@ -103,7 +129,7 @@ function makeFakeStore(opts: { channels: Record<string, { kind: Channel["kind"];
     },
   } as unknown as Store;
 
-  return { store, audits, calls, messages };
+  return { store, audits, calls, messages, participants };
 }
 
 function makeSend() {
@@ -472,13 +498,299 @@ test("checkRingingTimeouts: an ACTIVE (already-accepted) call is never touched b
   assert.equal(registry.getActiveCall(CHANNEL)?.state, "active");
 });
 
+// ── group calls (N participants, `kind:"human"` channel, join-on-demand) ─────────────────────────
+
+/** A `kind:"human"` channel with 3 members (alice, bob, carol) — the group-calling harness, mirrors
+ * `makeHarness` but over a group channel rather than a 2-party DM. */
+function makeGroupHarness(opts: { mediad?: MediadClient; transcribe?: TranscribeClient } = {}) {
+  const CHANNEL = "group-1";
+  const fake = makeFakeStore({ channels: { [CHANNEL]: { kind: "human" } }, members: { [CHANNEL]: ["alice", "bob", "carol"] } });
+  const { send, sent } = makeSend();
+  const { deliverToUser, delivered } = makeDeliverToUser();
+  const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+  let nowMs = 1_000_000;
+  const deps: CallRegistryDeps = {
+    store: fake.store,
+    send,
+    deliverToUser,
+    now: () => nowMs,
+    mediad: opts.mediad,
+    transcribe: opts.transcribe,
+    marking: MARKING,
+    broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+  };
+  const registry = makeCallRegistry(deps);
+  return { CHANNEL, registry, sent, delivered, broadcasts, fake, advance: (ms: number) => (nowMs += ms) };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+test("group: call_start + two call_joins builds a 3-leg mediad session, sends roster/participant_joined frames, and renegotiates existing legs", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent, fake } = makeGroupHarness({ mediad });
+
+  const live = await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  assert.equal(live.group, true);
+  assert.equal(live.state, "active");
+  assert.equal(live.mode, "relayed");
+  assert.equal(live.participants!.size, 1);
+  assert.equal(mediad.createSessionCalls.length, 1, "ONE mediad session for the whole group call");
+  assert.deepEqual(mediad.createSessionCalls[0]!.legs, [{ legId: "leg_alice", sub: "alice" }]);
+  assert.ok(fake.audits.some((a) => a.action === "call.start" && a.actor === "alice" && a.detail === "group"));
+  assert.ok(
+    fake.messages.some((m) => m.channelId === CHANNEL && m.authorType === "system" && m.content.includes("tap to join")),
+    "a 'tap to join' notice is posted into the channel",
+  );
+
+  // bob joins: adds a leg, and — since alice is the only OTHER participant — renegotiates exactly
+  // her leg.
+  const liveAfterBob = await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await flush();
+  assert.equal(liveAfterBob.participants!.size, 2);
+  assert.equal(mediad.createSessionCalls.length, 1, "no second session created for a join");
+  assert.equal(mediad.addLegCalls.length, 1);
+  assert.deepEqual(mediad.addLegCalls[0], { sessionId: "sess-1", leg: { legId: "leg_bob", sub: "bob" } });
+
+  const rosterToBob = sent.find((s) => s.connId === "bob-c" && (s.payload as { type?: string }).type === "call_roster");
+  assert.ok(rosterToBob, "the joiner gets a call_roster snapshot");
+  const bobRosterSubs = ((rosterToBob!.payload as { participants: Array<{ sub: string }> }).participants).map((p) => p.sub).sort();
+  assert.deepEqual(bobRosterSubs, ["alice", "bob"]);
+
+  const joinedToAlice = sent.find(
+    (s) => s.connId === "alice-c" && (s.payload as { type?: string }).type === "call_participant_joined" && (s.payload as { sub?: string }).sub === "bob",
+  );
+  assert.ok(joinedToAlice, "every OTHER bound participant hears about the join");
+
+  assert.equal(mediad.renegotiateCalls.length, 1);
+  assert.equal(mediad.renegotiateCalls[0]!.legId, "leg_alice", "only alice's leg needed renegotiating (bob is the joiner, not 'other')");
+  const offerToAlice = sent.find(
+    (s) => s.connId === "alice-c" && (s.payload as { type?: string }).type === "call_sdp" && (s.payload as { sdpType?: string }).sdpType === "offer",
+  );
+  assert.ok(offerToAlice, "alice gets a server-initiated renegotiation offer");
+  assert.equal((offerToAlice!.payload as { sdp?: string }).sdp, "renegotiate-offer-for:leg_alice");
+
+  // carol joins: now BOTH alice and bob (the two OTHER participants) get renegotiated.
+  const liveAfterCarol = await registry.joinGroup({ channelId: CHANNEL, connId: "carol-c", sub: "carol" });
+  await flush();
+  assert.equal(liveAfterCarol.participants!.size, 3);
+  assert.equal(mediad.addLegCalls.length, 2);
+  assert.deepEqual(mediad.addLegCalls[1], { sessionId: "sess-1", leg: { legId: "leg_carol", sub: "carol" } });
+  assert.equal(mediad.renegotiateCalls.length, 3, "1 (alice, from bob's join) + 2 (alice+bob, from carol's join)");
+  assert.deepEqual(mediad.renegotiateCalls.slice(1).map((c) => c.legId).sort(), ["leg_alice", "leg_bob"]);
+
+  const rosterToCarol = sent.find((s) => s.connId === "carol-c" && (s.payload as { type?: string }).type === "call_roster");
+  const carolRosterSubs = ((rosterToCarol!.payload as { participants: Array<{ sub: string }> }).participants).map((p) => p.sub).sort();
+  assert.deepEqual(carolRosterSubs, ["alice", "bob", "carol"]);
+
+  // The durable leg->sub map has all three participants (db/migrations/0021_call_participants.sql).
+  const participantRows = await fake.store.listCallParticipants(live.callId!);
+  assert.deepEqual(
+    participantRows.map((r) => r.sub).sort(),
+    ["alice", "bob", "carol"],
+  );
+});
+
+test("group: call_start rejects a second start (call_active) — a member should call_join instead", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await assert.rejects(
+    registry.startGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" }),
+    (err: unknown) => err instanceof CallSignalError && err.code === "call_active",
+  );
+});
+
+test("group: joinGroup rejects a non-member, a double-join, and a busy user", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry } = makeGroupHarness({ mediad });
+  await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+
+  await assert.rejects(
+    registry.joinGroup({ channelId: CHANNEL, connId: "mallory-c", sub: "mallory" }),
+    (err: unknown) => err instanceof CallSignalError && err.code === "not_member",
+  );
+  await assert.rejects(
+    registry.joinGroup({ channelId: CHANNEL, connId: "alice-c-2", sub: "alice" }),
+    (err: unknown) => err instanceof CallSignalError && err.code === "already_in_call",
+  );
+});
+
+test("group: a participant leaving mid-call drops their leg, notifies the rest, and renegotiates — the call stays up", async () => {
+  const mediad = fakeMediad({ healthy: true });
+  const { CHANNEL, registry, sent, fake } = makeGroupHarness({ mediad });
+
+  const live = await registry.startGroup({ channelId: CHANNEL, connId: "alice-c", sub: "alice" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "bob-c", sub: "bob" });
+  await registry.joinGroup({ channelId: CHANNEL, connId: "carol-c", sub: "carol" });
+  await flush();
+  mediad.renegotiateCalls.length = 0; // only care about renegotiation triggered by the LEAVE below
+
+  await registry.end({ channelId: CHANNEL, connId: "bob-c", sub: "bob", reason: "hangup" });
+  await flush();
+
+  // The call stays up — bob left, alice+carol remain.
+  const stillLive = registry.getActiveCall(CHANNEL);
+  assert.ok(stillLive, "the call is still live — bob leaving is NOT the last one out");
+  assert.equal(stillLive!.participants!.size, 2);
+  assert.deepEqual([...stillLive!.participants!.keys()].sort(), ["alice", "carol"]);
+
+  // bob's leg was removed from mediad (not the whole session — the call itself stays up).
+  assert.equal(mediad.removeLegCalls.length, 1);
+  assert.deepEqual(mediad.removeLegCalls[0], { sessionId: "sess-1", legId: "leg_bob" });
+
+  // The remaining participants (alice, carol) both hear about it.
+  const leftToAlice = sent.find(
+    (s) => s.connId === "alice-c" && (s.payload as { type?: string }).type === "call_participant_left" && (s.payload as { sub?: string }).sub === "bob",
+  );
+  const leftToCarol = sent.find(
+    (s) => s.connId === "carol-c" && (s.payload as { type?: string }).type === "call_participant_left" && (s.payload as { sub?: string }).sub === "bob",
+  );
+  assert.ok(leftToAlice && leftToCarol);
+
+  // Both remaining legs are renegotiated (bob's departure changes their downstream tracks).
+  assert.equal(mediad.renegotiateCalls.length, 2);
+  assert.deepEqual(mediad.renegotiateCalls.map((c) => c.legId).sort(), ["leg_alice", "leg_carol"]);
+
+  // The durable record: bob's participant row is stamped `leftAt`, not deleted (his leg's audio
+  // still needs transcribing once the call as a whole ends).
+  const rows = await fake.store.listCallParticipants(live.callId!);
+  const bobRow = rows.find((r) => r.sub === "bob");
+  assert.ok(bobRow?.leftAt, "bob's row survives with leftAt stamped");
+  assert.ok(!rows.find((r) => r.sub === "alice")?.leftAt);
+
+  assert.ok(fake.audits.some((a) => a.action === "call.participant_left" && a.actor === "bob"));
+  assert.ok(!fake.audits.some((a) => a.action === "call.end"), "the CALL hasn't ended — only a participant left");
+
+  // A server-side answer to a renegotiation offer is brokered to mediad, not dropped, for a group call.
+  await registry.relay({ channelId: CHANNEL, fromConnId: "alice-c", frame: { type: "call_sdp", channelId: CHANNEL, sdpType: "answer", sdp: "alice-answer" } });
+  assert.equal(mediad.answerLegCalls.length, 1);
+  assert.deepEqual(mediad.answerLegCalls[0], { sessionId: "sess-1", legId: "leg_alice", sdp: "alice-answer" });
+});
+
+test("group: the LAST participant out ends the call and runs the N-leg post-call pipeline", async () => {
+  const recordingsDir = await mkdtemp(join(tmpdir(), "secchat-group-calls-test-"));
+  try {
+    const store = new MemoryStore();
+    const channel = await store.createChannel({ workspaceId: "ws-1", kind: "human", createdBy: "alice" });
+    await store.addMember({ channelId: channel.id, memberRef: "alice", memberType: "user", role: "member" });
+    await store.addMember({ channelId: channel.id, memberRef: "bob", memberType: "user", role: "member" });
+    await store.addMember({ channelId: channel.id, memberRef: "carol", memberType: "user", role: "member" });
+    await store.upsertUser({ sub: "alice", displayName: "Alice Ng", groups: [] });
+    await store.upsertUser({ sub: "bob", displayName: "Bob Reyes", groups: [] });
+    await store.upsertUser({ sub: "carol", displayName: "Carol Diaz", groups: [] });
+
+    const mediad = fakeMediad({ healthy: true });
+    const originalCreateSession = mediad.createSession.bind(mediad);
+    mediad.createSession = async (input) => {
+      const res = await originalCreateSession(input);
+      await mkdir(join(recordingsDir, res.sessionId), { recursive: true });
+      return res;
+    };
+
+    const transcribeByLegId: Record<string, TranscribeResult> = {
+      leg_alice: { task: "transcribe", language: "en", duration: 2, text: "hello everyone", words: [], segments: [{ start: 0, end: 1, text: "hello everyone" }] },
+      leg_bob: { task: "transcribe", language: "en", duration: 2, text: "hi alice", words: [], segments: [{ start: 0.2, end: 1, text: "hi alice" }] },
+      leg_carol: { task: "transcribe", language: "en", duration: 2, text: "hey all", words: [], segments: [{ start: 0.4, end: 1, text: "hey all" }] },
+    };
+
+    const broadcasts: Array<{ channelId: string; payload: unknown }> = [];
+    const { send } = makeSend();
+    const { deliverToUser } = makeDeliverToUser();
+
+    const registry = makeCallRegistry({
+      store,
+      send,
+      deliverToUser,
+      now: () => Date.now(),
+      mediad,
+      transcribe: fakeTranscribe(transcribeByLegId),
+      marking: MARKING,
+      broadcast: (channelId, payload) => broadcasts.push({ channelId, payload }),
+      recordingsDir,
+      blobs: new MemoryBlobStore(),
+      addAttachment: (input) => store.addAttachment(input),
+    });
+
+    const live = await registry.startGroup({ channelId: channel.id, connId: "alice-c", sub: "alice" });
+    await registry.joinGroup({ channelId: channel.id, connId: "bob-c", sub: "bob" });
+    await registry.joinGroup({ channelId: channel.id, connId: "carol-c", sub: "carol" });
+    await flush();
+
+    const sessionId = live.mediadSessionId!;
+    await writeFile(join(recordingsDir, sessionId, "leg_alice.ogg"), "fake-alice-audio");
+    await writeFile(join(recordingsDir, sessionId, "leg_bob.ogg"), "fake-bob-audio");
+    await writeFile(join(recordingsDir, sessionId, "leg_carol.ogg"), "fake-carol-audio");
+    await writeFile(join(recordingsDir, sessionId, "mixed.m4a"), "fake-mixed-audio");
+    mediad.endSession = async (sid) => ({
+      sessionId: sid,
+      files: [
+        { legId: "leg_alice", path: "leg_alice.ogg", startOffsetMs: 0, durationMs: 2000 },
+        { legId: "leg_bob", path: "leg_bob.ogg", startOffsetMs: 100, durationMs: 1900 },
+        { legId: "leg_carol", path: "leg_carol.ogg", startOffsetMs: 200, durationMs: 1800 },
+        { path: "mixed.m4a", startOffsetMs: 0, durationMs: 2000 },
+      ],
+      truncated: false,
+    });
+
+    // Two participants leave — the call stays up.
+    await registry.end({ channelId: channel.id, connId: "bob-c", sub: "bob", reason: "hangup" });
+    await flush();
+    assert.ok(registry.getActiveCall(channel.id), "still up — alice and carol remain");
+    await registry.end({ channelId: channel.id, connId: "carol-c", sub: "carol", reason: "hangup" });
+    await flush();
+    assert.ok(registry.getActiveCall(channel.id), "still up — alice remains alone");
+
+    // The LAST one out ends the whole call and runs the pipeline.
+    await registry.end({ channelId: channel.id, connId: "alice-c", sub: "alice", reason: "hangup" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(registry.getActiveCall(channel.id), undefined, "the call is fully torn down");
+    const row = await store.getCall(live.callId!);
+    assert.ok(row?.endedAt, "the durable CallRow is stamped ended");
+    assert.ok(row?.recordingAttachmentId, "the mixed file was ingested");
+    assert.ok(row?.transcriptMessageId, "a transcript was posted");
+
+    const messages = await store.listMessages(channel.id);
+    const transcript = messages.find((m) => m.id === row!.transcriptMessageId);
+    assert.match(transcript!.content!, /hello everyone/);
+    assert.match(transcript!.content!, /hi alice/);
+    assert.match(transcript!.content!, /hey all/);
+    assert.match(transcript!.content!, /Alice Ng/);
+    assert.match(transcript!.content!, /Bob Reyes/);
+    assert.match(transcript!.content!, /Carol Diaz/);
+
+    const auditActions = (await store.listAudit()).filter((a) => a.target === row!.id).map((a) => a.action);
+    assert.ok(auditActions.includes("call.end"));
+
+    const participantRows = await store.listCallParticipants(live.callId!);
+    assert.equal(participantRows.length, 3, "all three legs survive in the durable record");
+    assert.ok(participantRows.every((r) => r.leftAt), "everyone has left by the time the call ended");
+  } finally {
+    await rm(recordingsDir, { recursive: true, force: true });
+  }
+});
+
 // ── fakes ──────────────────────────────────────────────────────────────────────────────────────
 
-function fakeMediad(opts: { healthy: boolean }): MediadClient & { createSessionCalls: Array<{ callId: string; legs: Array<{ legId: string; sub: string }> }> } {
+function fakeMediad(opts: { healthy: boolean }): MediadClient & {
+  createSessionCalls: Array<{ callId: string; legs: Array<{ legId: string; sub: string }> }>;
+  addLegCalls: Array<{ sessionId: string; leg: { legId: string; sub: string } }>;
+  removeLegCalls: Array<{ sessionId: string; legId: string }>;
+  renegotiateCalls: Array<{ sessionId: string; legId: string }>;
+  answerLegCalls: Array<{ sessionId: string; legId: string; sdp: string }>;
+} {
   const createSessionCalls: Array<{ callId: string; legs: Array<{ legId: string; sub: string }> }> = [];
+  const addLegCalls: Array<{ sessionId: string; leg: { legId: string; sub: string } }> = [];
+  const removeLegCalls: Array<{ sessionId: string; legId: string }> = [];
+  const renegotiateCalls: Array<{ sessionId: string; legId: string }> = [];
+  const answerLegCalls: Array<{ sessionId: string; legId: string; sdp: string }> = [];
   let sessionSeq = 0;
   return {
     createSessionCalls,
+    addLegCalls,
+    removeLegCalls,
+    renegotiateCalls,
+    answerLegCalls,
     async health() {
       return opts.healthy;
     },
@@ -487,8 +799,21 @@ function fakeMediad(opts: { healthy: boolean }): MediadClient & { createSessionC
       sessionSeq++;
       return { sessionId: `sess-${sessionSeq}` };
     },
+    async addLeg(sessionId, leg) {
+      addLegCalls.push({ sessionId, leg });
+    },
+    async removeLeg(sessionId, legId) {
+      removeLegCalls.push({ sessionId, legId });
+    },
     async offerLeg(_sessionId, legId, offerSdp) {
       return { legId, sdp: `answer-for:${offerSdp}` };
+    },
+    async renegotiate(sessionId, legId) {
+      renegotiateCalls.push({ sessionId, legId });
+      return { sdp: `renegotiate-offer-for:${legId}` };
+    },
+    async answerLeg(sessionId, legId, answerSdp) {
+      answerLegCalls.push({ sessionId, legId, sdp: answerSdp });
     },
     async getState(sessionId) {
       return { sessionId, legs: [], recording: "on" };

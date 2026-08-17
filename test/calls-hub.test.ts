@@ -36,6 +36,14 @@ class FakeCallRegistry implements CallRegistry {
     throw new Error("soloImpl not configured");
   };
 
+  startGroupImpl: (input: { channelId: string; connId: string; sub: string }) => Promise<LiveCall> = async () => {
+    throw new Error("startGroupImpl not configured");
+  };
+  joinGroupImpl: (input: { channelId: string; connId: string; sub: string }) => Promise<LiveCall> = async () => {
+    throw new Error("joinGroupImpl not configured");
+  };
+  leaveGroupCalls: Array<{ channelId: string; connId: string; sub: string }> = [];
+
   async invite(input: { channelId: string; callerConnId: string; caller: string; wantRecording: boolean }) {
     return this.inviteImpl(input);
   }
@@ -59,6 +67,15 @@ class FakeCallRegistry implements CallRegistry {
   }
   async checkRingingTimeouts() {
     return this.checkRingingTimeoutsImpl();
+  }
+  async startGroup(input: { channelId: string; connId: string; sub: string }) {
+    return this.startGroupImpl(input);
+  }
+  async joinGroup(input: { channelId: string; connId: string; sub: string }) {
+    return this.joinGroupImpl(input);
+  }
+  async leaveGroup(input: { channelId: string; connId: string; sub: string }): Promise<void> {
+    this.leaveGroupCalls.push(input);
   }
 }
 

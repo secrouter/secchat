@@ -82,6 +82,45 @@ test("offerLeg: URL-encodes sessionId/legId (defense against a stray path separa
   assert.equal(calls[0]!.url, "http://x/sessions/sess%2F1/legs/leg%20a/offer");
 });
 
+// ── Group-calling extension: addLeg/removeLeg/renegotiate/answerLeg (voice-call plan's group- ────
+// calling extension). mediad answers `removeLeg`/`answerLeg` with a bare `204 No Content` (no JSON
+// body) — the regression these two tests guard: `request()`'s `.json()` call must not be attempted
+// against an empty 204 body (it would throw and crash the renegotiation orchestration).
+
+test("addLeg: POSTs {legId,sub} to the session's /legs URL", async () => {
+  const { impl, calls } = fakeFetch(() => jsonResponse(201, { legId: "leg-b" }));
+  const client = makeMediadClient({ baseUrl: "http://x", token: "t", fetchImpl: impl });
+  await client.addLeg("sess-1", { legId: "leg-b", sub: "bob" });
+  assert.equal(calls[0]!.url, "http://x/sessions/sess-1/legs");
+  assert.equal(calls[0]!.init!.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0]!.init!.body as string), { legId: "leg-b", sub: "bob" });
+});
+
+test("removeLeg: DELETEs the leg-scoped URL and tolerates mediad's 204 No Content (no body to parse)", async () => {
+  const { impl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+  const client = makeMediadClient({ baseUrl: "http://x", token: "t", fetchImpl: impl });
+  await client.removeLeg("sess-1", "leg-b"); // must not throw on the empty body
+  assert.equal(calls[0]!.url, "http://x/sessions/sess-1/legs/leg-b");
+  assert.equal(calls[0]!.init!.method, "DELETE");
+});
+
+test("renegotiate: POSTs to the leg's renegotiate URL (no body) and returns the fresh offer", async () => {
+  const { impl, calls } = fakeFetch(() => jsonResponse(200, { sdp: "v=0 fresh-offer" }));
+  const client = makeMediadClient({ baseUrl: "http://x", token: "t", fetchImpl: impl });
+  const out = await client.renegotiate("sess-1", "leg-a");
+  assert.deepEqual(out, { sdp: "v=0 fresh-offer" });
+  assert.equal(calls[0]!.url, "http://x/sessions/sess-1/legs/leg-a/renegotiate");
+  assert.equal(calls[0]!.init!.method, "POST");
+});
+
+test("answerLeg: POSTs {sdp} to the leg's answer URL and tolerates mediad's 204 No Content", async () => {
+  const { impl, calls } = fakeFetch(() => new Response(null, { status: 204 }));
+  const client = makeMediadClient({ baseUrl: "http://x", token: "t", fetchImpl: impl });
+  await client.answerLeg("sess-1", "leg-a", "v=0 answer"); // must not throw on the empty body
+  assert.equal(calls[0]!.url, "http://x/sessions/sess-1/legs/leg-a/answer");
+  assert.deepEqual(JSON.parse(calls[0]!.init!.body as string), { sdp: "v=0 answer" });
+});
+
 test("getState: GETs the session and returns leg states + recording", async () => {
   const state = { sessionId: "sess-1", legs: [{ legId: "leg-a", iceState: "connected" }], recording: "on" as const };
   const { impl, calls } = fakeFetch(() => jsonResponse(200, state));
@@ -396,6 +435,12 @@ test("reconcileUnclaimedSessions: `pendingRecording` + `transcription` both conf
   const row = await store.createCall({ channelId: channel.id, caller: "alice", callee: "bob", consent: true, mode: "relayed" });
   const sessionId = "sess-crash-2";
   await store.setCallMediadSessionId(row.id, sessionId);
+  // Mirrors what CallRegistry.accept() does in the live path, immediately after
+  // setCallMediadSessionId succeeds (db/migrations/0021_call_participants.sql) — the leg->sub map
+  // `kickReconciledTranscription` reads instead of the fixed LEG_CALLER_ID/LEG_CALLEE_ID + caller/
+  // callee columns. In reality this is always already populated by the time a call can crash.
+  await store.addCallParticipant({ callId: row.id, sub: "alice", legId: LEG_CALLER_ID });
+  await store.addCallParticipant({ callId: row.id, sub: "bob", legId: LEG_CALLEE_ID });
   await store.endCall(row.id, new Date().toISOString());
 
   const dir = await mkdtemp(join(tmpdir(), "secchat-mediad-test-"));

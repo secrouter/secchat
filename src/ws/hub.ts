@@ -276,6 +276,30 @@ export function attachWsHub(
       return;
     }
 
+    if (type === "call_start") {
+      // Group call (N participants, `kind:"human"` channel, join-on-demand) — `startGroup` does its
+      // own roster/notice bookkeeping internally (mirrors `call_solo_start`'s "the registry method
+      // sends its own confirmation" shape), so there's nothing left for the hub to fan out here.
+      try {
+        await calls.startGroup({ channelId, connId: conn.id, sub: conn.sub });
+      } catch (err) {
+        sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "start_failed", err instanceof Error ? err.message : undefined);
+      }
+      return;
+    }
+
+    if (type === "call_join") {
+      // `joinGroup` sends the joiner's `call_roster` + fans `call_participant_joined` out to the
+      // other participants + kicks off renegotiation internally — same reasoning as `call_start`
+      // above.
+      try {
+        await calls.joinGroup({ channelId, connId: conn.id, sub: conn.sub });
+      } catch (err) {
+        sendCallError(conn, channelId, err instanceof CallSignalError ? err.code : "join_failed", err instanceof Error ? err.message : undefined);
+      }
+      return;
+    }
+
     if (type === "call_solo_start") {
       // Solo self-DM voice memo: no ring, no consent negotiation (you're recording yourself). Goes
       // straight to an active relayed one-leg call; the caller then drives the SAME relayed-mode
