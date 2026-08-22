@@ -20,6 +20,7 @@ import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import { canGrantExecute } from "../agent/gate.ts";
 import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
 import type { PoolStatus } from "../agent/pool-runner.ts";
+import type { PoolTasks } from "../agent/pool-tasks.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -358,6 +359,9 @@ function buildRouter(
   /** The analysis sidecar names the deployment offers (config.pool.analysisImages keys) — drives
    * the New-Coding-Agent picker + POST /agents validation. Unset/empty ⇒ feature off. */
   poolAnalyzers?: readonly string[],
+  /** One-shot pool tasks (POST/GET/DELETE /pool/tasks) — batch secagent jobs in ephemeral pods.
+   * Unset ⇒ the task API 503s (no task image configured / pool off). */
+  poolTasks?: PoolTasks,
   outbound?: OutboundDispatcher,
   outboundAllowedHosts: readonly string[] = [],
 ): Router<Handler> {
@@ -1826,6 +1830,72 @@ function buildRouter(
     sendJson(res, 200, poolStatus ? poolStatus() : { configured: false });
   });
 
+  // ── One-shot pool tasks: batch secagent jobs (MR review, docs, analysis) in ephemeral pods. ──
+  // Creating a task is the same capability as standing up an agent (`agent.manage`); reading or
+  // cancelling one is owner-or-admin. The task's LLM calls are attributed to the CALLER via a
+  // minted runner token (see pool-tasks.ts) — this API never lends out SecChat's own identity.
+  router.add("POST", "/pool/tasks", async ({ req, res, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable", detail: "No pool task image is configured (SECCHAT_POOL_TASK_IMAGE)." });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
+    const body = (await readJsonBody(req)) as { task?: string[]; repo?: string };
+    const argv = Array.isArray(body.task) ? body.task.map((a) => String(a)) : [];
+    if (argv.length === 0) {
+      sendJson(res, 400, { error: "bad_request", reason: "task must be a non-empty argv array, e.g. [\"review\", \"mr\", \"42\"]" });
+      return;
+    }
+    const repo = typeof body.repo === "string" && body.repo.trim() !== "" ? body.repo.trim() : undefined;
+    const result = await poolTasks.create({ ownerSub: principal.sub, argv, repo });
+    if (result.error) {
+      sendJson(res, result.status ?? 400, { error: "task_rejected", reason: result.error });
+      return;
+    }
+    await store.appendAudit({ actor: principal.sub, action: "pool.task", detail: argv.join(" ") });
+    sendJson(res, 201, { task: result.task });
+  });
+
+  // The caller's own tasks; an admin sees everyone's (summaries — output comes from GET :id).
+  router.add("GET", "/pool/tasks", async ({ res, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const all = poolTasks.list();
+    const mine = isAdmin(principal, admin?.adminGroup ?? "secchat-admins")
+      ? all
+      : all.filter((t) => t.ownerSub === principal.sub);
+    sendJson(res, 200, { tasks: mine });
+  });
+
+  router.add("GET", "/pool/tasks/:id", async ({ res, params, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const task = poolTasks.get(params.id!);
+    if (!task || (task.ownerSub !== principal.sub && !isAdmin(principal, admin?.adminGroup ?? "secchat-admins"))) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    sendJson(res, 200, { task });
+  });
+
+  router.add("DELETE", "/pool/tasks/:id", async ({ res, params, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const task = poolTasks.get(params.id!);
+    if (!task || (task.ownerSub !== principal.sub && !isAdmin(principal, admin?.adminGroup ?? "secchat-admins"))) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    const cancelled = await poolTasks.cancel(params.id!);
+    sendJson(res, cancelled ? 200 : 409, { cancelled });
+  });
+
   // Git SSH identities (admin-gated): the roster of who has a git key registered — PUBLIC metadata
   // only (owner, type, fingerprint, added-at), NEVER the encrypted private envelope. `enabled`
   // reflects whether the deployment wired the feature (a master key); keys can still exist + be
@@ -2074,6 +2144,8 @@ export function createHttpServer(deps: {
   poolStatus?: () => PoolStatus;
   /** Analysis sidecar names the deployment offers (config.pool.analysisImages keys). */
   poolAnalyzers?: readonly string[];
+  /** One-shot pool tasks (batch secagent jobs). Unset ⇒ the /pool/tasks API 503s. */
+  poolTasks?: PoolTasks;
   /** Outbound-webhook dispatcher (webhooks/outbound.ts). Unset ⇒ outbound events aren't delivered
    * and the outbound-webhook routes still manage subscriptions but the test-ping route 503s. */
   outbound?: OutboundDispatcher;
@@ -2087,7 +2159,7 @@ export function createHttpServer(deps: {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.outbound, deps.outboundAllowedHosts);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.poolTasks, deps.outbound, deps.outboundAllowedHosts);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

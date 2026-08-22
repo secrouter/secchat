@@ -28,6 +28,12 @@ export interface K8sClient {
    * cluster's ACTUAL pods — so an orphan pod SecChat lost track of (e.g. across a restart) can be
    * reaped. `ok` is a 2xx; on a non-2xx the list is empty and the caller skips reconciliation. */
   listPods(labelSelector?: string): Promise<{ ok: boolean; status: number; pods: Array<{ name: string; phase?: string }> }>;
+  /** GET one pod's phase (Pending/Running/Succeeded/Failed), or `ok:false` (404 ⇒ gone). Drives
+   * the pool-task status poll. */
+  getPod(name: string): Promise<{ ok: boolean; status: number; phase?: string }>;
+  /** GET a pod's logs (the `log` subresource — needs `pods/log` in the Role). The pool-task result
+   * channel: a one-shot task pod's stdout+stderr IS its report. */
+  podLogs(name: string): Promise<{ ok: boolean; status: number; logs: string }>;
 }
 
 /** The standard in-cluster mount paths for a Pod's ServiceAccount credential. */
@@ -55,6 +61,23 @@ export function makeK8sClient(deps: { namespace: string; request: K8sRequestFn }
       const ok = status >= 200 && status < 300;
       if (!ok) return { ok, status, pods: [] };
       return { ok, status, pods: parsePodList(body) };
+    },
+    async getPod(name) {
+      const { status, body } = await deps.request("GET", `${base}/${encodeURIComponent(name)}`);
+      const ok = status >= 200 && status < 300;
+      if (!ok) return { ok, status };
+      try {
+        const parsed = JSON.parse(body) as { status?: { phase?: unknown } };
+        const phase = parsed.status?.phase;
+        return { ok, status, phase: typeof phase === "string" ? phase : undefined };
+      } catch {
+        return { ok, status };
+      }
+    },
+    async podLogs(name) {
+      const { status, body } = await deps.request("GET", `${base}/${encodeURIComponent(name)}/log`);
+      const ok = status >= 200 && status < 300;
+      return { ok, status, logs: ok ? body : "" };
     },
   };
 }

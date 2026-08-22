@@ -32,6 +32,7 @@ import { RunnerRegistry } from "./agent/runner-registry.ts";
 import { makeRemoteRunner } from "./agent/remote-runner.ts";
 import { makeRouterRunner } from "./agent/router-runner.ts";
 import { makePoolRunner, type PoolRunner } from "./agent/pool-runner.ts";
+import { makePoolTasks, type PoolTasks } from "./agent/pool-tasks.ts";
 import { inClusterNamespace, inClusterRequest, makeK8sClient } from "./agent/k8s.ts";
 import { FsBlobStore } from "./attachments/blobs.ts";
 import { decryptSecret } from "./ssh/keys.ts";
@@ -179,6 +180,7 @@ const remoteRunner = makeRemoteRunner({
 // (running the runnerd image) that attaches back at /runner?pool=<sessionId>. Enabled only when a pool
 // image AND a runner-token minter are configured (the pod attaches as the owner with a minted token).
 let poolRunner: PoolRunner | undefined;
+let poolTasks: PoolTasks | undefined;
 if (config.pool && config.runnerToken) {
   const namespace = config.pool.namespace || inClusterNamespace() || "secchat-pool";
   const k8s = makeK8sClient({ namespace, request: inClusterRequest(config.pool.apiServer) });
@@ -189,6 +191,17 @@ if (config.pool && config.runnerToken) {
     renewLease: (sessionId) => void store.renewLease(sessionId, new Date(Date.now() + 60_000).toISOString()).catch(() => {}),
   });
   console.error(`▸ agent pool: enabled (namespace ${namespace}, image ${config.pool.image})`);
+  // One-shot task API (batch secagent jobs in ephemeral pods) — needs its own image.
+  if (config.pool.taskImage) {
+    poolTasks = makePoolTasks({ k8s, config: config.pool, mintRunnerToken: (sub) => config.runnerToken!.mint(sub) });
+    console.error(`▸ pool tasks: enabled (image ${config.pool.taskImage})`);
+    const taskReconcile = setInterval(() => {
+      void poolTasks!.reconcile().then((reaped) => {
+        if (reaped.length > 0) console.error(`▸ pool tasks: reaped ${reaped.length} orphan task pod(s)`);
+      });
+    }, 60_000);
+    taskReconcile.unref?.();
+  }
   // Orphan reaper: reconcile tracked sessions against the cluster's actual pods and delete any
   // `app=secchat-pool` pod with no live session here (e.g. a pod SecChat lost across a restart).
   // Belt-and-suspenders beyond per-session delete + the pods' own activeDeadlineSeconds. unref'd so
@@ -309,6 +322,8 @@ const server = createHttpServer({
   poolStatus: poolRunner ? () => poolRunner!.status() : undefined,
   // Analysis sidecar catalog names — the New-Coding-Agent picker's checkbox list.
   poolAnalyzers: config.pool ? Object.keys(config.pool.analysisImages) : undefined,
+  // One-shot task API (batch secagent jobs) — unset when no task image is configured.
+  poolTasks,
   // Outbound-webhook delivery (SecChat → external URLs on events), plus the destination allowlist
   // enforced when a subscription is created.
   outbound: makeOutboundDispatcher(store),
