@@ -168,6 +168,40 @@ export interface PoolConfig {
   /** How long to wait for a pod's runnerd to attach before reaping it (`SECCHAT_POOL_ATTACH_TIMEOUT`,
    * ms, default 120000) — covers image pull + boot. */
   attachTimeoutMs: number;
+  /** Analysis sidecar images offerable per agent pod, name → image
+   * (`SECCHAT_POOL_ANALYSIS_IMAGES`, e.g. `rust=secagent-analyzer-rust:1,ikos=secagent-analysis:1`).
+   * An agent created with `analysis: ["rust"]` gets that container attached to its pod, sharing the
+   * pod's /workspace volume so the tooling operates on the agent's working tree. Empty ⇒ the
+   * feature is off (POST /agents rejects any analysis request). */
+  analysisImages: Record<string, string>;
+  /** Image for one-shot POOL TASKS (`SECCHAT_POOL_TASK_IMAGE`) — the secagent agent image, whose
+   * `secagent` CLI runs batch jobs (`review mr`, `docs build`, `analyze run`, …) in an ephemeral
+   * pod via the task API (POST /pool/tasks). Unset ⇒ the task API is off (503). */
+  taskImage?: string;
+  /** Max concurrent one-shot task pods (`SECCHAT_POOL_MAX_TASKS`, default 5; `0` = unlimited) —
+   * admission for the task API, separate from the interactive-session caps. */
+  maxTasks: number;
+  /** Path INSIDE the runnerd image to secagent's pi extension (`SECCHAT_POOL_PI_EXTENSION`).
+   * When set, pool pods get `SECAGENT_PI_EXTENSION=<path>` so the pod's pi loads secagent's tools
+   * — including `analysis_run`, which drives the analysis sidecars via the shared-volume work
+   * queue (the pod also gets `SECCHAT_ANALYSIS` naming its attached analyzers). Unset ⇒ pods run
+   * pi without the secagent extension (the analyzers are then only reachable by hand). */
+  piExtension?: string;
+}
+
+/** Parse `SECCHAT_POOL_ANALYSIS_IMAGES` ("name=image,name=image") into the analyzer catalog.
+ * Names are DNS-label-ish (lowercased; they become container names `analysis-<name>`); malformed
+ * entries are skipped rather than fatal — a typo shouldn't take the whole deployment down. */
+export function parseAnalysisImages(raw: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of (raw ?? "").split(",")) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0) continue;
+    const name = entry.slice(0, eq).trim().toLowerCase();
+    const image = entry.slice(eq + 1).trim();
+    if (/^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/.test(name) && image) out[name] = image;
+  }
+  return out;
 }
 
 function req(env: NodeJS.ProcessEnv, key: string): string {
@@ -263,6 +297,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         maxPods: Number(opt(env, "SECCHAT_POOL_MAX_PODS", "20")),
         maxPerOwner: Number(opt(env, "SECCHAT_POOL_MAX_PER_OWNER", "3")),
         attachTimeoutMs: Number(opt(env, "SECCHAT_POOL_ATTACH_TIMEOUT", "120000")),
+        analysisImages: parseAnalysisImages(env.SECCHAT_POOL_ANALYSIS_IMAGES),
+        piExtension: env.SECCHAT_POOL_PI_EXTENSION?.trim() || undefined,
+        taskImage: env.SECCHAT_POOL_TASK_IMAGE?.trim() || undefined,
+        maxTasks: Number(opt(env, "SECCHAT_POOL_MAX_TASKS", "5")),
       }
     : undefined;
   return {

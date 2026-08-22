@@ -621,17 +621,23 @@ class FakeApiClient implements ApiClient {
     LaunchEnv(id: 'pool', label: 'Online pool', available: false, reason: 'not_deployed', detail: 'Coming soon.'),
   ];
 
+  /// Analysis sidecar names offered by the pool (empty = feature off).
+  List<String> poolAnalyzers = const [];
+
   @override
-  Future<List<LaunchEnv>> getLaunchEnvironments() async {
+  Future<LaunchEnvironments> getLaunchEnvironments() async {
     _maybeThrow('getLaunchEnvironments');
-    return List.of(launchEnvironments);
+    return LaunchEnvironments(environments: List.of(launchEnvironments), analyzers: List.of(poolAnalyzers));
   }
 
-  /// The `launchEnv` / `workspace` / `model` / `reasoning` passed to the most recent [createAgent].
+  /// The `launchEnv` / `workspace` / `model` / `reasoning` / `analysis` passed to the most recent
+  /// [createAgent].
   String? lastCreateAgentLaunchEnv;
   String? lastCreateAgentWorkspace;
   String? lastCreateAgentModel;
   bool? lastCreateAgentReasoning;
+  List<String>? lastCreateAgentAnalysis;
+  bool? lastCreateAgentAnalysisEgress;
 
   @override
   Future<CreateAgentResult> createAgent({
@@ -641,12 +647,16 @@ class FakeApiClient implements ApiClient {
     String? workspace,
     String? model,
     bool? reasoning,
+    List<String>? analysis,
+    bool? analysisEgress,
   }) async {
     _maybeThrow('createAgent');
     lastCreateAgentLaunchEnv = launchEnv;
     lastCreateAgentWorkspace = workspace;
     lastCreateAgentModel = model;
     lastCreateAgentReasoning = reasoning;
+    lastCreateAgentAnalysis = analysis;
+    lastCreateAgentAnalysisEgress = analysisEgress;
     createAgentCalls.add((kind: kind, name: name));
     final index = channels.length + 1;
     // The creator owns the agent, so the channel comes back owned (mirrors the real

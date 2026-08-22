@@ -10,23 +10,27 @@ import '../theme.dart';
 /// agent's workspace (e.g. a repo). Unavailable environments are shown but
 /// disabled, with the reason. Returns the chosen name + environment id + optional
 /// workspace path, or `null` if cancelled.
-Future<({String name, String launchEnv, String? workspace, String? model, bool reasoning})?> showCodingAgentDialog(
+Future<({String name, String launchEnv, String? workspace, String? model, bool reasoning, List<String> analysis, bool analysisEgress})?> showCodingAgentDialog(
   BuildContext context, {
   required List<LaunchEnv> environments,
   required List<String> models,
+  List<String> analyzers = const [],
 }) {
-  return showDialog<({String name, String launchEnv, String? workspace, String? model, bool reasoning})>(
+  return showDialog<({String name, String launchEnv, String? workspace, String? model, bool reasoning, List<String> analysis, bool analysisEgress})>(
     context: context,
     barrierColor: AppColors.overlay,
-    builder: (dialogContext) => _CodingAgentDialog(environments: environments, models: models),
+    builder: (dialogContext) => _CodingAgentDialog(environments: environments, models: models, analyzers: analyzers),
   );
 }
 
 class _CodingAgentDialog extends StatefulWidget {
-  const _CodingAgentDialog({required this.environments, required this.models});
+  const _CodingAgentDialog({required this.environments, required this.models, required this.analyzers});
 
   final List<LaunchEnv> environments;
   final List<String> models;
+
+  /// Analysis sidecar names the pool offers (empty = feature off / pool off).
+  final List<String> analyzers;
 
   @override
   State<_CodingAgentDialog> createState() => _CodingAgentDialogState();
@@ -38,6 +42,8 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
   String? _selectedEnv;
   String? _selectedModel;
   bool _reasoning = false;
+  final Set<String> _analysis = {};
+  bool _analysisEgress = false; // internet access for the pod — DEFAULT OFF
 
   @override
   void initState() {
@@ -68,12 +74,15 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
     final name = _controller.text.trim();
     if (name.isEmpty || _selectedEnv == null) return;
     final ws = _showWorkspace ? _workspaceController.text.trim() : '';
+    final pool = _selectedEnv == 'pool';
     Navigator.of(context).pop((
       name: name,
       launchEnv: _selectedEnv!,
       workspace: ws.isEmpty ? null : ws,
       model: _selectedModel,
       reasoning: _reasoning,
+      analysis: pool ? _analysis.toList() : const <String>[],
+      analysisEgress: pool && _analysisEgress,
     ));
   }
 
@@ -175,6 +184,49 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               selected: _selectedEnv == env.id,
               onSelect: env.available ? () => setState(() => _selectedEnv = env.id) : null,
             ),
+            if (_selectedEnv == 'pool' && widget.analyzers.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              const Text(
+                'ANALYSIS TOOLS',
+                style: TextStyle(color: AppColors.textFaint, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6),
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Extra tooling containers attached to the agent, sharing its workspace.',
+                style: TextStyle(color: AppColors.textMuted, fontSize: 11.5, height: 1.35),
+              ),
+              for (final a in widget.analyzers)
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: AppColors.accent,
+                  title: Text(a, style: const TextStyle(color: AppColors.text, fontSize: 13)),
+                  value: _analysis.contains(a),
+                  onChanged: (v) => setState(() => v == true ? _analysis.add(a) : _analysis.remove(a)),
+                ),
+            ],
+            if (_selectedEnv == 'pool') ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Internet access', style: TextStyle(color: AppColors.text, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                        Text('Off by default: the agent reaches only git and SecChat.', style: TextStyle(color: AppColors.textMuted, fontSize: 11.5)),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: _analysisEgress,
+                    activeThumbColor: AppColors.warn, // opening egress is a posture change — warn tint
+                    onChanged: (v) => setState(() => _analysisEgress = v),
+                  ),
+                ],
+              ),
+            ],
             if (_showWorkspace) ...[
               const SizedBox(height: 14),
               const Text(

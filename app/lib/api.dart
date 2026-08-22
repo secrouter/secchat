@@ -267,12 +267,15 @@ abstract class ApiClient {
     String? workspace,
     String? model,
     bool? reasoning,
+    List<String>? analysis,
+    bool? analysisEgress,
   });
 
   /// The launch environments a coding agent can run in right now
   /// (`GET /runner/environments`) — the user's desktop app and the online pool,
-  /// each flagged available/unavailable. Drives the New-Coding-Agent picker.
-  Future<List<LaunchEnv>> getLaunchEnvironments();
+  /// each flagged available/unavailable — plus the analysis sidecars the pool
+  /// offers. Drives the New-Coding-Agent picker.
+  Future<LaunchEnvironments> getLaunchEnvironments();
 
   /// The models the gateway offers (`GET /models`), for the header's model
   /// picker. Empty when no gateway is wired.
@@ -807,6 +810,8 @@ class HttpApiClient implements ApiClient {
     String? workspace,
     String? model,
     bool? reasoning,
+    List<String>? analysis,
+    bool? analysisEgress,
   }) async => CreateAgentResult.fromJson(
     await _post('/agents', {
       'kind': kind.wireValue,
@@ -815,15 +820,22 @@ class HttpApiClient implements ApiClient {
       if (workspace != null && workspace.trim().isNotEmpty) 'workspace': workspace.trim(),
       if (model != null && model.trim().isNotEmpty) 'model': model.trim(),
       if (reasoning != null) 'reasoning': reasoning,
+      if (analysis != null && analysis.isNotEmpty) 'analysis': analysis,
+      if (analysisEgress != null) 'analysisEgress': analysisEgress,
     }) as Map<String, dynamic>,
   );
 
   @override
-  Future<List<LaunchEnv>> getLaunchEnvironments() async {
+  Future<LaunchEnvironments> getLaunchEnvironments() async {
     final data = await _get('/runner/environments') as Map<String, dynamic>;
-    return (data['environments'] as List<dynamic>? ?? const <dynamic>[])
-        .map((e) => LaunchEnv.fromJson(e as Map<String, dynamic>))
-        .toList();
+    return LaunchEnvironments(
+      environments: (data['environments'] as List<dynamic>? ?? const <dynamic>[])
+          .map((e) => LaunchEnv.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      analyzers: (data['analyzers'] as List<dynamic>? ?? const <dynamic>[])
+          .map((e) => e.toString())
+          .toList(),
+    );
   }
 
   @override

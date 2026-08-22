@@ -20,6 +20,7 @@ import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import { canGrantExecute } from "../agent/gate.ts";
 import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
 import type { PoolStatus } from "../agent/pool-runner.ts";
+import type { PoolTasks } from "../agent/pool-tasks.ts";
 import {
   DEFAULT_CUI_CATEGORIES,
   DEFAULT_MARKING,
@@ -355,6 +356,12 @@ function buildRouter(
   /** Live agent-pool status for the admin-gated `GET /pool/status` (limits + live sessions). Unset ⇒
    * the pool isn't configured and the route reports `{configured:false}`. */
   poolStatus?: () => PoolStatus,
+  /** The analysis sidecar names the deployment offers (config.pool.analysisImages keys) — drives
+   * the New-Coding-Agent picker + POST /agents validation. Unset/empty ⇒ feature off. */
+  poolAnalyzers?: readonly string[],
+  /** One-shot pool tasks (POST/GET/DELETE /pool/tasks) — batch secagent jobs in ephemeral pods.
+   * Unset ⇒ the task API 503s (no task image configured / pool off). */
+  poolTasks?: PoolTasks,
   outbound?: OutboundDispatcher,
   outboundAllowedHosts: readonly string[] = [],
 ): Router<Handler> {
@@ -1537,7 +1544,7 @@ function buildRouter(
     // Standing up an executing delegate is the `agent.manage` capability (combined with granting it
     // execute). Ungated by default; a deployment ties it to an operator group (from the IdP).
     if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
-    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; reasoning?: boolean; launchEnv?: string; workspace?: string };
+    const body = (await readJsonBody(req)) as { kind?: AgentKind; name?: string; model?: string; reasoning?: boolean; launchEnv?: string; workspace?: string; analysis?: string[]; analysisEgress?: boolean };
     const kind = body.kind ?? "assistant";
     // A coding agent may mount a local directory (on its runner daemon's host) as pi's workspace —
     // e.g. the user's repo. Only meaningful for a coding agent on the desktop; stored on the agent
@@ -1570,7 +1577,24 @@ function buildRouter(
       // (per-agent routing — see agent/router-runner.ts).
       launchEnv = env.id;
     }
-    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, reasoning: body.reasoning, workspace, launchEnv });
+    // Analysis sidecars + the pod internet toggle apply only to POOL coding agents. Names are
+    // validated against what the deployment actually offers — an unknown analyzer is a clean 400,
+    // not a pod that silently comes up without it. analysisEgress defaults OFF; it is only ever
+    // true when the caller explicitly set it.
+    let analysis: string[] | undefined;
+    let analysisEgress: boolean | undefined;
+    if (kind === "coding" && launchEnv === "pool") {
+      const requested = Array.isArray(body.analysis) ? body.analysis.map((a) => String(a).trim().toLowerCase()).filter(Boolean) : [];
+      const offered = new Set(poolAnalyzers ?? []);
+      const unknown = requested.filter((a) => !offered.has(a));
+      if (unknown.length > 0) {
+        sendJson(res, 400, { error: "unknown_analyzer", detail: `No such analysis container(s): ${unknown.join(", ")}` });
+        return;
+      }
+      analysis = requested.length > 0 ? requested : undefined;
+      analysisEgress = body.analysisEgress === true ? true : undefined;
+    }
+    const agent = await store.createAgent({ ownerSub: principal.sub, kind, name: body.name, model: body.model, reasoning: body.reasoning, workspace, launchEnv, analysis, analysisEgress });
     const channel = await store.createChannel({
       workspaceId: "ws-default",
       kind: "agent",
@@ -1615,6 +1639,9 @@ function buildRouter(
         desktopConnected: hasRemoteRunner?.(principal.sub) ?? false,
         poolConfigured: poolConfigured ?? false,
       }),
+      // The analysis sidecars a pool agent can attach (deployment catalog names) — the picker's
+      // checkbox list. Empty when the pool is off or the deployment configured none.
+      analyzers: poolConfigured ? [...(poolAnalyzers ?? [])] : [],
     });
   });
 
@@ -1801,6 +1828,72 @@ function buildRouter(
       return;
     }
     sendJson(res, 200, poolStatus ? poolStatus() : { configured: false });
+  });
+
+  // ── One-shot pool tasks: batch secagent jobs (MR review, docs, analysis) in ephemeral pods. ──
+  // Creating a task is the same capability as standing up an agent (`agent.manage`); reading or
+  // cancelling one is owner-or-admin. The task's LLM calls are attributed to the CALLER via a
+  // minted runner token (see pool-tasks.ts) — this API never lends out SecChat's own identity.
+  router.add("POST", "/pool/tasks", async ({ req, res, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable", detail: "No pool task image is configured (SECCHAT_POOL_TASK_IMAGE)." });
+      return;
+    }
+    if (!(await enforceCapability(req, res, principal, "agent.manage"))) return;
+    const body = (await readJsonBody(req)) as { task?: string[]; repo?: string };
+    const argv = Array.isArray(body.task) ? body.task.map((a) => String(a)) : [];
+    if (argv.length === 0) {
+      sendJson(res, 400, { error: "bad_request", reason: "task must be a non-empty argv array, e.g. [\"review\", \"mr\", \"42\"]" });
+      return;
+    }
+    const repo = typeof body.repo === "string" && body.repo.trim() !== "" ? body.repo.trim() : undefined;
+    const result = await poolTasks.create({ ownerSub: principal.sub, argv, repo });
+    if (result.error) {
+      sendJson(res, result.status ?? 400, { error: "task_rejected", reason: result.error });
+      return;
+    }
+    await store.appendAudit({ actor: principal.sub, action: "pool.task", detail: argv.join(" ") });
+    sendJson(res, 201, { task: result.task });
+  });
+
+  // The caller's own tasks; an admin sees everyone's (summaries — output comes from GET :id).
+  router.add("GET", "/pool/tasks", async ({ res, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const all = poolTasks.list();
+    const mine = isAdmin(principal, admin?.adminGroup ?? "secchat-admins")
+      ? all
+      : all.filter((t) => t.ownerSub === principal.sub);
+    sendJson(res, 200, { tasks: mine });
+  });
+
+  router.add("GET", "/pool/tasks/:id", async ({ res, params, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const task = poolTasks.get(params.id!);
+    if (!task || (task.ownerSub !== principal.sub && !isAdmin(principal, admin?.adminGroup ?? "secchat-admins"))) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    sendJson(res, 200, { task });
+  });
+
+  router.add("DELETE", "/pool/tasks/:id", async ({ res, params, principal }) => {
+    if (!poolTasks) {
+      sendJson(res, 503, { error: "tasks_unavailable" });
+      return;
+    }
+    const task = poolTasks.get(params.id!);
+    if (!task || (task.ownerSub !== principal.sub && !isAdmin(principal, admin?.adminGroup ?? "secchat-admins"))) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    const cancelled = await poolTasks.cancel(params.id!);
+    sendJson(res, cancelled ? 200 : 409, { cancelled });
   });
 
   // Git SSH identities (admin-gated): the roster of who has a git key registered — PUBLIC metadata
@@ -2049,6 +2142,10 @@ export function createHttpServer(deps: {
   /** Live agent-pool status accessor for the admin-gated `GET /pool/status` (limits + live sessions,
    * no content). Unset ⇒ the pool isn't configured and the route reports `{configured:false}`. */
   poolStatus?: () => PoolStatus;
+  /** Analysis sidecar names the deployment offers (config.pool.analysisImages keys). */
+  poolAnalyzers?: readonly string[];
+  /** One-shot pool tasks (batch secagent jobs). Unset ⇒ the /pool/tasks API 503s. */
+  poolTasks?: PoolTasks;
   /** Outbound-webhook dispatcher (webhooks/outbound.ts). Unset ⇒ outbound events aren't delivered
    * and the outbound-webhook routes still manage subscriptions but the test-ping route 503s. */
   outbound?: OutboundDispatcher;
@@ -2062,7 +2159,7 @@ export function createHttpServer(deps: {
   const marking = deps.marking ?? makeMarkingPolicy([...DEFAULT_MARKING_LEVELS], DEFAULT_MARKING, [...DEFAULT_CUI_CATEGORIES]);
   const dlp = deps.dlp ?? new DlpPolicy("off", []);
   const capabilities = deps.capabilities ?? defaultCapabilityPolicy(deps.admin?.adminGroup ?? "secchat-admins");
-  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.outbound, deps.outboundAllowedHosts);
+  const router = buildRouter(deps.store, marking, dlp, capabilities, deps.stepUp, deps.broadcast, deps.llm, deps.control, deps.admin, deps.search, deps.attachments, deps.notify, deps.presence, deps.hasRemoteRunner, deps.runnerToken, deps.assistantModel, deps.subscribe, deps.ssh, deps.poolConfigured, deps.poolStatus, deps.poolAnalyzers, deps.poolTasks, deps.outbound, deps.outboundAllowedHosts);
   // Populated on first read by serveWebFile; see its doc comment for why caching is safe here.
   const webCache = new Map<string, WebCacheEntry>();
 

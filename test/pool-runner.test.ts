@@ -17,7 +17,7 @@ import { buildPoolPodSpec, makePoolRunner, poolPodName } from "../src/agent/pool
 import { makeRouterRunner } from "../src/agent/router-runner.ts";
 import { RunnerRegistry, type RunnerConnection } from "../src/agent/runner-registry.ts";
 import { attachRunnerHub } from "../src/ws/runner-hub.ts";
-import type { PoolConfig } from "../src/config.ts";
+import { parseAnalysisImages, type PoolConfig } from "../src/config.ts";
 import type { RunnerCommand, RunnerMessage } from "../src/agent/runner-protocol.ts";
 import type { Runner, RunnerEvent, VerifyToken } from "../src/types.ts";
 
@@ -32,6 +32,8 @@ const POOL: PoolConfig = {
   maxPods: 20,
   maxPerOwner: 3,
   attachTimeoutMs: 120_000,
+  analysisImages: { rust: "secagent-analyzer-rust:1", ikos: "secagent-analysis:1" },
+  maxTasks: 5,
 };
 
 async function waitFor(pred: () => boolean, ms = 1500): Promise<void> {
@@ -108,9 +110,11 @@ test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — a
   assert.equal(podSpec.activeDeadlineSeconds, 3600); // hard TTL backstop
   // runAsNonRoot must pin a NUMERIC uid, else the kubelet can't verify non-root and refuses the pod
   // (caught live on k3s — the runnerd image's `USER node` is non-numeric).
-  const podSc = podSpec.securityContext as { runAsNonRoot?: boolean; runAsUser?: number };
+  const podSc = podSpec.securityContext as { runAsNonRoot?: boolean; runAsUser?: number; fsGroup?: number };
   assert.equal(podSc.runAsNonRoot, true);
   assert.equal(podSc.runAsUser, 1000);
+  // fsGroup chowns the shared workspace emptyDir — without it uid-1000 containers can't write it.
+  assert.equal(podSc.fsGroup, 1000);
   const container = (podSpec.containers as Array<Record<string, unknown>>)[0]!;
   assert.equal(container.image, POOL.image);
   const env = container.env as Array<{ name: string; value: string }>;
@@ -127,6 +131,66 @@ test("buildPoolPodSpec: hardened, one-shot, TTL'd, carries the session env — a
   // The private key is injected over the /runner channel (the start command), never baked into the pod.
   assert.ok(!JSON.stringify(spec).includes("PRIVATE"));
   assert.match(poolPodName("S1-ABC"), /^secchat-pool-s1-abc$/);
+});
+
+test("buildPoolPodSpec: analysis sidecars share the /workspace volume; egress label defaults RESTRICTED", () => {
+  const spec = buildPoolPodSpec({
+    podName: "secchat-pool-s1", sessionId: "s1", ownerSub: "alice", runnerToken: "TOK",
+    config: POOL, analysis: ["rust"],
+  });
+  const meta = spec.metadata as { labels: Record<string, string> };
+  assert.equal(meta.labels["secchat.io/egress"], "restricted"); // DEFAULT OFF — no internet
+  const podSpec = spec.spec as Record<string, unknown>;
+  assert.deepEqual(podSpec.volumes, [{ name: "workspace", emptyDir: {} }]);
+  const containers = podSpec.containers as Array<Record<string, unknown>>;
+  assert.deepEqual(containers.map((c) => c.name), ["runnerd", "analysis-rust"]);
+  // Both mount the shared workspace, so the analyzer's tooling sees the agent's code…
+  for (const c of containers) {
+    assert.deepEqual(c.volumeMounts, [{ name: "workspace", mountPath: "/workspace" }]);
+  }
+  // …and pi's state/workspaces are rooted ON that volume.
+  const env = (containers[0]!.env as Array<{ name: string; value: string }>);
+  assert.equal(env.find((e) => e.name === "SECCHAT_PI_STATE_DIR")?.value, "/workspace/state");
+  // The pod's pi learns which analyzers ride along (secagent's analysis_run tool keys on this).
+  assert.equal(env.find((e) => e.name === "SECCHAT_ANALYSIS")?.value, "rust");
+  // The sidecar idles on the file-queue watcher (its batch entrypoint would exit immediately),
+  // with the same hardening as runnerd.
+  const sidecar = containers[1]!;
+  assert.equal(sidecar.image, "secagent-analyzer-rust:1");
+  const cmd = sidecar.command as string[];
+  assert.equal(cmd[0], "sh");
+  assert.match(cmd[2]!, /\/workspace\/\.analysis\/rust\/request/);
+  assert.deepEqual((sidecar.securityContext as { capabilities: { drop: string[] } }).capabilities.drop, ["ALL"]);
+});
+
+test("buildPoolPodSpec: analysisEgress=true labels the pod egress OPEN; unknown analyzers are skipped", () => {
+  const spec = buildPoolPodSpec({
+    podName: "p", sessionId: "s", ownerSub: "alice", runnerToken: "T",
+    config: POOL, analysis: ["rust", "nonexistent"], analysisEgress: true,
+  });
+  const meta = spec.metadata as { labels: Record<string, string> };
+  assert.equal(meta.labels["secchat.io/egress"], "open");
+  const containers = (spec.spec as Record<string, unknown>).containers as Array<Record<string, unknown>>;
+  assert.deepEqual(containers.map((c) => c.name), ["runnerd", "analysis-rust"]); // unknown skipped
+});
+
+test("buildPoolPodSpec: piExtension wires SECAGENT_PI_EXTENSION; no analyzers ⇒ no SECCHAT_ANALYSIS", () => {
+  const spec = buildPoolPodSpec({
+    podName: "p", sessionId: "s", ownerSub: "alice", runnerToken: "T",
+    config: { ...POOL, piExtension: "/app/pi-extensions/secagent.ts" },
+  });
+  const env = ((spec.spec as Record<string, unknown>).containers as Array<Record<string, unknown>>)[0]!
+    .env as Array<{ name: string; value: string }>;
+  assert.equal(env.find((e) => e.name === "SECAGENT_PI_EXTENSION")?.value, "/app/pi-extensions/secagent.ts");
+  assert.equal(env.find((e) => e.name === "SECCHAT_ANALYSIS"), undefined);
+});
+
+test("parseAnalysisImages: parses the catalog, rejects malformed names", () => {
+  assert.deepEqual(
+    parseAnalysisImages("rust=reg/analyzer-rust:1, ikos=secagent-analysis:2 ,BAD NAME=x,=y,noimage="),
+    { rust: "reg/analyzer-rust:1", ikos: "secagent-analysis:2" },
+  );
+  assert.deepEqual(parseAnalysisImages(undefined), {});
 });
 
 // ── 3. Pool-runner lifecycle ──────────────────────────────────────────────────────────────────
@@ -151,6 +215,12 @@ function makeFakeK8s() {
         .filter((n): n is string => typeof n === "string");
       const live = [...fromCreated, ...extraPods].filter((n) => !deleted.includes(n));
       return { ok: true, status: 200, pods: live.map((name) => ({ name })) };
+    },
+    async getPod(_n: string) {
+      return { ok: true, status: 200, phase: "Running" };
+    },
+    async podLogs(_n: string) {
+      return { ok: true, status: 200, logs: "" };
     },
   };
   return { k8s, created, deleted, setFailCreate: (v: boolean) => (failCreate = v), addClusterPod: (n: string) => extraPods.push(n) };

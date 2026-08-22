@@ -158,6 +158,8 @@ interface AgentRow {
   reasoning: boolean | null;
   workspace: string | null;
   launch_env: string | null;
+  analysis: string[] | null;
+  analysis_egress: boolean | null;
   created_at: Date;
 }
 
@@ -341,6 +343,8 @@ function rowToAgent(row: AgentRow): Agent {
     reasoning: row.reasoning ?? undefined,
     workspace: row.workspace ?? undefined,
     launchEnv: (row.launch_env as Agent["launchEnv"]) ?? undefined,
+    analysis: row.analysis ?? undefined,
+    analysisEgress: row.analysis_egress ?? undefined,
     createdAt: iso(row.created_at),
   });
 }
@@ -697,15 +701,15 @@ export class PgStore implements Store, SessionStore {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     await this.#pool.query(
-      `INSERT INTO agents (id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.reasoning ?? null, input.workspace ?? null, input.launchEnv ?? null, createdAt],
+      `INSERT INTO agents (id, owner_sub, kind, name, model, reasoning, workspace, launch_env, analysis, analysis_egress, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [id, input.ownerSub, input.kind, input.name ?? null, input.model ?? null, input.reasoning ?? null, input.workspace ?? null, input.launchEnv ?? null, input.analysis ?? null, input.analysisEgress ?? null, createdAt],
     );
-    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, reasoning: input.reasoning, workspace: input.workspace, launchEnv: input.launchEnv, createdAt });
+    return compact({ id, ownerSub: input.ownerSub, kind: input.kind, name: input.name, model: input.model, reasoning: input.reasoning, workspace: input.workspace, launchEnv: input.launchEnv, analysis: input.analysis, analysisEgress: input.analysisEgress, createdAt });
   }
 
   async getAgent(id: Id): Promise<Agent | null> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents WHERE id = $1`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, analysis, analysis_egress, created_at FROM agents WHERE id = $1`,
       [id],
     );
     return rows[0] ? rowToAgent(rows[0]) : null;
@@ -722,7 +726,7 @@ export class PgStore implements Store, SessionStore {
       vals.push(patch.reasoning);
       sets.push(`reasoning = $${vals.length}`);
     }
-    const cols = "id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at";
+    const cols = "id, owner_sub, kind, name, model, reasoning, workspace, launch_env, analysis, analysis_egress, created_at";
     if (sets.length === 0) {
       const { rows } = await this.#pool.query<AgentRow>(`SELECT ${cols} FROM agents WHERE id = $1`, [id]);
       return rows[0] ? rowToAgent(rows[0]) : null;
@@ -737,7 +741,7 @@ export class PgStore implements Store, SessionStore {
   /** Owner's agents, creation order (ins_seq). */
   async listAgentsByOwner(ownerSub: string): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, analysis, analysis_egress, created_at FROM agents WHERE owner_sub = $1 ORDER BY ins_seq`,
       [ownerSub],
     );
     return rows.map(rowToAgent);
@@ -746,7 +750,7 @@ export class PgStore implements Store, SessionStore {
   /** Every agent, creation order, regardless of owner — for the admin / audit-review console. */
   async listAllAgents(): Promise<Agent[]> {
     const { rows } = await this.#pool.query<AgentRow>(
-      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, created_at FROM agents ORDER BY ins_seq`,
+      `SELECT id, owner_sub, kind, name, model, reasoning, workspace, launch_env, analysis, analysis_egress, created_at FROM agents ORDER BY ins_seq`,
     );
     return rows.map(rowToAgent);
   }
