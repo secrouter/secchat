@@ -34,10 +34,20 @@ enum ChannelKind {
 
 enum AuthorType {
   user,
-  agent;
+  agent,
 
-  static AuthorType fromWire(String? raw) =>
-      raw == 'agent' ? AuthorType.agent : AuthorType.user;
+  /// The service principal that posts governed content on nobody's behalf --
+  /// today, exactly the voice-call transcript (voice-calls-plan.md §8 O4,
+  /// §2.4: `governedCallAppend` authors as `"system"`). Rendered like an
+  /// agent message (accent byline, `displayName`-first label) since there's
+  /// no human `authorRef` to resolve through the directory.
+  system;
+
+  static AuthorType fromWire(String? raw) => switch (raw) {
+    'agent' => AuthorType.agent,
+    'system' => AuthorType.system,
+    _ => AuthorType.user,
+  };
 }
 
 /// The two agent kinds the backend accepts from `POST /agents`.
@@ -68,6 +78,7 @@ class Principal {
     this.email,
     this.marking = MarkingPolicy.fallback,
     this.serverIsAdmin,
+    this.callStunUrls = const [],
   });
 
   final String sub;
@@ -90,6 +101,12 @@ class Principal {
   /// the banners, the composer's marking picker, and local rank comparisons.
   final MarkingPolicy marking;
 
+  /// STUN server URL(s) for voice calls' p2p ICE gathering (`GET /me`'s
+  /// `callStunUrls`, `SECCHAT_CALL_STUN` -- voice-calls-plan.md A3/§2.5,
+  /// finding #4). Empty ⇒ no STUN configured for this deployment; a p2p call
+  /// then relies entirely on host/peer-reflexive candidates.
+  final List<String> callStunUrls;
+
   bool get isAdmin => serverIsAdmin ?? groups.contains('secchat-admins');
 
   /// A human label for the top bar etc.: the display name, else the email, else
@@ -111,6 +128,9 @@ class Principal {
         ? MarkingPolicy.fromJson(json['marking'] as Map<String, dynamic>)
         : MarkingPolicy.fallback,
     serverIsAdmin: json['isAdmin'] as bool?,
+    callStunUrls: (json['callStunUrls'] as List<dynamic>? ?? const <dynamic>[])
+        .map((e) => e.toString())
+        .toList(),
   );
 }
 
@@ -216,6 +236,12 @@ class Channel {
     }
     return null;
   }
+
+  /// True for the caller's own self-DM ("notes to self", `POST /self-dm`) --
+  /// a `kind: dm` channel with a single member (you), so [peer] resolves to
+  /// null. This is the gate the solo-record button and its rail label key
+  /// off of (voice-memo UX).
+  bool isSelfDm(String me) => kind == ChannelKind.dm && peer(me) == null;
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
     id: json['id'] as String,
@@ -962,6 +988,223 @@ final class WsUserJoinedEvent extends WsEvent {
   const WsUserJoinedEvent() : super(channelId: '');
 }
 
+// ── Voice calls (docs/plans/voice-contracts.md §1) ──────────────────────
+//
+// `call_*` frames ride the SAME authenticated WS hub (no new connection) --
+// see [ApiClient.subscribeAll] + the `sendCall*` helpers below. Every frame
+// carries `channelId` (the DM the call belongs to), matching the rest of the
+// hub's frame shape. This section MUST stay in sync with
+// docs/plans/voice-contracts.md §1 -- change one, change the other.
+
+/// The recording-consent-fixed transport mode for an accepted call
+/// (voice-contracts.md §1.2 `call_accept`'s `mode`). Fixed for the life of
+/// the call -- no mid-call renegotiation (plan O5).
+enum CallMode {
+  p2p,
+  relayed;
+
+  static CallMode fromWire(String? raw) => raw == 'relayed' ? CallMode.relayed : CallMode.p2p;
+}
+
+/// Someone is calling (or being told they're being called) in [channelId].
+/// Outbound (client → server) this is the caller's invite (`wantRecording`,
+/// no `from`); inbound (server → callee, all tabs) it also carries `from`
+/// (the caller's sub). See voice-contracts.md §1.2 `call_invite`.
+final class WsCallInviteEvent extends WsEvent {
+  const WsCallInviteEvent({
+    required this.from,
+    required this.wantRecording,
+    required super.channelId,
+  });
+  final String from;
+  final bool wantRecording;
+}
+
+/// The callee's connection accepted the ringing call (`consent` is the
+/// recording-consent decision, independent of the caller's `wantRecording` --
+/// D3/D4). Delivered to the caller's bound connection with `mode` now fixed;
+/// `mode` may read `p2p` even though `consent` is true -- the mediad-down
+/// downgrade case (voice-contracts.md §1.2, plan §2.3) -- the UI must treat
+/// that as "recording unavailable", not silently drop the notice.
+///
+/// [solo] is set on the confirmation echo to a `call_solo_start` (self-DM
+/// voice memo): there's no callee to consent, `mode` is always `relayed`, and
+/// [WebrtcCallController] routes it to the solo-record flow instead of the
+/// normal caller/callee accept handling.
+final class WsCallAcceptEvent extends WsEvent {
+  const WsCallAcceptEvent({
+    required this.consent,
+    required this.mode,
+    this.solo = false,
+    required super.channelId,
+  });
+  final bool consent;
+  final CallMode mode;
+  final bool solo;
+}
+
+/// A different tab already answered this ringing call -- dismiss the local
+/// ring screen (voice-contracts.md §1.2 `call_taken`).
+final class WsCallTakenEvent extends WsEvent {
+  const WsCallTakenEvent({required super.channelId});
+}
+
+/// An SDP offer/answer, forwarded verbatim in p2p mode or terminated at
+/// mediad in relayed mode (voice-contracts.md §1.2/§2.2 `call_sdp`).
+final class WsCallSdpEvent extends WsEvent {
+  const WsCallSdpEvent({
+    required this.sdpType,
+    required this.sdp,
+    required super.channelId,
+  });
+  final String sdpType; // 'offer' | 'answer'
+  final String sdp;
+}
+
+/// A trickled ICE candidate -- **p2p mode only** (voice-contracts.md §1.2
+/// `call_candidate`); never sent/expected in relayed mode (mediad's exchange
+/// is non-trickle). `sdpMid`/`sdpMLineIndex` may be null (the WebRTC spec's
+/// own candidate-completion sentinel) -- forward as-is, don't coerce.
+final class WsCallCandidateEvent extends WsEvent {
+  const WsCallCandidateEvent({
+    required this.candidate,
+    required this.sdpMid,
+    required this.sdpMLineIndex,
+    required super.channelId,
+  });
+  final String candidate;
+  final String? sdpMid;
+  final int? sdpMLineIndex;
+}
+
+/// The call ended -- either side hung up, or a bound connection dropped
+/// (`byDisconnect: true`, voice-contracts.md §1.2 `call_end`).
+final class WsCallEndEvent extends WsEvent {
+  const WsCallEndEvent({required this.byDisconnect, required super.channelId});
+  final bool byDisconnect;
+}
+
+/// The ringing call's 45s timeout expired unanswered -- dismiss any open ring
+/// screen immediately (voice-contracts.md §1.2 `call_missed`). The durable
+/// record is the `call_missed` chat line posted separately, not this frame.
+final class WsCallMissedEvent extends WsEvent {
+  const WsCallMissedEvent({required super.channelId});
+}
+
+/// mediad's ACTUAL recording-writer state changed -- the truthful ● REC push
+/// (voice-contracts.md §1.2 `call_recording`, plan §2.3/finding #7). Sent to
+/// both bound connections; never emitted for a p2p call (mediad is never
+/// involved -- `recording` stays `"none"` for its whole duration).
+final class WsCallRecordingEvent extends WsEvent {
+  const WsCallRecordingEvent({required this.recording, required super.channelId});
+  final bool recording;
+}
+
+/// One `call_roster` entry's identity + live media state (video-calls wire
+/// contract addendum to voice-contracts.md's group-call section: a roster
+/// participant now carries camera/screen state alongside `sub`, not just
+/// `sub`). Kept here as a plain DTO (not `CallParticipant`, which lives in
+/// `calls/call_controller.dart`) purely to avoid a models.dart ->
+/// call_controller.dart import cycle -- `WebrtcCallController` maps this 1:1
+/// onto `CallParticipant` when it applies the roster.
+class CallRosterEntry {
+  const CallRosterEntry({
+    required this.sub,
+    this.cameraOn = false,
+    this.screenOn = false,
+    this.cameraTrackId,
+    this.screenTrackId,
+  });
+
+  final String sub;
+  final bool cameraOn;
+  final bool screenOn;
+
+  /// This participant's own LOCAL video track ids (never mediad's relayed
+  /// `video-<originTrackID>` form) -- see the wire contract's naming
+  /// section: a client matches an inbound relayed track's suffix against
+  /// these verbatim to tell a camera tile from a screen-share tile.
+  final String? cameraTrackId;
+  final String? screenTrackId;
+}
+
+/// The initial roster of a group (multi-party SFU) call, sent once when this
+/// connection's `call_start`/`call_join` takes hold -- who's already in the
+/// call, and their current camera/screen state (voice-contracts.md
+/// group-call addendum + the video-calls wire contract). Later membership
+/// changes arrive one at a time via [WsCallParticipantJoinedEvent]/
+/// [WsCallParticipantLeftEvent], not another roster push; live camera/screen
+/// toggles arrive via [WsCallMediaEvent].
+final class WsCallRosterEvent extends WsEvent {
+  const WsCallRosterEvent({required this.participants, required super.channelId});
+
+  /// The participants already in the call (mine is never included).
+  final List<CallRosterEntry> participants;
+}
+
+/// A participant joined the live group call in [channelId] -- add a roster
+/// tile. Fired for everyone already in the call, not the joiner themselves
+/// (they get [WsCallRosterEvent] instead). Always starts camera/screen off
+/// -- a genuinely fresh join never carries pre-existing media state; a
+/// [WsCallMediaEvent] follows separately if/when they turn either on.
+final class WsCallParticipantJoinedEvent extends WsEvent {
+  const WsCallParticipantJoinedEvent({required this.sub, required super.channelId});
+  final String sub;
+}
+
+/// A participant left the live group call in [channelId] -- drop their
+/// roster tile.
+final class WsCallParticipantLeftEvent extends WsEvent {
+  const WsCallParticipantLeftEvent({required this.sub, required super.channelId});
+  final String sub;
+}
+
+/// A participant's camera/screen state changed (`call_media`, the
+/// video-calls wire contract) -- sent on EVERY toggle, group call OR 1:1
+/// (unlike [WsCallRosterEvent]/[WsCallParticipantJoinedEvent], this fires
+/// for a 1:1 call's peer too: [CallController] tracks a 1:1 peer's live
+/// media state the same way it tracks a group roster entry, see
+/// `CallSnapshot.participants`'s doc). [cameraTrackId]/[screenTrackId] are
+/// THAT participant's own local track ids -- null when the corresponding
+/// source is off.
+final class WsCallMediaEvent extends WsEvent {
+  const WsCallMediaEvent({
+    required this.sub,
+    required this.cameraOn,
+    required this.screenOn,
+    this.cameraTrackId,
+    this.screenTrackId,
+    required super.channelId,
+  });
+  final String sub;
+  final bool cameraOn;
+  final bool screenOn;
+  final String? cameraTrackId;
+  final String? screenTrackId;
+}
+
+/// A `call_*` frame this connection sent was rejected -- sent to the ONE
+/// connection that sent it, never broadcast (`src/ws/hub.ts`'s
+/// `sendCallError`; voice-contracts.md §1.3 only mandates "a WS-level error
+/// frame", so `{type:'call_error',channelId,error,detail?}` is that
+/// implementation's own wire shape, matched here). `error` is the stable
+/// machine-readable code (`src/calls/registry.ts`'s `CallSignalError.code` /
+/// the hub's own `*_failed` codes) -- e.g. `user_busy`, `glare_lost`,
+/// `call_active`, `not_ringing`, `mediad_broker_failed`, `frame_too_large`,
+/// `invite_failed`, `accept_failed`. A rejected invite leaves the caller
+/// parked ringing; a rejected accept/relay leaves a side parked connecting
+/// with the mic already open -- both MUST be unstuck by the call
+/// controller's handler for this event (see `calls/call_controller.dart`).
+final class WsCallErrorEvent extends WsEvent {
+  const WsCallErrorEvent({
+    required this.error,
+    required this.detail,
+    required super.channelId,
+  });
+  final String error;
+  final String? detail;
+}
+
 /// Parses one decoded WebSocket JSON frame. Returns `null` for an event
 /// `type` this client doesn't know about, so the server can grow the
 /// protocol without breaking older clients. Every frame carries a top-level
@@ -1080,6 +1323,89 @@ WsEvent? parseWsEvent(Map<String, dynamic> json) {
       );
     case 'user_joined':
       return const WsUserJoinedEvent();
+    case 'call_invite':
+      return WsCallInviteEvent(
+        from: json['from'] as String? ?? '',
+        wantRecording: json['wantRecording'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'call_accept':
+      return WsCallAcceptEvent(
+        consent: json['consent'] as bool? ?? false,
+        mode: CallMode.fromWire(json['mode'] as String?),
+        solo: json['solo'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'call_taken':
+      return WsCallTakenEvent(channelId: channelId);
+    case 'call_sdp':
+      return WsCallSdpEvent(
+        sdpType: json['sdpType'] as String? ?? 'offer',
+        sdp: json['sdp'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_candidate':
+      return WsCallCandidateEvent(
+        candidate: json['candidate'] as String? ?? '',
+        sdpMid: json['sdpMid'] as String?,
+        sdpMLineIndex: (json['sdpMLineIndex'] as num?)?.toInt(),
+        channelId: channelId,
+      );
+    case 'call_end':
+      return WsCallEndEvent(
+        byDisconnect: json['byDisconnect'] as bool? ?? false,
+        channelId: channelId,
+      );
+    case 'call_missed':
+      return WsCallMissedEvent(channelId: channelId);
+    case 'call_roster':
+      final raw = json['participants'];
+      final entries = raw is List
+          ? raw
+                .whereType<Map<String, dynamic>>()
+                .map(
+                  (p) => CallRosterEntry(
+                    sub: p['sub'] as String? ?? '',
+                    cameraOn: p['cameraOn'] as bool? ?? false,
+                    screenOn: p['screenOn'] as bool? ?? false,
+                    cameraTrackId: p['cameraTrackId'] as String?,
+                    screenTrackId: p['screenTrackId'] as String?,
+                  ),
+                )
+                .where((entry) => entry.sub.isNotEmpty)
+                .toList()
+          : <CallRosterEntry>[];
+      return WsCallRosterEvent(participants: entries, channelId: channelId);
+    case 'call_participant_joined':
+      return WsCallParticipantJoinedEvent(
+        sub: json['sub'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_participant_left':
+      return WsCallParticipantLeftEvent(
+        sub: json['sub'] as String? ?? '',
+        channelId: channelId,
+      );
+    case 'call_media':
+      return WsCallMediaEvent(
+        sub: json['sub'] as String? ?? '',
+        cameraOn: json['cameraOn'] as bool? ?? false,
+        screenOn: json['screenOn'] as bool? ?? false,
+        cameraTrackId: json['cameraTrackId'] as String?,
+        screenTrackId: json['screenTrackId'] as String?,
+        channelId: channelId,
+      );
+    case 'call_recording':
+      return WsCallRecordingEvent(
+        recording: json['recording'] == 'on',
+        channelId: channelId,
+      );
+    case 'call_error':
+      return WsCallErrorEvent(
+        error: json['error'] as String? ?? 'call_error',
+        detail: json['detail'] as String?,
+        channelId: channelId,
+      );
     default:
       return null;
   }

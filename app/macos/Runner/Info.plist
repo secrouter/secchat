@@ -26,6 +26,10 @@
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SecChat needs the camera for video calls.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SecChat needs the microphone for 1:1 voice calls.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

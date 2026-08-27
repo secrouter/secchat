@@ -1,0 +1,280 @@
+// TranscribeClient — the secchat backend's client for SecRecorder's transcription API (§2.4/§3.1
+// of docs/plans/voice-calls-plan.md; see docs/plans/voice-contracts.md §5 for the exact wire shape).
+// SecRecorder is UNAUTHENTICATED — network isolation (reachable only from this backend, never from
+// clients) is the control (A6, §9's folded suggestions) — this client's `baseUrl` is expected to be
+// a compose-internal address.
+//
+// Two things make this more than a bare `fetch` wrapper:
+//   * Retry/backoff (mirrors webhooks/outbound.ts's OutboundOptions shape): a network error or a
+//     5xx/429 response is retried with doubling backoff; any other 4xx (bad/empty file, 413 over
+//     WHISPER_MAX_UPLOAD_MB) is a permanent failure — retrying an empty file won't un-empty it.
+//     `transcribeLeg` NEVER partially succeeds (§2.4's contract): either the full `TranscribeResult`
+//     comes back or the promise rejects with a `TranscribeError | Error` the caller's failure-
+//     isolation path turns into a "transcription pending"/failure line (§2.4).
+//   * A concurrency limiter (default 1, matching SecRecorder's own `WHISPER_MAX_CONCURRENCY=1`,
+//     which serializes GPU work server-side regardless) — this just stops a burst of per-leg jobs
+//     piling up client-side retries behind an already-saturated SecRecorder instead of queueing.
+
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+
+export interface TranscribeClientDeps {
+  /** SecRecorder base URL (SECCHAT_TRANSCRIBE_URL), compose-internal / secproxy-fronted only. */
+  baseUrl: string;
+  /** Injectable for tests; defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
+  /** Caps in-flight transcribeLeg calls (mirrors SecRecorder's own WHISPER_MAX_CONCURRENCY, which
+   * serializes GPU work server-side regardless — this just avoids piling up client-side retries
+   * behind it). Default 1. */
+  maxConcurrency?: number;
+  /** Total attempts per job including the first (default 4 — a GPU-bound service can take a while
+   * to recover from a transient 5xx/OOM). */
+  maxAttempts?: number;
+  /** Base backoff in ms, doubled each retry (default 1000; pass 0 in tests). */
+  backoffMs?: number;
+  /** Injectable sleep (tests pass a no-op / instrumented one), same knob as OutboundOptions.sleep. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** One word-level timestamp — SecRecorder's `words[]` shape (server.py's flattened
+ * segment-words), the field most clients read for real per-word timing. */
+export interface TranscribeWord {
+  word: string;
+  start: number; // seconds
+  end: number;
+  /** Only ever present on a `diarize=true` response (the `SECCHAT_TRANSCRIBE_MODE=mixed` fallback,
+   * §2.4) — a diarization-assigned speaker id. Calls need none of this in the default per-leg mode
+   * (A7: leg identity already gives exact attribution); `transcribe/merge.ts`'s `mergeMixedTranscript`
+   * remaps whatever raw id SecRecorder assigns to generic "Speaker 1"/"Speaker 2" labels. TODO(voice):
+   * confirm SecRecorder's exact diarize=true field name/shape once it's added to
+   * docs/plans/voice-contracts.md (§5.2 notes the mixed fallback is "not implemented in v1's
+   * scaffold" on the wire-contract side — this client sends the flag, but nothing yet exercises a
+   * real diarized response against it). */
+  speaker?: string;
+}
+
+/** One segment — SecRecorder's `segments[]` shape (kept for the merge's fallback + general
+ * compatibility, per server.py's own doc comment). */
+export interface TranscribeSegment {
+  start: number; // seconds, relative to the LEG file (not the call's session t0 — see merge.ts)
+  end: number;
+  text: string;
+  words?: TranscribeWord[];
+  /** See {@link TranscribeWord.speaker} — same diarize=true-only, mixed-mode-only caveat. */
+  speaker?: string;
+}
+
+/** One enrolled-voiceprint match — present only on an `identify=true` response (§ TranscribeLegJob.
+ * identify). TODO(voice): confirm SecRecorder's exact `speakers[]` field names/shape once it's
+ * documented in docs/plans/voice-contracts.md §5.1 (same "sent but not yet exercised against a real
+ * response" caveat as `diarize=true`'s `speaker` fields, above) — `name`/`match_score` are this
+ * client's best-effort read of the enrollment feature `enrollVoiceprint` (below) registers speakers
+ * for. */
+export interface TranscribeSpeaker {
+  /** The enrolled name this speaker was matched to (`EnrollVoiceprintJob.name`), when confident
+   * enough to report — absent for an unmatched/unenrolled speaker. */
+  name?: string;
+  /** SecRecorder's confidence for `name`, when present. */
+  match_score?: number;
+}
+
+/** SecRecorder's `POST /v1/audio/transcriptions` response. The `diarize=false` shape (calls' default
+ * per-leg mode) carries no `speaker` on any word/segment — per-leg identity already gives exact
+ * attribution (A7), so calls need none of that. `speakers[]` is `identify=true`-only (absent
+ * otherwise) — see `TranscribeSpeaker`. */
+export interface TranscribeResult {
+  task: "transcribe";
+  language: string;
+  duration: number; // seconds
+  text: string;
+  words: TranscribeWord[];
+  segments: TranscribeSegment[];
+  speakers?: TranscribeSpeaker[];
+}
+
+export interface TranscribeLegJob {
+  /** Which leg this is (caller/callee) — carried through only for logging/error attribution; the
+   * merge step's speaker attribution comes from the CALLER's `LegTranscript.speaker`, not this. */
+  legId: string;
+  /** The leg's OGG/Opus file path on the shared recordings volume (mediad's finalize output), OR —
+   * for the `SECCHAT_TRANSCRIBE_MODE=mixed` fallback — the ffmpeg-mixed playback file's path. */
+  filePath: string;
+  /** `true` ONLY for the mixed-mode fallback's single pass over the mixed file (§2.4: "one
+   * transcription pass ... with diarize=true"); omitted/false (the default) for the normal per-leg
+   * jobs, where diarization is unnecessary (A7). */
+  diarize?: boolean;
+  /** `true` to have SecRecorder match this leg's audio against its enrolled-voiceprint registry
+   * (`enrollVoiceprint`, below) and return `TranscribeResult.speakers[]` (`name`/`match_score`).
+   * Independent of `diarize` — per-leg identity already tells calls WHO is speaking (A7); this is
+   * about matching that leg's speaker against a PREVIOUSLY enrolled voiceprint (e.g. from an
+   * earlier solo memo's `enroll:true`), not about attributing turns within the leg. Omitted/false
+   * skips the match (the pre-existing behavior). */
+  identify?: boolean;
+}
+
+/** One opt-in voiceprint enrollment — the solo self-DM memo flow's `enroll:true` path
+ * (calls/registry.ts's `runPostCallPipeline`). */
+export interface EnrollVoiceprintJob {
+  /** The speaker's display name (`Store.getUser(...).displayName`, falling back to their sub) —
+   * SecRecorder's own speaker registry is keyed by this name, not a secchat user id. */
+  name: string;
+  /** The sample audio's on-disk path (same shared-recordings-volume convention as
+   * `TranscribeLegJob.filePath`) — the caller's leg file, read BEFORE the session directory is
+   * deleted (calls/registry.ts's `deleteSessionDir`). */
+  filePath: string;
+}
+
+export interface TranscribeClient {
+  /** POST one leg's (or, in mixed mode, the whole call's) audio file to SecRecorder. Retries with
+   * backoff on a network error or 5xx/429; queued per `maxConcurrency`. Never partially succeeds —
+   * either the full `TranscribeResult` comes back or the promise rejects (the caller's
+   * failure-isolation path, §2.4, posts a "transcription pending"/failure line and may retry later). */
+  transcribeLeg(job: TranscribeLegJob): Promise<TranscribeResult>;
+  /** POST one sample audio file to SecRecorder's `POST /v1/speakers/from-audio` — enrolls the
+   * dominant speaker's voiceprint under `name` so a later `identify=true` transcription can match
+   * them. Same retry/backoff/concurrency posture as `transcribeLeg` (5xx/429 retryable, other 4xx
+   * permanent); resolves once enrolled, the 201 response body carries nothing the caller needs. */
+  enrollVoiceprint(job: EnrollVoiceprintJob): Promise<void>;
+}
+
+/** Thrown by `transcribeLeg` on a non-2xx SecRecorder response (see docs/plans/voice-contracts.md
+ * §2.6-equivalent for SecRecorder's error shape, §5.1). `retryable` mirrors webhooks/outbound.ts's
+ * "5xx/429 retryable, other 4xx permanent" classification. A network-level failure (fetch throws,
+ * timeout) surfaces as this too, with `status: 0` — same convention OutboundDispatcher uses. */
+export class TranscribeError extends Error {
+  readonly status: number;
+  readonly retryable: boolean;
+  constructor(status: number, message: string, retryable: boolean) {
+    super(message);
+    this.name = "TranscribeError";
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+/** A simple counting semaphore — `run(fn)` waits for a free slot (out of `max`), runs `fn`, then
+ * releases exactly one queued waiter. No external deps; queue order is FIFO. */
+function makeLimiter(max: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  function acquire(): Promise<void> {
+    return new Promise((resolve) => {
+      if (active < max) {
+        active++;
+        resolve();
+      } else {
+        queue.push(() => {
+          active++;
+          resolve();
+        });
+      }
+    });
+  }
+  function release(): void {
+    active--;
+    const next = queue.shift();
+    if (next) next();
+  }
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    await acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+}
+
+/** Construction never throws (matches every other `make*Client` in this codebase — see
+ * calls/mediad-client.ts). All the retry/concurrency machinery lives in the closure below. */
+export function makeTranscribeClient(deps: TranscribeClientDeps): TranscribeClient {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const maxConcurrency = Math.max(1, deps.maxConcurrency ?? 1);
+  const maxAttempts = Math.max(1, deps.maxAttempts ?? 4);
+  const backoffMs = deps.backoffMs ?? 1000;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const limiter = makeLimiter(maxConcurrency);
+  const baseUrl = deps.baseUrl.replace(/\/+$/, "");
+
+  /** One HTTP attempt — multipart POST, `diarize` per the job (§5.1 of voice-contracts.md: the
+   * other OpenAI-shaped fields SecRecorder accepts are irrelevant to calls and simply omitted). */
+  async function postOnce(job: TranscribeLegJob): Promise<TranscribeResult> {
+    const bytes = await readFile(job.filePath);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: "audio/ogg" }), basename(job.filePath));
+    form.append("diarize", job.diarize ? "true" : "false");
+    form.append("identify", job.identify ? "true" : "false");
+
+    let res: Response;
+    try {
+      res = await fetchImpl(`${baseUrl}/v1/audio/transcriptions`, { method: "POST", body: form });
+    } catch (err) {
+      // Network error / timeout — no status to report; treat like a 5xx (retryable).
+      throw new TranscribeError(0, err instanceof Error ? err.message : String(err), true);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      const retryable = res.status >= 500 || res.status === 429;
+      throw new TranscribeError(res.status, detail || `SecRecorder HTTP ${res.status}`, retryable);
+    }
+    return (await res.json()) as TranscribeResult;
+  }
+
+  /** One HTTP attempt at enrollment — multipart POST, mirrors `postOnce` above (same
+   * multipart/TLS/error-classification shape, different endpoint + form fields). */
+  async function postEnrollOnce(job: EnrollVoiceprintJob): Promise<void> {
+    const bytes = await readFile(job.filePath);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: "audio/ogg" }), basename(job.filePath));
+    form.append("name", job.name);
+
+    let res: Response;
+    try {
+      res = await fetchImpl(`${baseUrl}/v1/speakers/from-audio`, { method: "POST", body: form });
+    } catch (err) {
+      throw new TranscribeError(0, err instanceof Error ? err.message : String(err), true);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      const retryable = res.status >= 500 || res.status === 429;
+      throw new TranscribeError(res.status, detail || `SecRecorder HTTP ${res.status}`, retryable);
+    }
+    // 201 JSON body ({id, name, samples, speakers_in_sample, ...}) — nothing the caller needs;
+    // success is signaled by resolving at all. Drained (not just ignored) so a slow/odd body
+    // doesn't leave the response stream dangling.
+    await res.json().catch(() => undefined);
+  }
+
+  return {
+    async transcribeLeg(job: TranscribeLegJob): Promise<TranscribeResult> {
+      return limiter(async () => {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            return await postOnce(job);
+          } catch (err) {
+            const retryable = err instanceof TranscribeError ? err.retryable : true;
+            if (!retryable || attempt === maxAttempts) throw err;
+            await sleep(backoffMs * 2 ** (attempt - 1));
+          }
+        }
+        // Unreachable (the loop above always returns or throws on its last attempt) — satisfies
+        // TS's control-flow analysis without an `as never` cast.
+        throw new TranscribeError(0, "transcribeLeg: exhausted retries", false);
+      });
+    },
+    async enrollVoiceprint(job: EnrollVoiceprintJob): Promise<void> {
+      return limiter(async () => {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            return await postEnrollOnce(job);
+          } catch (err) {
+            const retryable = err instanceof TranscribeError ? err.retryable : true;
+            if (!retryable || attempt === maxAttempts) throw err;
+            await sleep(backoffMs * 2 ** (attempt - 1));
+          }
+        }
+        throw new TranscribeError(0, "enrollVoiceprint: exhausted retries", false);
+      });
+    },
+  };
+}

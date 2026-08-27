@@ -8,17 +8,27 @@ import '../theme.dart';
 /// the new text, or null if cancelled or left unchanged/empty. An edit is a
 /// tracked revision — the original is kept and the change is audited — so the
 /// copy tells the author their prior text is retained, not overwritten.
-Future<String?> showEditDialog(BuildContext context, String initialContent) {
+///
+/// [isCorrection] swaps the title/copy for the "Correct transcript" case — a
+/// channel member fixing a voice-call transcript or "📝 Summary" system
+/// message rather than editing their own message. The save mechanics (and the
+/// revision history they produce) are identical either way.
+Future<String?> showEditDialog(
+  BuildContext context,
+  String initialContent, {
+  bool isCorrection = false,
+}) {
   return showDialog<String>(
     context: context,
-    builder: (_) => _EditDialog(initialContent: initialContent),
+    builder: (_) => _EditDialog(initialContent: initialContent, isCorrection: isCorrection),
   );
 }
 
 class _EditDialog extends StatefulWidget {
-  const _EditDialog({required this.initialContent});
+  const _EditDialog({required this.initialContent, this.isCorrection = false});
 
   final String initialContent;
+  final bool isCorrection;
 
   @override
   State<_EditDialog> createState() => _EditDialogState();
@@ -57,13 +67,13 @@ class _EditDialogState extends State<_EditDialog> {
         borderRadius: BorderRadius.circular(AppRadius.lg),
         side: const BorderSide(color: AppColors.border),
       ),
-      title: const Row(
+      title: Row(
         children: [
-          Icon(Icons.edit_outlined, color: AppColors.accent, size: 20),
-          SizedBox(width: 8),
+          const Icon(Icons.edit_outlined, color: AppColors.accent, size: 20),
+          const SizedBox(width: 8),
           Text(
-            'Edit message',
-            style: TextStyle(
+            widget.isCorrection ? 'Correct transcript' : 'Edit message',
+            style: const TextStyle(
               color: AppColors.text,
               fontSize: 16,
               fontWeight: FontWeight.w700,
@@ -77,10 +87,14 @@ class _EditDialogState extends State<_EditDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Your original text is kept in the message history, and the edit — '
-              'who and when — is recorded in the audit trail.',
-              style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
+            Text(
+              widget.isCorrection
+                  ? 'This is a shared record any channel member can correct. The original text '
+                      'is kept in the message history, and the correction — who and when — is '
+                      'recorded in the audit trail.'
+                  : 'Your original text is kept in the message history, and the edit — '
+                      'who and when — is recorded in the audit trail.',
+              style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
             ),
             const SizedBox(height: 14),
             // Cmd/Ctrl+Enter saves; plain Enter inserts a newline (this is a body editor).

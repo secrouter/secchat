@@ -111,6 +111,11 @@ abstract class ApiClient {
   /// so calling this for an existing DM just returns it.
   Future<Channel> createDm(String userSub);
 
+  /// Opens — or reuses — the caller's own self-DM ("notes to self", `POST
+  /// /self-dm`): a `kind: dm` channel with a SINGLE member (you), home to
+  /// solo voice memos. Idempotent: always the same channel for this user.
+  Future<Channel> openSelfDm();
+
   Future<List<Message>> getMessages(String channelId);
 
   /// A cursor page of a channel's messages: the most recent [limit] (ascending),
@@ -250,9 +255,12 @@ abstract class ApiClient {
   /// `redaction` WS event.
   Future<void> redactMessage(String messageId, String reason);
 
-  /// Edits a message's text (author only) — a tracked revision, not an in-place
-  /// rewrite. History is preserved and the change is audited; every viewer sees
-  /// the new text + an "(edited)" marker live via a `message_edit` WS event.
+  /// Edits a message's text — a tracked revision, not an in-place rewrite.
+  /// History is preserved and the change is audited; every viewer sees the
+  /// new text + an "(edited)" marker live via a `message_edit` WS event. The
+  /// server gates who may call this per message: author-only for a normal
+  /// user message, any channel member for a "system" transcript/summary
+  /// message (a "Correct transcript" edit).
   Future<void> editMessage(String messageId, String content);
 
   /// The full version history of a message (original + every edit), newest
@@ -311,6 +319,65 @@ abstract class ApiClient {
   /// Emit an ephemeral "I'm typing" signal for [channelId] over the live socket (best-effort; a
   /// no-op if the socket isn't open). Debounce calls at the call site.
   void sendTyping(String channelId);
+
+  // ── Voice calls (voice-contracts.md §1) ──────────────────────────────
+  //
+  // All ride the SAME `subscribeAll` socket [sendTyping] uses -- best-effort,
+  // no-op if that socket isn't open. [CallController] is responsible for
+  // opening `subscribeAll` (directly or via the app's existing global
+  // subscription) before calling any of these.
+
+  /// Start a call in [channelId] (`call_invite`, caller → server).
+  void sendCallInvite(String channelId, {required bool wantRecording});
+
+  /// Answer a ringing call (`call_accept`, callee → server). [consent] is the
+  /// recording-consent decision -- independent of the caller's `wantRecording`.
+  void sendCallAccept(String channelId, {required bool consent});
+
+  /// Forward an SDP offer/answer (`call_sdp`).
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp});
+
+  /// Forward a trickled ICE candidate -- **p2p mode only** (`call_candidate`).
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  });
+
+  /// Hang up / end the call in [channelId] (`call_end`).
+  void sendCallEnd(String channelId);
+
+  /// Start a solo voice-memo recording in [channelId] (`call_solo_start`,
+  /// self-DM only): the server starts a one-leg relayed recording of just
+  /// this connection's mic and replies with a `call_accept` echo carrying
+  /// `solo: true`. [enroll] optionally asks the server to also save this
+  /// recording as the caller's voiceprint enrollment.
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll});
+
+  /// Start a group (multi-party, relayed-only SFU) call in [channelId]
+  /// (`call_start`, caller → server). Unlike [sendCallInvite] this never
+  /// rings anyone -- the server puts the call live immediately and other
+  /// members join with [sendCallJoin] on their own initiative.
+  void sendCallStart(String channelId);
+
+  /// Join a live group call in [channelId] (`call_join`, caller → server).
+  /// The server replies with the current roster (`call_roster`) and this
+  /// leg's own offer/answer exchange over [sendCallSdp].
+  void sendCallJoin(String channelId);
+
+  /// Announce a camera/screen toggle in [channelId] (`call_media`, the
+  /// video-calls wire contract) -- send on EVERY toggle, group call or 1:1.
+  /// [cameraTrackId]/[screenTrackId] are THIS connection's own LOCAL video
+  /// track ids (`MediaSession.localCameraTrackId`/`localScreenTrackId`),
+  /// null when that source is off.
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  });
 
   /// The subs currently online (`GET /presence`) — seeds the presence set on load; live changes
   /// arrive as `presence` WS events.
@@ -538,6 +605,10 @@ class HttpApiClient implements ApiClient {
   Future<Channel> createDm(String userSub) async => Channel.fromJson(
     await _post('/dm', {'user': userSub}) as Map<String, dynamic>,
   );
+
+  @override
+  Future<Channel> openSelfDm() async =>
+      Channel.fromJson(await _post('/self-dm') as Map<String, dynamic>);
 
   @override
   Future<List<Message>> getMessages(String channelId) async {
@@ -889,6 +960,99 @@ class HttpApiClient implements ApiClient {
     } catch (_) {
       // Best-effort: a closed/closing socket just drops the ephemeral signal.
     }
+  }
+
+  /// Best-effort send on the global socket, matching [sendTyping]'s posture:
+  /// a closed/closing socket just drops the frame rather than throwing.
+  void _sendCallFrame(Map<String, dynamic> frame) {
+    try {
+      _globalSocket?.sink.add(jsonEncode(frame));
+    } catch (_) {
+      // See [sendTyping].
+    }
+  }
+
+  @override
+  void sendCallInvite(String channelId, {required bool wantRecording}) {
+    _sendCallFrame({
+      'type': 'call_invite',
+      'channelId': channelId,
+      'wantRecording': wantRecording,
+    });
+  }
+
+  @override
+  void sendCallAccept(String channelId, {required bool consent}) {
+    _sendCallFrame({'type': 'call_accept', 'channelId': channelId, 'consent': consent});
+  }
+
+  @override
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp}) {
+    _sendCallFrame({
+      'type': 'call_sdp',
+      'channelId': channelId,
+      'sdpType': sdpType,
+      'sdp': sdp,
+    });
+  }
+
+  @override
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) {
+    _sendCallFrame({
+      'type': 'call_candidate',
+      'channelId': channelId,
+      'candidate': candidate,
+      'sdpMid': sdpMid,
+      'sdpMLineIndex': sdpMLineIndex,
+    });
+  }
+
+  @override
+  void sendCallEnd(String channelId) {
+    _sendCallFrame({'type': 'call_end', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll}) {
+    _sendCallFrame({
+      'type': 'call_solo_start',
+      'channelId': channelId,
+      'wantRecording': wantRecording,
+      if (enroll != null) 'enroll': enroll,
+    });
+  }
+
+  @override
+  void sendCallStart(String channelId) {
+    _sendCallFrame({'type': 'call_start', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallJoin(String channelId) {
+    _sendCallFrame({'type': 'call_join', 'channelId': channelId});
+  }
+
+  @override
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  }) {
+    _sendCallFrame({
+      'type': 'call_media',
+      'channelId': channelId,
+      'cameraOn': cameraOn,
+      'screenOn': screenOn,
+      if (cameraTrackId != null) 'cameraTrackId': cameraTrackId,
+      if (screenTrackId != null) 'screenTrackId': screenTrackId,
+    });
   }
 
   @override

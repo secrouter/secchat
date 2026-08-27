@@ -203,3 +203,57 @@ test("history requires channel membership (a non-member gets 403)", async () => 
     assert.equal((await revisions(base, "dave", message.id)).status, 403);
   });
 });
+
+// ── Voice calls: a `system`-authored transcript has no human author to defer to — any USER member
+// of its channel may correct it instead (the one exception to author-only above), attributed to
+// THEM (not "system") in the revision history.
+
+test("a channel member may correct a system-authored transcript message; the correction is attributed to them, not 'system'", async () => {
+  await withServer(async (base, store) => {
+    const { channel } = await seed(base, store);
+    const transcript = await store.appendMessage({
+      channelId: channel.id,
+      authorRef: "system",
+      authorType: "system",
+      content: "**Alice** [00:00] hey are you free\n**Bob** [00:05] yse go ahead",
+    });
+
+    // bob is a channel member but not the (system) author — allowed for a system message.
+    const res = await edit(base, "bob", transcript.id, "**Alice** [00:00] hey are you free\n**Bob** [00:05] yes go ahead");
+    assert.equal(res.status, 200);
+
+    const revs = (await (await revisions(base, "alice", transcript.id)).json()) as { revisions: MessageRevision[] };
+    assert.equal(revs.revisions.length, 2);
+    assert.equal(revs.revisions[0]!.revision, 1);
+    assert.equal(revs.revisions[0]!.authorRef, "system", "revision 1 is still credited to the original (system) author");
+    assert.equal(revs.revisions[1]!.revision, 2);
+    assert.equal(revs.revisions[1]!.authorRef, "bob", "the correction is attributed to the CORRECTING member, never silently to 'system'");
+    assert.equal(revs.revisions[1]!.content, "**Alice** [00:00] hey are you free\n**Bob** [00:05] yes go ahead");
+
+    const audit = await store.listAudit();
+    const evt = audit.find((a) => a.action === "message.edit" && a.target === transcript.id);
+    assert.ok(evt, "the correction is audited");
+    assert.equal(evt!.actor, "bob");
+  });
+});
+
+test("a non-member cannot correct a system-authored transcript message (403)", async () => {
+  await withServer(async (base, store) => {
+    const { channel } = await seed(base, store);
+    const transcript = await store.appendMessage({
+      channelId: channel.id,
+      authorRef: "system",
+      authorType: "system",
+      content: "**Alice** [00:00] hey are you free",
+    });
+    assert.equal((await edit(base, "dave", transcript.id, "outsider correction")).status, 403);
+  });
+});
+
+test("normal-message edit permissions are unchanged: a member still cannot edit another user's (non-system) message", async () => {
+  await withServer(async (base, store) => {
+    const { message } = await seed(base, store);
+    assert.equal(message.authorType, "user");
+    assert.equal((await edit(base, "bob", message.id, "still not mine to change")).status, 403);
+  });
+});

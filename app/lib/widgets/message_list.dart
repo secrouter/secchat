@@ -406,6 +406,13 @@ class _MessageBubble extends StatelessWidget {
   bool get _isElevated =>
       showMarking && !message.isRedacted && (markingPolicy?.isElevated(message.marking) ?? false);
 
+  // A call-summary system message (headed "📝 Summary" by the backend) gets a subtle header
+  // instead of rendering that line as an ordinary markdown paragraph.
+  bool get _isSummary =>
+      !message.isRedacted &&
+      message.authorType == AuthorType.system &&
+      (message.content?.trimLeft().startsWith('📝 Summary') ?? false);
+
   // Redaction is offered to the message's author or an admin, on live messages.
   bool get _canRedact =>
       onRedact != null &&
@@ -419,6 +426,17 @@ class _MessageBubble extends StatelessWidget {
       message.authorType == AuthorType.user &&
       message.authorRef == currentUserSub;
 
+  // A "system" message (voice-call transcript / "📝 Summary") is nobody's authored text — it's a
+  // governed record any channel member may correct, reusing the exact same edit machinery as a
+  // normal edit. The same `onEdit` callback gates it (only wired where the viewer can post), just
+  // without the author-only / user-only restriction. Labeled "Correct transcript" in the menu.
+  bool get _canCorrectTranscript =>
+      onEdit != null &&
+      !message.isRedacted &&
+      message.authorType == AuthorType.system;
+
+  bool get _canEditOrCorrect => _canEdit || _canCorrectTranscript;
+
   // Anyone who can see an edited message can view its history.
   bool get _canViewHistory =>
       onViewHistory != null && message.isEdited && !message.isRedacted;
@@ -431,12 +449,16 @@ class _MessageBubble extends StatelessWidget {
 
   bool get _isPinned => pinnedIds.contains(message.id);
 
-  bool get _hasMenu => _canEdit || _canRedact || _canViewHistory || _canCopy || _canPin;
+  bool get _hasMenu =>
+      _canEditOrCorrect || _canRedact || _canViewHistory || _canCopy || _canPin;
 
   @override
   Widget build(BuildContext context) {
+    // A "system" message (voice-call transcripts, voice-calls-plan.md §8 O4) has no human/agent
+    // sub to resolve through the directory, so it shares the agent byline treatment below.
     final isAgent = message.authorType == AuthorType.agent;
-    final authorColor = isAgent || isOwn ? AppColors.accent : AppColors.text;
+    final isServicePrincipal = isAgent || message.authorType == AuthorType.system;
+    final authorColor = isServicePrincipal || isOwn ? AppColors.accent : AppColors.text;
     final promptedBy = message.promptedBy;
 
     // Your own messages sit on the right in a filled bubble (avatar on the
@@ -454,10 +476,10 @@ class _MessageBubble extends StatelessWidget {
           children: [
             Flexible(
               child: Text(
-                // An agent's ref isn't in the user directory, so its byline uses the agent's own
-                // display name (carried on the message) and falls back to the ref only if unset;
-                // a human's sub resolves through the directory.
-                isAgent
+                // An agent's (or the system principal's) ref isn't in the user directory, so its
+                // byline uses its own display name (carried on the message) and falls back to the
+                // ref only if unset; a human's sub resolves through the directory.
+                isServicePrincipal
                     ? (message.displayName?.isNotEmpty == true ? message.displayName! : message.authorRef)
                     : labelForSub(message.authorRef),
                 overflow: TextOverflow.ellipsis,
@@ -515,6 +537,8 @@ class _MessageBubble extends StatelessWidget {
             revealed: revealedIds.contains(message.id),
             onToggleReveal: onToggleReveal == null ? null : () => onToggleReveal!(message),
           )
+        else if (_isSummary)
+          _SummaryContent(content: message.content!)
         else
           MarkdownText(
             message.content!,
@@ -556,7 +580,8 @@ class _MessageBubble extends StatelessWidget {
                   const SizedBox(width: 8),
                 if (_hasMenu)
                   _MessageMenu(
-                    onEdit: _canEdit ? () => onEdit!(message) : null,
+                    onEdit: _canEditOrCorrect ? () => onEdit!(message) : null,
+                    isCorrection: _canCorrectTranscript,
                     onViewHistory:
                         _canViewHistory ? () => onViewHistory!(message) : null,
                     onRedact: _canRedact ? () => onRedact!(message) : null,
@@ -1004,9 +1029,20 @@ class _ThreadChip extends StatelessWidget {
 /// The per-message overflow menu (⋮). Currently just Redact — a governed
 /// content purge — shown to a message's author or an admin.
 class _MessageMenu extends StatelessWidget {
-  const _MessageMenu({this.onEdit, this.onViewHistory, this.onRedact, this.onCopy, this.onTogglePin, this.isPinned = false});
+  const _MessageMenu({
+    this.onEdit,
+    this.isCorrection = false,
+    this.onViewHistory,
+    this.onRedact,
+    this.onCopy,
+    this.onTogglePin,
+    this.isPinned = false,
+  });
 
   final VoidCallback? onEdit;
+  // True when [onEdit] targets a "system" transcript/summary message rather than a normal
+  // user message — swaps the menu label from "Edit…" to "Correct transcript…".
+  final bool isCorrection;
   final VoidCallback? onViewHistory;
   final VoidCallback? onRedact;
   final VoidCallback? onCopy;
@@ -1066,13 +1102,19 @@ class _MessageMenu extends StatelessWidget {
               ),
             ),
           if (onEdit != null)
-            const PopupMenuItem<String>(
+            PopupMenuItem<String>(
               value: 'edit',
               child: Row(
                 children: [
-                  Icon(Icons.edit_outlined, size: 15, color: AppColors.text),
-                  SizedBox(width: 8),
-                  Text('Edit…', style: TextStyle(color: AppColors.text, fontSize: 13)),
+                  const Icon(Icons.edit_outlined, size: 15, color: AppColors.text),
+                  const SizedBox(width: 8),
+                  Text(
+                    // Kept short — "Correct transcript…" doesn't fit the menu's available
+                    // width next to a left-aligned system message near the trailing edge.
+                    // The dialog it opens spells the action out in full.
+                    isCorrection ? 'Correct…' : 'Edit…',
+                    style: const TextStyle(color: AppColors.text, fontSize: 13),
+                  ),
                 ],
               ),
             ),
@@ -1212,6 +1254,44 @@ class _DlpWarning extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// A voice-call summary's leading "📝 Summary" line gets a small accent header instead of
+/// rendering as an ordinary markdown paragraph; the rest of the content renders as usual.
+class _SummaryContent extends StatelessWidget {
+  const _SummaryContent({required this.content});
+
+  final String content;
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmed = content.trimLeft();
+    final newline = trimmed.indexOf('\n');
+    final header = newline == -1 ? trimmed : trimmed.substring(0, newline);
+    final body = newline == -1 ? '' : trimmed.substring(newline + 1).trimLeft();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          header,
+          style: const TextStyle(
+            color: AppColors.accent,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.2,
+          ),
+        ),
+        if (body.isNotEmpty) ...[
+          const SizedBox(height: 3),
+          MarkdownText(
+            body,
+            baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+          ),
+        ],
+      ],
     );
   }
 }

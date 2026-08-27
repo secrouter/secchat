@@ -87,6 +87,13 @@ void main() {
     });
 
     testWidgets('agent-pool panel shows the not-configured note when no pool is wired', (tester) async {
+      // Tall surface: AdminScreen is a lazy ListView — panels below the default
+      // 800x600 fold are never inflated, so the note wouldn't exist to find.
+      tester.view.physicalSize = const Size(1400, 3000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
       final api = FakeApiClient();
       api.adminOverview = const AdminOverview(
         generatedAt: '', channels: [], agents: [], sessions: [], audit: [],
@@ -131,6 +138,12 @@ void main() {
     });
 
     testWidgets('git SSH keys panel shows the not-enabled note when the feature is off', (tester) async {
+      // Tall surface — see the agent-pool not-configured test above.
+      tester.view.physicalSize = const Size(1400, 3000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
       final api = FakeApiClient();
       api.adminOverview = const AdminOverview(
         generatedAt: '', channels: [], agents: [], sessions: [], audit: [],

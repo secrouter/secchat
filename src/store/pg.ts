@@ -65,8 +65,13 @@ import type {
   Attachment,
   AuditEvent,
   AuthorType,
+  CallMode,
+  CallParticipantRow,
+  CallRecordingState,
+  CallRow,
   Channel,
   ChannelKind,
+  CreateCallInput,
   ExecuteGrant,
   Id,
   Member,
@@ -254,6 +259,33 @@ interface OutboundWebhookRow {
   last_delivery_at: Date | null;
 }
 
+/** Row shape for the `calls` table — named `CallsRow` (not `CallRow`) to avoid colliding with
+ * src/types.ts's `CallRow` (the mapped domain shape `rowToCall` below returns). */
+interface CallsRow {
+  id: string;
+  channel_id: string;
+  caller: string;
+  callee: string;
+  started_at: Date;
+  ended_at: Date | null;
+  consent: boolean;
+  mode: string;
+  recording: string;
+  recording_attachment_id: string | null;
+  transcript_message_id: string | null;
+  mediad_session_id: string | null;
+}
+
+/** Row shape for `call_participants` (db/migrations/0021_call_participants.sql) — see
+ * src/types.ts's `CallParticipantRow` doc comment. */
+interface CallParticipantsRow {
+  call_id: string;
+  sub: string;
+  leg_id: string;
+  joined_at: Date;
+  left_at: Date | null;
+}
+
 interface AuditRow {
   id: string;
   seq: number;
@@ -430,6 +462,33 @@ function rowToOutboundWebhook(row: OutboundWebhookRow): OutboundWebhook {
     lastError: row.last_error ?? undefined,
     lastDeliveryAt: row.last_delivery_at ? iso(row.last_delivery_at) : undefined,
   }) as OutboundWebhook;
+}
+
+function rowToCall(row: CallsRow): CallRow {
+  return compact({
+    id: row.id,
+    channelId: row.channel_id,
+    caller: row.caller,
+    callee: row.callee,
+    startedAt: iso(row.started_at),
+    endedAt: row.ended_at ? iso(row.ended_at) : undefined,
+    consent: row.consent,
+    mode: row.mode as CallMode,
+    recording: row.recording as CallRecordingState,
+    recordingAttachmentId: row.recording_attachment_id ?? undefined,
+    transcriptMessageId: row.transcript_message_id ?? undefined,
+    mediadSessionId: row.mediad_session_id ?? undefined,
+  }) as CallRow;
+}
+
+function rowToCallParticipant(row: CallParticipantsRow): CallParticipantRow {
+  return compact({
+    callId: row.call_id,
+    sub: row.sub,
+    legId: row.leg_id,
+    joinedAt: iso(row.joined_at),
+    leftAt: row.left_at ? iso(row.left_at) : undefined,
+  }) as CallParticipantRow;
 }
 
 function rowToAuditEvent(row: AuditRow): AuditEvent {
@@ -695,6 +754,22 @@ export class PgStore implements Store, SessionStore {
     return rows[0] ? rowToChannel(rows[0]) : null;
   }
 
+  async findSelfDmChannel(sub: string): Promise<Channel | null> {
+    const { rows } = await this.#pool.query<ChannelRow>(
+      `SELECT c.id, c.workspace_id, c.kind, c.name, c.cui_marking, c.archived, c.created_by, c.created_at
+       FROM channels c
+       WHERE c.kind = 'dm'
+         AND (SELECT count(*) FROM channel_members m
+              WHERE m.channel_id = c.id AND m.member_type = 'user') = 1
+         AND EXISTS (SELECT 1 FROM channel_members m
+                     WHERE m.channel_id = c.id AND m.member_ref = $1 AND m.member_type = 'user')
+       ORDER BY c.ins_seq
+       LIMIT 1`,
+      [sub],
+    );
+    return rows[0] ? rowToChannel(rows[0]) : null;
+  }
+
   // ── agents ───────────────────────────────────────────────────────────────────────────────────
 
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {
@@ -893,7 +968,9 @@ export class PgStore implements Store, SessionStore {
    * plaintext + audit event land together or not at all). The messages row is never touched, so
    * the hash chain is untouched: the tamper-evident record of the edit is its `message.edit` audit
    * event. FOR UPDATE on the row serializes concurrent edits (so revision numbers can't collide)
-   * and fails closed on an unknown/redacted message (author-only is enforced at the route). */
+   * and fails closed on an unknown/redacted message (WHO may call this — author-only for a normal
+   * message, any channel member for a `system` transcript — is enforced at the route, not here;
+   * this just records `by` as the new revision's author, see MessageRevision.authorRef). */
   async editMessage(id: Id, by: string, content: string): Promise<Message> {
     const client = await this.#pool.connect();
     try {
@@ -932,7 +1009,8 @@ export class PgStore implements Store, SessionStore {
       await client.query(
         `INSERT INTO message_revisions (message_id, revision, author_ref, content, content_sha256, at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [id, nextRevision, row.author_ref, content, hashContent(content), at],
+        // `by` (the editor), not necessarily row.author_ref — see MessageRevision's doc comment.
+        [id, nextRevision, by, content, hashContent(content), at],
       );
       await client.query(`UPDATE message_content SET content = $2 WHERE message_id = $1`, [id, content]);
       await this.#appendAuditWithClient(client, { actor: by, action: "message.edit", target: id, detail: `rev ${nextRevision}` });
@@ -1362,6 +1440,139 @@ export class PgStore implements Store, SessionStore {
       `UPDATE outbound_webhooks SET last_status = $2, last_error = $3, last_delivery_at = $4 WHERE id = $1`,
       [id, status, error, new Date().toISOString()],
     );
+  }
+
+  // ── Calls (1:1 DM voice calls — db/migrations/0019_calls.sql) ────────────────────────────────
+
+  async createCall(input: CreateCallInput): Promise<CallRow> {
+    const id = randomUUID();
+    const startedAt = new Date().toISOString();
+    await this.#pool.query(
+      `INSERT INTO calls (id, channel_id, caller, callee, started_at, consent, mode, recording)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'none')`,
+      [id, input.channelId, input.caller, input.callee, startedAt, input.consent, input.mode],
+    );
+    return compact({
+      id,
+      channelId: input.channelId,
+      caller: input.caller,
+      callee: input.callee,
+      startedAt,
+      consent: input.consent,
+      mode: input.mode,
+      recording: "none" as CallRecordingState,
+    });
+  }
+
+  /** Fails closed on an unknown call (matches redactMessage/renewLease's guard style). */
+  async endCall(id: Id, endedAt: string): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET ended_at = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, endedAt],
+    );
+    if (!rows[0]) throw new Error(`PgStore.endCall: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async getCall(id: Id): Promise<CallRow | null> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `SELECT id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+              recording_attachment_id, transcript_message_id, mediad_session_id
+         FROM calls WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? rowToCall(rows[0]) : null;
+  }
+
+  async setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET recording = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, recording],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallRecording: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment); db/migrations/0020_calls_mediad_session_id.sql. */
+  async setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET mediad_session_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, mediadSessionId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallMediadSessionId: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET recording_attachment_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, attachmentId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallRecordingAttachment: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  async setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `UPDATE calls SET transcript_message_id = $2 WHERE id = $1
+       RETURNING id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+                 recording_attachment_id, transcript_message_id, mediad_session_id`,
+      [id, messageId],
+    );
+    if (!rows[0]) throw new Error(`PgStore.setCallTranscriptMessage: unknown call ${id}`);
+    return rowToCall(rows[0]);
+  }
+
+  /** Ended calls with no recording attachment yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5); backed by calls_unclaimed_ended_idx. The caller further filters to
+   * `mode: "relayed"` rows with a `mediadSessionId` (a p2p call is never a candidate — no mediad
+   * session ever existed) and matches directly against that session id, no guessing needed. */
+  async listUnclaimedEndedCalls(): Promise<CallRow[]> {
+    const { rows } = await this.#pool.query<CallsRow>(
+      `SELECT id, channel_id, caller, callee, started_at, ended_at, consent, mode, recording,
+              recording_attachment_id, transcript_message_id, mediad_session_id
+         FROM calls WHERE ended_at IS NOT NULL AND recording_attachment_id IS NULL`,
+    );
+    return rows.map(rowToCall);
+  }
+
+  // ── Call participants (db/migrations/0021_call_participants.sql) ─────────────────────────────
+
+  async addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow> {
+    const joinedAt = new Date().toISOString();
+    const { rows } = await this.#pool.query<CallParticipantsRow>(
+      `INSERT INTO call_participants (call_id, sub, leg_id, joined_at, left_at)
+       VALUES ($1, $2, $3, $4, NULL)
+       ON CONFLICT (call_id, sub) DO UPDATE
+         SET leg_id = excluded.leg_id, joined_at = excluded.joined_at, left_at = NULL
+       RETURNING call_id, sub, leg_id, joined_at, left_at`,
+      [input.callId, input.sub, input.legId, joinedAt],
+    );
+    return rowToCallParticipant(rows[0]!);
+  }
+
+  async setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void> {
+    await this.#pool.query(
+      `UPDATE call_participants SET left_at = $3 WHERE call_id = $1 AND sub = $2`,
+      [callId, sub, leftAt],
+    );
+  }
+
+  async listCallParticipants(callId: Id): Promise<CallParticipantRow[]> {
+    const { rows } = await this.#pool.query<CallParticipantsRow>(
+      `SELECT call_id, sub, leg_id, joined_at, left_at FROM call_participants WHERE call_id = $1 ORDER BY joined_at ASC`,
+      [callId],
+    );
+    return rows.map(rowToCallParticipant);
   }
 
   /** Purges plaintext, stamps the tombstone, and appends the audit event — all in ONE transaction

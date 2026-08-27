@@ -583,3 +583,104 @@ test("listAudit/listChannels/listAllAgents/listAllSessions return the full set i
   assert.equal((await store.listAllSessions()).length, 1);
   assert.equal((await store.listAudit()).length, 2);
 });
+
+// ── Calls (1:1 DM voice calls — db/migrations/0019_calls.sql) ──────────────────────────────────
+
+async function makeDm(store: MemoryStore) {
+  const channel = await store.createChannel({ workspaceId: WORKSPACE, kind: "dm", createdBy: "user-alice" });
+  await store.addMember({ channelId: channel.id, memberRef: "user-alice", memberType: "user", role: "member" });
+  await store.addMember({ channelId: channel.id, memberRef: "user-bob", memberType: "user", role: "member" });
+  return channel;
+}
+
+test("createCall: stamps startedAt, defaults recording to 'none', consent/mode fixed as given", async () => {
+  const store = new MemoryStore();
+  const channel = await makeDm(store);
+
+  const call = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: true, mode: "relayed" });
+
+  assert.ok(call.id);
+  assert.equal(call.channelId, channel.id);
+  assert.equal(call.caller, "user-alice");
+  assert.equal(call.callee, "user-bob");
+  assert.ok(call.startedAt);
+  assert.equal(call.endedAt, undefined);
+  assert.equal(call.consent, true);
+  assert.equal(call.mode, "relayed");
+  assert.equal(call.recording, "none");
+  assert.equal(call.recordingAttachmentId, undefined);
+  assert.equal(call.transcriptMessageId, undefined);
+
+  assert.deepEqual(await store.getCall(call.id), call);
+});
+
+test("endCall: stamps endedAt; unknown id fails closed", async () => {
+  const store = new MemoryStore();
+  const channel = await makeDm(store);
+  const call = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: false, mode: "p2p" });
+
+  const endedAt = new Date().toISOString();
+  const ended = await store.endCall(call.id, endedAt);
+  assert.equal(ended.endedAt, endedAt);
+  assert.equal((await store.getCall(call.id))?.endedAt, endedAt);
+
+  await assert.rejects(() => store.endCall("no-such-call", endedAt));
+});
+
+test("setCallRecording / setCallMediadSessionId / setCallRecordingAttachment / setCallTranscriptMessage mutate the row in place", async () => {
+  const store = new MemoryStore();
+  const channel = await makeDm(store);
+  const call = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: true, mode: "relayed" });
+  assert.equal(call.mediadSessionId, undefined, "unset until accept()'s createSession succeeds");
+
+  const recording = await store.setCallRecording(call.id, "on");
+  assert.equal(recording.recording, "on");
+  assert.equal((await store.getCall(call.id))?.recording, "on");
+
+  const withSession = await store.setCallMediadSessionId(call.id, "sess-abc");
+  assert.equal(withSession.mediadSessionId, "sess-abc");
+  assert.equal((await store.getCall(call.id))?.mediadSessionId, "sess-abc");
+
+  const withAttachment = await store.setCallRecordingAttachment(call.id, "att-1");
+  assert.equal(withAttachment.recordingAttachmentId, "att-1");
+
+  const withTranscript = await store.setCallTranscriptMessage(call.id, "msg-1");
+  assert.equal(withTranscript.transcriptMessageId, "msg-1");
+
+  const final = await store.getCall(call.id);
+  assert.equal(final?.recording, "on");
+  assert.equal(final?.mediadSessionId, "sess-abc");
+  assert.equal(final?.recordingAttachmentId, "att-1");
+  assert.equal(final?.transcriptMessageId, "msg-1");
+
+  await assert.rejects(() => store.setCallRecording("no-such-call", "on"));
+  await assert.rejects(() => store.setCallMediadSessionId("no-such-call", "sess-x"));
+  await assert.rejects(() => store.setCallRecordingAttachment("no-such-call", "att-1"));
+  await assert.rejects(() => store.setCallTranscriptMessage("no-such-call", "msg-1"));
+});
+
+test("listUnclaimedEndedCalls: only ENDED calls with no recordingAttachmentId yet — the reconciliation candidate set", async () => {
+  const store = new MemoryStore();
+  const channel = await makeDm(store);
+
+  // Still ringing/active in the durable sense (no endedAt) — never a candidate.
+  const stillActive = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: true, mode: "relayed" });
+
+  // Ended, unrecorded (p2p) — never had a recording to reconcile.
+  const p2p = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: false, mode: "p2p" });
+  await store.endCall(p2p.id, new Date().toISOString());
+
+  // Ended, relayed, recording never claimed — the reconciliation target.
+  const unclaimed = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: true, mode: "relayed" });
+  await store.endCall(unclaimed.id, new Date().toISOString());
+
+  // Ended, relayed, recording ALREADY claimed — done, not a candidate.
+  const claimed = await store.createCall({ channelId: channel.id, caller: "user-alice", callee: "user-bob", consent: true, mode: "relayed" });
+  await store.endCall(claimed.id, new Date().toISOString());
+  await store.setCallRecordingAttachment(claimed.id, "att-done");
+
+  const candidates = await store.listUnclaimedEndedCalls();
+  assert.deepEqual(candidates.map((c) => c.id).sort(), [p2p.id, unclaimed.id].sort());
+  assert.ok(!candidates.some((c) => c.id === stillActive.id));
+  assert.ok(!candidates.some((c) => c.id === claimed.id));
+});

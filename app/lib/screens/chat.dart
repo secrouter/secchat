@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../api.dart';
+import '../calls/call_controller.dart';
 import '../commands.dart';
 import '../formatting.dart';
 import '../clipboard_guard.dart';
@@ -17,6 +18,9 @@ import '../theme.dart';
 import '../widgets/app_topbar.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/badges.dart';
+import '../widgets/call_button.dart';
+import '../widgets/call_overlay.dart';
+import '../widgets/call_screen.dart';
 import '../widgets/coding_agent_dialog.dart';
 import '../widgets/coding_strip.dart';
 import '../widgets/composer.dart';
@@ -45,6 +49,14 @@ import 'admin.dart';
 /// binding). Production keeps the real desktop / no-op web factory.
 @visibleForTesting
 DaemonSupervisor Function() debugDaemonSupervisorFactory = createDaemonSupervisor;
+
+/// Test seam: how [ChatScreen] obtains its [CallController]. Widget tests override this with a
+/// fake so they never touch `flutter_webrtc` (no plugin registered under the test binding).
+@visibleForTesting
+CallController Function({required ApiClient api, required String mySub, List<String> stunUrls})
+debugCallControllerFactory =
+    ({required api, required mySub, stunUrls = const []}) =>
+        WebrtcCallController(api: api, mySub: mySub, stunUrls: stunUrls);
 
 /// The main chat surface: sidebar + selected channel's transcript +
 /// composer, backed by [api]. Everything here goes through the [ApiClient]
@@ -182,9 +194,42 @@ class _ChatScreenState extends State<ChatScreen> {
   // so coding agents route to it. No-op on web (a web user relies on a standalone/remote daemon).
   final DaemonSupervisor _daemon = debugDaemonSupervisorFactory();
 
+  // Voice calls (docs/plans/voice-calls-plan.md §3.3): one controller for the whole app -- a call
+  // can be ringing/live while the user is looking at a different channel entirely, so this is NOT
+  // per-channel state. Wired to `call_*` WS events in [_handleEvent]; rendered by [CallOverlay] in
+  // [build] regardless of which channel is open.
+  late final CallController _callController;
+
+  // Which bottom tab is showing while a call is in a SUSTAINED phase
+  // (connecting/active/recordingMemo, see [isSustainedCallPhase]) -- 0 =
+  // Chat, 1 = Call. Meaningless (and the tab bar isn't shown at all)
+  // outside a sustained call; [_onCallControllerChanged] auto-selects Call
+  // on the way in and resets to Chat on the way out, so a fresh call always
+  // starts prominent rather than wherever the user last left it.
+  int _callTab = 0;
+  bool _wasCallTabVisible = false;
+
+  void _onCallControllerChanged() {
+    // The call tab is present for a sustained call AND the terminal "Call Ended"
+    // screen ([isCallTabPhase]). Auto-focus Call when the tab first appears and
+    // reset to Chat once it's gone (dismissed to idle); active→ended keeps the
+    // Call tab focused so the user sees "Call Ended" and closes it explicitly.
+    final visible = isCallTabPhase(_callController.snapshot.phase);
+    if (visible != _wasCallTabVisible) {
+      _wasCallTabVisible = visible;
+      setState(() => _callTab = visible ? 1 : 0);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    _callController = debugCallControllerFactory(
+      api: widget.api,
+      mySub: widget.principal.sub,
+      stunUrls: widget.principal.callStunUrls,
+    );
+    _callController.addListener(_onCallControllerChanged);
     _subscribeAll(); // one long-lived socket for ALL the user's channels (background unread + live events)
     // Start the bundled runner daemon on desktop.
     if (_daemon.supported) unawaited(_startDaemon());
@@ -318,6 +363,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _typingPrune?.cancel();
     _wsReconnect?.cancel();
     _daemon.dispose();
+    _callController.removeListener(_onCallControllerChanged);
+    _callController.dispose();
     _wsSub?.cancel();
     super.dispose();
   }
@@ -771,6 +818,23 @@ class _ChatScreenState extends State<ChatScreen> {
               if (_selected?.id == channelId) _selected = null;
             }
           }
+        // Voice calls (voice-calls-plan.md §2.1/§3.3): every `call_*` frame just forwards to the
+        // controller, which owns its own state machine + listenable ([CallOverlay]'s AnimatedBuilder
+        // re-renders on its notifyListeners, independent of this setState).
+        case WsCallInviteEvent():
+        case WsCallAcceptEvent():
+        case WsCallTakenEvent():
+        case WsCallSdpEvent():
+        case WsCallCandidateEvent():
+        case WsCallEndEvent():
+        case WsCallMissedEvent():
+        case WsCallRecordingEvent():
+        case WsCallErrorEvent():
+        case WsCallRosterEvent():
+        case WsCallParticipantJoinedEvent():
+        case WsCallParticipantLeftEvent():
+        case WsCallMediaEvent():
+          _callController.handleEvent(event);
       }
     });
   }
@@ -853,13 +917,19 @@ class _ChatScreenState extends State<ChatScreen> {
     if (changed) _transcripts[channelId] = updated;
   }
 
-  /// Edits [message] (author only) via a dialog. The new text is applied
-  /// optimistically; the live `message_edit` echo reconciles the exact server
-  /// timestamp. A failure surfaces an error.
+  /// Edits [message] via a dialog — author-only for a normal user message, or
+  /// (for a "system" transcript/summary message) a "Correct transcript" any
+  /// channel member may use. The new text is applied optimistically; the live
+  /// `message_edit` echo reconciles the exact server timestamp. A failure
+  /// surfaces an error.
   Future<void> _editMessage(Message message) async {
     final channel = _selected;
     if (channel == null || message.content == null) return;
-    final next = await showEditDialog(context, message.content!);
+    final next = await showEditDialog(
+      context,
+      message.content!,
+      isCorrection: message.authorType == AuthorType.system,
+    );
     if (next == null || !mounted) return;
     try {
       await widget.api.editMessage(message.id, next);
@@ -1350,13 +1420,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Opens — or creates — the caller's own self-DM ("notes to self", `POST
+  /// /self-dm`), the home for solo voice memos, and selects it like any DM.
+  Future<void> _handleOpenSelfDm() async {
+    try {
+      final channel = await widget.api.openSelfDm();
+      if (!mounted) return;
+      setState(() {
+        if (!_channels.any((c) => c.id == channel.id)) {
+          _channels = [..._channels, channel];
+        }
+      });
+      await _selectChannel(channel);
+    } catch (error) {
+      _showError(error);
+    }
+  }
+
   /// The header/title for [channel]: a DM shows the other participant's name
   /// (from the directory), everything else shows its channel name.
   String _channelTitle(Channel channel) {
     if (channel.kind == ChannelKind.dm) {
       final peer = channel.peer(widget.principal.sub);
       if (peer != null) return _usersBySub[peer]?.label ?? peer;
-      return channel.name.isEmpty ? 'Direct message' : channel.name;
+      return channel.name.isEmpty ? 'Notes to self' : channel.name;
     }
     return channel.name.isEmpty ? '(unnamed)' : channel.name;
   }
@@ -1453,6 +1540,7 @@ class _ChatScreenState extends State<ChatScreen> {
       },
       onNewChannel: _handleNewChannel,
       onNewDm: _handleNewDm,
+      onOpenSelfDm: _handleOpenSelfDm,
       onNewAssistant: () => _handleNewAgent(AgentKind.assistant),
       onNewCodingAgent: () => _handleNewAgent(AgentKind.coding),
       onArchive: _archiveChannel,
@@ -1598,49 +1686,83 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < kCompactWidth;
+    // The normal chat body -- unchanged from before the call tab existed.
     // Compact (phone): single pane, rail behind a drawer. The transcript owns
     // the screen; everything the top bar carried moves into the drawer.
-    if (MediaQuery.sizeOf(context).width < kCompactWidth) {
-      return Scaffold(
-        backgroundColor: AppColors.bg,
-        drawer: Drawer(
-          backgroundColor: AppColors.surface,
-          width: MediaQuery.sizeOf(context).width * 0.86,
-          shape: const RoundedRectangleBorder(),
-          child: _sidebar(compact: true),
-        ),
-        body: SafeArea(child: _buildMain(compact: true)),
-      );
-    }
+    final chatBody = compact
+        ? SafeArea(child: _buildMain(compact: true))
+        : Column(
+            children: [
+              AppTopBar(
+                principal: widget.principal,
+                status: _connStatus,
+                onSignOut: widget.onSignOut,
+                onSearch: _openSearch,
+                onMentions: _openMentions,
+                mentionCount: _unseenMentions,
+                runnerState: _daemon.supported ? _daemon.state : null,
+                onSshKeys: () => showSshKeyDialog(context, api: widget.api),
+                onWebhooks: () => showGlobalWebhooksDialog(context, api: widget.api, channels: _channels),
+                onAdmin: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
+                ),
+              ),
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _sidebar(),
+                    Expanded(child: _buildMain()),
+                  ],
+                ),
+              ),
+            ],
+          );
 
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: Column(
-        children: [
-          AppTopBar(
-            principal: widget.principal,
-            status: _connStatus,
-            onSignOut: widget.onSignOut,
-            onSearch: _openSearch,
-            onMentions: _openMentions,
-            mentionCount: _unseenMentions,
-            runnerState: _daemon.supported ? _daemon.state : null,
-            onSshKeys: () => showSshKeyDialog(context, api: widget.api),
-            onWebhooks: () => showGlobalWebhooksDialog(context, api: widget.api, channels: _channels),
-            onAdmin: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
-            ),
-          ),
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _sidebar(),
-                Expanded(child: _buildMain()),
-              ],
-            ),
-          ),
-        ],
+    // While a call occupies the tab ([isCallTabPhase]: a sustained call, plus
+    // the terminal "Call Ended" screen) it's pulled out of `CallOverlay` into
+    // its own full-screen tab -- `IndexedStack` keeps the chat body mounted (so
+    // it doesn't lose scroll position/state) while the Call tab is showing, and
+    // vice versa. `CallOverlay` still wraps everything for the TRANSIENT ring
+    // state. The old auto-dismiss "call ended" banner is gone: ending now shows
+    // a "Call Ended" screen in this tab that the user closes explicitly.
+    final showCallTab = isCallTabPhase(_callController.snapshot.phase);
+    final body = showCallTab
+        ? IndexedStack(
+            // StackFit.expand gives both children the SAME tight, fill-the-body
+            // constraints the chat gets when it's the Scaffold body directly --
+            // without it the default loose sizing lets the chat lay out at its
+            // content size (top-left, not filling), so it looked off-centre while
+            // / after a call. topCenter keeps it centred if a child is smaller.
+            index: _callTab,
+            sizing: StackFit.expand,
+            alignment: Alignment.topCenter,
+            children: [chatBody, CallScreen(controller: _callController, labelForSub: _labelForSub)],
+          )
+        : chatBody;
+
+    return CallOverlay(
+      controller: _callController,
+      labelForSub: _labelForSub,
+      child: Scaffold(
+        backgroundColor: AppColors.bg,
+        drawer: compact
+            ? Drawer(
+                backgroundColor: AppColors.surface,
+                width: MediaQuery.sizeOf(context).width * 0.86,
+                shape: const RoundedRectangleBorder(),
+                child: _sidebar(compact: true),
+              )
+            : null,
+        body: body,
+        bottomNavigationBar: showCallTab
+            ? CallTabBar(
+                controller: _callController,
+                selected: _callTab,
+                onSelect: (tab) => setState(() => _callTab = tab),
+              )
+            : null,
       ),
     );
   }
@@ -1658,11 +1780,37 @@ class _ChatScreenState extends State<ChatScreen> {
     return '$kind · $n ${n == 1 ? 'member' : 'members'}';
   }
 
+  /// The channel header's call control (voice-calls-plan.md §3.3), or null
+  /// for an agent channel. A `human` (multi-member, non-DM, non-agent)
+  /// channel gets [GroupCallButton] -- a multi-party SFU call, join-on-demand
+  /// since there's no ring/invite for it. A normal 2-party DM gets the
+  /// presence-aware [CallButton]; the caller's own self-DM ([Channel.isSelfDm]
+  /// -- a `dm` channel with no peer) gets [SoloRecordButton] instead, which
+  /// starts a solo voice-memo recording rather than ringing anyone.
+  Widget? _callButtonFor(Channel channel) {
+    if (channel.kind == ChannelKind.human) {
+      return GroupCallButton(controller: _callController, channelId: channel.id);
+    }
+    if (channel.kind != ChannelKind.dm) return null;
+    final peer = channel.peer(widget.principal.sub);
+    if (peer == null) {
+      return SoloRecordButton(controller: _callController, channelId: channel.id);
+    }
+    return CallButton(
+      controller: _callController,
+      channelId: channel.id,
+      peerSub: peer,
+      peerLabel: _labelForSub(peer),
+      peerOnline: _onlineSubs.contains(peer),
+    );
+  }
+
   /// The wide header's right-hand controls — pins, members, channel marking and
   /// the short id — as a bottom sheet. Nothing is dropped; it is reached with
   /// one tap instead of occupying a second permanent row on a 390pt screen.
   Future<void> _openChannelSheet(Channel ch) async {
     final isDm = ch.kind == ChannelKind.dm;
+    final peer = isDm ? ch.peer(widget.principal.sub) : null;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.surface,
@@ -1676,6 +1824,29 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (peer != null) ...[
+              _SheetRow(
+                icon: Icons.call_outlined,
+                label: _onlineSubs.contains(peer) ? 'Call' : 'Call (offline)',
+                onTap: _callController.snapshot.phase != CallPhase.idle || !_onlineSubs.contains(peer)
+                    ? null
+                    : () {
+                        Navigator.of(sheetCtx).pop();
+                        _callController.startCall(channelId: ch.id, peerSub: peer, wantRecording: false);
+                      },
+              ),
+              _SheetRow(
+                icon: Icons.fiber_manual_record,
+                label: 'Call and record',
+                trailing: 'needs consent',
+                onTap: _callController.snapshot.phase != CallPhase.idle || !_onlineSubs.contains(peer)
+                    ? null
+                    : () {
+                        Navigator.of(sheetCtx).pop();
+                        _callController.startCall(channelId: ch.id, peerSub: peer, wantRecording: true);
+                      },
+              ),
+            ],
             _SheetRow(
               icon: Icons.push_pin_outlined,
               label: 'Pinned messages',
@@ -1830,6 +2001,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onWebhooks: selected.kind == ChannelKind.dm
                 ? null
                 : () => showWebhooksDialog(context, api: widget.api, channel: selected),
+            // Voice calls are a DM-only surface (voice-calls-plan.md D5).
+            callButton: _callButtonFor(selected),
           ),
         // Classification banners frame the whole channel view, top and bottom (DoDI 5200.48).
         if (bannerLevel != null) MarkingBanner(level: bannerLevel),
@@ -2050,6 +2223,7 @@ class _ChannelHeader extends StatelessWidget {
     this.onMembers,
     this.onPins,
     this.onWebhooks,
+    this.callButton,
   });
 
   final Channel channel;
@@ -2081,6 +2255,11 @@ class _ChannelHeader extends StatelessWidget {
 
   /// Opens the inbound-webhook manager. Null hides the control (e.g. DMs).
   final VoidCallback? onWebhooks;
+
+  /// The channel's call control (voice-calls-plan.md §3.3 / group-call
+  /// addendum): [CallButton]/[SoloRecordButton] for a DM, [GroupCallButton]
+  /// for a `human` channel. Null for an agent channel.
+  final Widget? callButton;
 
   @override
   Widget build(BuildContext context) {
@@ -2125,6 +2304,10 @@ class _ChannelHeader extends StatelessWidget {
             ),
           ],
           const Spacer(),
+          if (callButton != null) ...[
+            callButton!,
+            const SizedBox(width: 4),
+          ],
           if (onPins != null) ...[
             IconButton(
               onPressed: onPins,
@@ -2570,11 +2753,12 @@ class _SheetRow extends StatelessWidget {
 
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final String? trailing;
 
   @override
   Widget build(BuildContext context) {
+    final disabled = onTap == null;
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -2582,12 +2766,12 @@ class _SheetRow extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 18),
         child: Row(
           children: [
-            Icon(icon, size: 19, color: AppColors.textMuted),
+            Icon(icon, size: 19, color: disabled ? AppColors.textFaint : AppColors.textMuted),
             const SizedBox(width: 14),
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(fontSize: 14, color: AppColors.text),
+                style: TextStyle(fontSize: 14, color: disabled ? AppColors.textFaint : AppColors.text),
               ),
             ),
             if (trailing != null)

@@ -23,6 +23,7 @@ class ChatSidebar extends StatelessWidget {
     required this.onNewAssistant,
     required this.onNewCodingAgent,
     required this.onNewDm,
+    required this.onOpenSelfDm,
     this.onArchive,
     this.showArchived = false,
     this.onToggleShowArchived,
@@ -71,6 +72,10 @@ class ChatSidebar extends StatelessWidget {
   final VoidCallback onNewCodingAgent;
   final VoidCallback onNewDm;
 
+  /// Opens (or creates) the caller's own self-DM ("notes to self", `POST
+  /// /self-dm`) -- the home for solo voice memos.
+  final VoidCallback onOpenSelfDm;
+
   /// Archive (or restore, when `channel.archived`) a channel. Null hides the action.
   final void Function(Channel channel, bool archived)? onArchive;
 
@@ -91,7 +96,7 @@ class ChatSidebar extends StatelessWidget {
   /// (from the directory), falling back to their sub, then the channel name.
   String _dmLabel(Channel channel) {
     final peer = channel.peer(currentUserSub);
-    if (peer == null) return channel.name.isEmpty ? 'Direct message' : channel.name;
+    if (peer == null) return channel.name.isEmpty ? 'Notes to self' : channel.name;
     return usersBySub[peer]?.label ?? peer;
   }
 
@@ -123,6 +128,12 @@ class ChatSidebar extends StatelessWidget {
                   icon: Icons.alternate_email,
                   label: 'New direct message',
                   onPressed: onNewDm,
+                ),
+                const SizedBox(height: 6),
+                _SidebarActionButton(
+                  icon: Icons.note_alt_outlined,
+                  label: 'Notes to self',
+                  onPressed: onOpenSelfDm,
                 ),
                 const SizedBox(height: 6),
                 _SidebarActionButton(

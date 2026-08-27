@@ -138,6 +138,41 @@ export interface Config {
    * stays unavailable. Requires a runner-token minter (`runnerToken`) so the pod can attach as the
    * owner. See src/agent/pool-runner.ts + src/agent/k8s.ts. */
   pool?: PoolConfig;
+
+  // ── Voice calls (docs/plans/voice-calls-plan.md) — all optional; unset ⇒ the feature stays off
+  // exactly like `pool` above (a scaffold-phase concern too: these are read by calls/registry.ts,
+  // calls/mediad-client.ts, transcribe/client.ts, none of which are implemented yet). ────────────
+
+  /** SecRecorder base URL (`SECCHAT_TRANSCRIBE_URL`) for per-leg call transcription (§2.4).
+   * Unset ⇒ a recorded call's audio still gets posted, just without a transcript (see
+   * transcribe/client.ts's failure-isolation note). */
+  transcribeUrl?: string;
+  /** secchat-mediad's control API (`SECCHAT_MEDIAD_URL` + shared bearer `SECCHAT_MEDIAD_TOKEN`).
+   * Unset ⇒ recording is unavailable — calls still work, just p2p-only (§2.3's fail-closed-
+   * recording, fail-open-calling policy). */
+  mediad?: MediadConfig;
+  /** STUN server(s) offered to clients for p2p ICE gathering (`SECCHAT_CALL_STUN`, comma-separated
+   * `stun:host:port` URLs). Empty (the default) ⇒ none configured — LAN/VPN p2p calls still usually
+   * connect via host/peer-reflexive candidates; a public STUN default is deliberately NOT used here
+   * (§2.5 v3 review: it would leak an unrecorded call's existence + client IPs to a third party and
+   * break the suite's air-gap posture — coturn in STUN-only mode is the documented suite-local
+   * option). Relayed (recorded) calls never need STUN — mediad is a fixed host:port. */
+  callStun: string[];
+}
+
+/** secchat-mediad's control-API location + shared credential (see Config.mediad). */
+export interface MediadConfig {
+  url: string;
+  token: string;
+  /** The shared recordings-volume directory THIS backend process can read/write
+   * (`SECCHAT_MEDIAD_RECORDINGS_DIR`, docs/plans/voice-contracts.md §4 — secdeploy mounts it at
+   * `/var/lib/secchat/recordings`, distinct from `uploadsDir`). Required alongside `url`/`token` for
+   * the post-call pipeline to actually ingest a recording or transcribe a leg (calls/registry.ts's
+   * `runPostCallPipeline`, calls/mediad-client.ts's `reconcileUnclaimedSessions`) — without it a
+   * relayed call still gets recorded by mediad, but the mixed file is never claimed as an attachment
+   * and no leg can be read for transcription. Unset ⇒ those two steps stay no-ops (logged), same
+   * "feature partially off" posture as every other optional Config field. */
+  recordingsDir?: string;
 }
 
 /** Deployment settings for the Kubernetes agent pool (see Config.pool). */
@@ -303,6 +338,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         maxTasks: Number(opt(env, "SECCHAT_POOL_MAX_TASKS", "5")),
       }
     : undefined;
+  // Voice calls (docs/plans/voice-calls-plan.md): mediad needs BOTH its URL and shared token to be
+  // usable (a URL with no token would mean an unauthenticated control-API client — fail closed to
+  // "not configured" rather than try it without auth), same "all-required-fields-present" instinct
+  // as secrouterServiceTokenFromEnv above.
+  const mediadUrl = env.SECCHAT_MEDIAD_URL?.trim() || undefined;
+  const mediadToken = env.SECCHAT_MEDIAD_TOKEN?.trim() || undefined;
+  const mediadRecordingsDir = env.SECCHAT_MEDIAD_RECORDINGS_DIR?.trim() || undefined;
+  const mediad: MediadConfig | undefined =
+    mediadUrl && mediadToken ? { url: mediadUrl, token: mediadToken, recordingsDir: mediadRecordingsDir } : undefined;
   return {
     host: opt(env, "SECCHAT_HOST", "127.0.0.1"),
     port: Number(opt(env, "SECCHAT_PORT", "47010")),
@@ -340,5 +384,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sshEnabled: Boolean(secretKey),
     gitKnownHosts,
     pool,
+    transcribeUrl: env.SECCHAT_TRANSCRIBE_URL?.trim() || undefined,
+    mediad,
+    callStun: (env.SECCHAT_CALL_STUN ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
   };
 }

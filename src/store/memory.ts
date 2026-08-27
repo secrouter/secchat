@@ -57,7 +57,11 @@ import type {
   AppendMessageInput,
   Attachment,
   AuditEvent,
+  CallParticipantRow,
+  CallRecordingState,
+  CallRow,
   Channel,
+  CreateCallInput,
   ExecuteGrant,
   Id,
   Member,
@@ -229,6 +233,17 @@ export class MemoryStore implements Store, SessionStore {
     return null;
   }
 
+  async findSelfDmChannel(sub: string): Promise<Channel | null> {
+    for (const channel of this.#channels.values()) {
+      if (channel.kind !== "dm") continue;
+      const userRefs = (this.#members.get(channel.id) ?? [])
+        .filter((m) => m.memberType === "user")
+        .map((m) => m.memberRef);
+      if (userRefs.length === 1 && userRefs[0] === sub) return channel;
+    }
+    return null;
+  }
+
   async createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent> {
     const agent: Agent = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     this.#agents.set(agent.id, agent);
@@ -335,8 +350,10 @@ export class MemoryStore implements Store, SessionStore {
   /** Appends a revision (capturing the original as revision 1 on the first edit), overwrites the
    * current plaintext, stamps `editedAt`, and records a `message.edit` audit event. The message
    * row's `contentSha256`/`hash` (the original) are untouched, so the chain still verifies — the
-   * edit lives entirely out-of-band. Author-only is enforced by the route; a redacted message has
-   * no plaintext to revise, so it throws (the route maps this to 409). */
+   * edit lives entirely out-of-band. WHO may call this (author-only for a normal message; any
+   * channel member for a `system` transcript) is enforced by the route, not here — this method just
+   * records `by` as the new revision's author (see MessageRevision.authorRef's doc comment). A
+   * redacted message has no plaintext to revise, so it throws (the route maps this to 409). */
   async editMessage(id: Id, by: string, content: string): Promise<Message> {
     const message = this.#messagesById.get(id);
     if (!message) throw new Error(`MemoryStore.editMessage: unknown message ${id}`);
@@ -359,7 +376,7 @@ export class MemoryStore implements Store, SessionStore {
     revisions.push({
       messageId: id,
       revision: revisions[revisions.length - 1]!.revision + 1,
-      authorRef: message.authorRef,
+      authorRef: by, // the editor, not necessarily message.authorRef — see MessageRevision's doc comment
       content,
       contentSha256: hashContent(content),
       at,
@@ -633,6 +650,9 @@ export class MemoryStore implements Store, SessionStore {
 
   #outboundById = new Map<Id, OutboundWebhook>();
 
+  // ── Calls (1:1 DM voice calls — db/migrations/0019_calls.sql) ────────────────────────────────
+  #callsById = new Map<Id, CallRow>();
+
   async createOutboundWebhook(input: {
     channelId: Id;
     url: string;
@@ -679,6 +699,102 @@ export class MemoryStore implements Store, SessionStore {
     hook.lastStatus = status;
     hook.lastError = error ?? undefined;
     hook.lastDeliveryAt = new Date().toISOString();
+  }
+
+  async createCall(input: CreateCallInput): Promise<CallRow> {
+    const call: CallRow = {
+      id: randomUUID(),
+      channelId: input.channelId,
+      caller: input.caller,
+      callee: input.callee,
+      startedAt: new Date().toISOString(),
+      consent: input.consent,
+      mode: input.mode,
+      recording: "none",
+    };
+    this.#callsById.set(call.id, call);
+    return call;
+  }
+
+  /** Fails closed on an unknown call (matches redactMessage/setSessionStatus's guard style). */
+  async endCall(id: Id, endedAt: string): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.endCall: unknown call ${id}`);
+    call.endedAt = endedAt;
+    return call;
+  }
+
+  async getCall(id: Id): Promise<CallRow | null> {
+    return this.#callsById.get(id) ?? null;
+  }
+
+  async setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallRecording: unknown call ${id}`);
+    call.recording = recording;
+    return call;
+  }
+
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment); db/migrations/0020_calls_mediad_session_id.sql. */
+  async setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallMediadSessionId: unknown call ${id}`);
+    call.mediadSessionId = mediadSessionId;
+    return call;
+  }
+
+  async setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallRecordingAttachment: unknown call ${id}`);
+    call.recordingAttachmentId = attachmentId;
+    return call;
+  }
+
+  async setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow> {
+    const call = this.#callsById.get(id);
+    if (!call) throw new Error(`MemoryStore.setCallTranscriptMessage: unknown call ${id}`);
+    call.transcriptMessageId = messageId;
+    return call;
+  }
+
+  /** Ended calls with no recording attachment yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5); the caller further filters to rows whose mediad session dir still
+   * exists on the shared volume (mediad-client.ts's reconcileUnclaimedSessions). */
+  async listUnclaimedEndedCalls(): Promise<CallRow[]> {
+    return [...this.#callsById.values()].filter((c) => c.endedAt && !c.recordingAttachmentId);
+  }
+
+  // ── Call participants (db/migrations/0021_call_participants.sql) ─────────────────────────────
+  #callParticipants = new Map<Id, CallParticipantRow[]>(); // callId -> rows, join order
+
+  async addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow> {
+    let rows = this.#callParticipants.get(input.callId);
+    if (!rows) {
+      rows = [];
+      this.#callParticipants.set(input.callId, rows);
+    }
+    const existing = rows.find((r) => r.sub === input.sub);
+    const joinedAt = new Date().toISOString();
+    if (existing) {
+      // A rejoin (group participant who left and came back) — refresh in place.
+      existing.legId = input.legId;
+      existing.joinedAt = joinedAt;
+      existing.leftAt = undefined;
+      return existing;
+    }
+    const row: CallParticipantRow = { callId: input.callId, sub: input.sub, legId: input.legId, joinedAt };
+    rows.push(row);
+    return row;
+  }
+
+  async setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void> {
+    const row = this.#callParticipants.get(callId)?.find((r) => r.sub === sub);
+    if (row) row.leftAt = leftAt;
+  }
+
+  async listCallParticipants(callId: Id): Promise<CallParticipantRow[]> {
+    return [...(this.#callParticipants.get(callId) ?? [])];
   }
 
   /** Purges plaintext and records `reason` as the audit event's `detail` — still metadata (a

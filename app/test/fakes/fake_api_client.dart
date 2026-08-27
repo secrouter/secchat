@@ -63,6 +63,11 @@ class FakeApiClient implements ApiClient {
   /// Every `createDm` call, in order, as the target user sub.
   final List<String> createDmCalls = [];
 
+  /// Incremented on each `openSelfDm` call. The self-DM channel returned is
+  /// idempotent, like [createDm] -- the same one every time.
+  int openSelfDmCalls = 0;
+  Channel? _selfDm;
+
   /// Every `grantExecute` call, in order.
   final List<String> grantExecuteCalls = [];
 
@@ -307,6 +312,73 @@ class FakeApiClient implements ApiClient {
 
   @override
   void sendTyping(String channelId) => typingCalls.add(channelId);
+
+  /// Every `call_*` frame sent, in order, as `(type, channelId, ...)` -- one
+  /// list per frame kind, matching [typingCalls]'s pattern.
+  final List<({String channelId, bool wantRecording})> callInviteCalls = [];
+  final List<({String channelId, bool consent})> callAcceptCalls = [];
+  final List<({String channelId, String sdpType, String sdp})> callSdpCalls = [];
+  final List<({String channelId, String candidate, String? sdpMid, int? sdpMLineIndex})>
+  callCandidateCalls = [];
+  final List<String> callEndCalls = [];
+  final List<({String channelId, bool wantRecording, bool? enroll})> callSoloStartCalls = [];
+  final List<String> callStartCalls = [];
+  final List<String> callJoinCalls = [];
+  final List<({String channelId, bool cameraOn, bool screenOn, String? cameraTrackId, String? screenTrackId})>
+  callMediaCalls = [];
+
+  @override
+  void sendCallInvite(String channelId, {required bool wantRecording}) =>
+      callInviteCalls.add((channelId: channelId, wantRecording: wantRecording));
+
+  @override
+  void sendCallAccept(String channelId, {required bool consent}) =>
+      callAcceptCalls.add((channelId: channelId, consent: consent));
+
+  @override
+  void sendCallSdp(String channelId, {required String sdpType, required String sdp}) =>
+      callSdpCalls.add((channelId: channelId, sdpType: sdpType, sdp: sdp));
+
+  @override
+  void sendCallCandidate(
+    String channelId, {
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) => callCandidateCalls.add((
+    channelId: channelId,
+    candidate: candidate,
+    sdpMid: sdpMid,
+    sdpMLineIndex: sdpMLineIndex,
+  ));
+
+  @override
+  void sendCallEnd(String channelId) => callEndCalls.add(channelId);
+
+  @override
+  void sendCallSoloStart(String channelId, {required bool wantRecording, bool? enroll}) =>
+      callSoloStartCalls.add((channelId: channelId, wantRecording: wantRecording, enroll: enroll));
+
+  @override
+  void sendCallStart(String channelId) => callStartCalls.add(channelId);
+
+  @override
+  void sendCallJoin(String channelId) => callJoinCalls.add(channelId);
+
+  @override
+  void sendCallMedia(
+    String channelId, {
+    required bool cameraOn,
+    required bool screenOn,
+    String? cameraTrackId,
+    String? screenTrackId,
+  }) => callMediaCalls.add((
+    channelId: channelId,
+    cameraOn: cameraOn,
+    screenOn: screenOn,
+    cameraTrackId: cameraTrackId,
+    screenTrackId: screenTrackId,
+  ));
 
   @override
   Future<List<String>> getPresence() async {
@@ -610,6 +682,23 @@ class FakeApiClient implements ApiClient {
       members: [me.sub, userSub],
     );
     _dmByPeer[userSub] = channel;
+    channels = [...channels, channel];
+    return channel;
+  }
+
+  @override
+  Future<Channel> openSelfDm() async {
+    _maybeThrow('openSelfDm');
+    openSelfDmCalls++;
+    final existing = _selfDm;
+    if (existing != null) return existing;
+    final channel = Channel(
+      id: 'self-dm-1',
+      kind: ChannelKind.dm,
+      name: '',
+      members: [me.sub],
+    );
+    _selfDm = channel;
     channels = [...channels, channel];
     return channel;
   }

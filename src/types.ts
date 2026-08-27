@@ -45,7 +45,11 @@ export interface AuthGateway {
 
 export type ChannelKind = "human" | "agent" | "dm";
 export type MemberType = "user" | "agent";
-export type AuthorType = "user" | "agent";
+/** `"system"` (voice-calls plan §8 O4) is the ONE deliberate type-model extension for calls: the
+ * service principal that authors a call transcript (both participants are named IN the body, not
+ * via authorRef — see `governedCallAppend`, governance/append.ts). Never a channel member/author a
+ * human or agent picks; only the transcript-post path uses it. */
+export type AuthorType = "user" | "agent" | "system";
 export type AgentKind = "assistant" | "coding";
 
 export interface Channel {
@@ -184,7 +188,12 @@ export interface Message {
 export interface MessageRevision {
   messageId: Id;
   revision: number; // 1 = original, ascending
-  authorRef: string; // who wrote this revision (always the original author — edit is author-only)
+  // Who wrote THIS revision: revision 1 is always the original author; a later revision is
+  // whoever called editMessage (`by`) — normally the same person, since editing a normal message
+  // is author-only, but a `system`-authored transcript relaxes that (any channel member may
+  // correct it, http/server.ts's `POST /messages/:id/edit`), so this is the correcting member for
+  // those revisions, not "system".
+  authorRef: string;
   content?: string; // omitted for a redacted message
   contentSha256: Sha256Hex;
   at: string; // createdAt for revision 1, the edit time thereafter
@@ -347,6 +356,273 @@ export interface OutboundWebhook {
   lastDeliveryAt?: string;
 }
 
+// ── Voice calls: 1:1 DM calls (docs/plans/voice-calls-plan.md, v3.1) ─────────────────────────────
+// DMs only (D5). One active call per DM channel, tracked server-side by CallRegistry
+// (src/calls/registry.ts). `mode` is fixed at ACCEPT time (§2.1 — the O5 deferral: no mid-call
+// P2P<->relay migration) and `recording` mirrors secchat-mediad's ACTUAL writer state (§2.3 — so
+// ● REC is truthful by construction, never a client-side guess). See db/migrations/0019_calls.sql
+// for the durable schema and docs/plans/voice-contracts.md for the non-TS (Go/Dart/deploy) wire
+// contract these types summarize on the TS side.
+
+/** CallRegistry's live view of a call (§2.1). NOT a `calls` row field — a ringing call that's
+ * declined/missed/glare-lost never gets a durable row (only the audited `call.*` events record
+ * it); a row exists from `active` onward (see {@link CallRow}). */
+export type CallState = "ringing" | "active" | "ended";
+
+/** Fixed at accept time (§2.1). `"p2p"`: pure client<->client DTLS-SRTP, the server never sees
+ * media — always the mode when consent is false (D4). `"relayed"`: both legs connect to
+ * secchat-mediad, which records — only when the callee grants recording consent (D3). */
+export type CallMode = "p2p" | "relayed";
+
+/** secchat-mediad's ACTUAL recording-writer state for the call (§2.3), reported to the backend and
+ * broadcast to both UIs. `"none"` for the entire duration of a p2p call (mediad is never involved)
+ * and before a relayed call's recording writer has actually started. */
+export type CallRecordingState = "none" | "on";
+
+/** caller -> server: start a call in a DM. The server validates DM membership + single-flight (one
+ * call per channel, one per user), audits `call.start`, then re-broadcasts as
+ * {@link CallInviteBroadcast} to every one of the callee's live connections (all tabs ring). */
+export interface CallInviteFrame {
+  type: "call_invite";
+  channelId: Id;
+  wantRecording: boolean;
+}
+/** server -> callee (every live connection). */
+export interface CallInviteBroadcast {
+  type: "call_invite";
+  channelId: Id;
+  from: string; // caller's Principal.sub
+  wantRecording: boolean;
+}
+
+/** callee -> server: the FIRST `call_accept` on a ringing call wins and is bound to that ONE
+ * connection (§2.1's connection-scoped routing — pins the audited consent to the tab the human
+ * actually used); the rest of the callee's connections get {@link CallTakenFrame}. `consent` (D3),
+ * not `wantRecording`, decides the call's `mode` — false always yields p2p, even when the caller
+ * asked to record. */
+export interface CallAcceptFrame {
+  type: "call_accept";
+  channelId: Id;
+  consent: boolean;
+}
+/** server -> the caller's bound connection: the call is now `active` and `mode` is fixed. */
+export interface CallAcceptedFrame {
+  type: "call_accept";
+  channelId: Id;
+  consent: boolean;
+  mode: CallMode;
+}
+
+/** server -> every callee connection that did NOT win the `call_accept` race (multi-tab ring). */
+export interface CallTakenFrame {
+  type: "call_taken";
+  channelId: Id;
+}
+
+/** Either bound connection -> server -> the other: SDP offer/answer relay (§2.1/§2.2).
+ * `mode: "p2p"` — a dumb client<->client relay (the user-to-user covert-channel path bounded by
+ * per-frame size + rate caps, §2.1/§4). `mode: "relayed"` — the backend TERMINATES this client's
+ * SDP and brokers it against secchat-mediad's control API (MediadClient.offerLeg, a single-response
+ * non-trickle exchange, §2.3); the client still only ever sees `call_sdp` frames, never mediad's
+ * URL/token.
+ *
+ * BIDIRECTIONAL for a GROUP call (see the "Group calls" section below): a client still sends its own
+ * leg's `sdpType: "offer"` the first time it joins (brokered via MediadClient.offerLeg exactly like
+ * a 1:1 relayed call), but the SERVER may also now SEND this frame with `sdpType: "offer"` to an
+ * already-connected participant — a roster-change RENEGOTIATION (another participant joined/left,
+ * MediadClient.renegotiate) — which the client answers with its own `call_sdp` `sdpType: "answer"`,
+ * brokered server-side via MediadClient.answerLeg. A 1:1/solo call never sends a server-initiated
+ * offer (§2.1's O5 deferral still holds there — no mid-call renegotiation outside group rosters). */
+export interface CallSdpFrame {
+  type: "call_sdp";
+  channelId: Id;
+  sdpType: "offer" | "answer";
+  sdp: string;
+}
+
+/** p2p mode only — relayed mode's mediad exchange is non-trickle (§2.2), so no candidate trickling
+ * ever crosses the backend for a relayed call. Either bound connection -> server -> the other,
+ * size/rate-capped like {@link CallSdpFrame}. */
+export interface CallCandidateFrame {
+  type: "call_candidate";
+  channelId: Id;
+  candidate: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+}
+
+/** Either side -> server -> the other: hang up. Also the server's OWN signal when a bound
+ * connection drops (the `untrackConnection` teardown hook, §2.1) — `byDisconnect` distinguishes an
+ * explicit hangup from a socket-drop teardown for the UI's messaging. */
+export interface CallEndFrame {
+  type: "call_end";
+  channelId: Id;
+  byDisconnect?: boolean;
+}
+
+/** server -> both DM members: the ringing call's timeout (default 45s, §2.1) expired unanswered.
+ * The LIVE signal so an open ring screen dismisses itself immediately; companion to the
+ * content-free `call.start`/audit trail and the `call_missed` chat line the server posts into the
+ * DM (a normal message, not this frame). */
+export interface CallMissedFrame {
+  type: "call_missed";
+  channelId: Id;
+}
+
+/** server -> both bound connections: mediad's ACTUAL recording-writer state changed (§2.3 — the
+ * truthful ● REC signal, mirrored onto the `calls` row via `Store.setCallRecording`). p2p calls
+ * never emit this (mediad is never involved, `recording` stays `"none"` for their whole duration).
+ * See docs/plans/voice-contracts.md §1.2 for the exact wire shape + when the server sends it
+ * (piggybacked on the offer/answer broker round trip rather than a separate poll loop). */
+export interface CallRecordingFrame {
+  type: "call_recording";
+  channelId: Id;
+  recording: CallRecordingState;
+}
+
+/** The durable record of a call (db/migrations/0019_calls.sql), from `active` onward — a ringing
+ * call that's declined/missed/glare-lost never gets one (only the audited `call.*` events + a
+ * `call_missed`/decline chat line record it). `consent`/`mode` are fixed at creation and never
+ * change (§2.1 O5 deferral). `recordingAttachmentId`/`transcriptMessageId` are set as the §2.4
+ * post-call pipeline progresses (server-side attachment ingest, then the governed transcript post)
+ * — both unset forever for an unrecorded (`mode: "p2p"`) call. */
+export interface CallRow {
+  id: Id;
+  channelId: Id;
+  caller: string; // Principal.sub
+  callee: string; // Principal.sub
+  startedAt: string; // ISO-8601 UTC — when the call went `active` (first call_accept)
+  endedAt?: string; // ISO-8601 UTC — set on call_end / bound-connection-drop teardown
+  consent: boolean; // the callee's recording-consent outcome (D3/D4)
+  mode: CallMode;
+  recording: CallRecordingState; // mirrors mediad's actual writer state (§2.3); "none" for p2p
+  recordingAttachmentId?: Id; // set once the server-side-assembled mixed recording is ingested
+  transcriptMessageId?: Id; // set once governedCallAppend posts the merged transcript
+  /** mediad's own session id (docs/plans/voice-contracts.md §2.1's `POST /sessions` response),
+   * persisted right after `MediadClient.createSession` succeeds in `CallRegistry.accept()` (§2.4 v3.1
+   * REQUIRED #5 — the "relocated durability item"). Unset for a `mode: "p2p"` call (no mediad
+   * session ever exists) and for a relayed call whose `createSession` itself failed (the mid-accept
+   * downgrade to p2p, §2.3). This is what lets a startup-reconciliation sweep
+   * (mediad-client.ts's `reconcileUnclaimedSessions`) match an ended-but-unclaimed `calls` row back
+   * to its on-disk session directory WITHOUT guessing — the gap the v3.1 review flagged. */
+  mediadSessionId?: string;
+}
+
+export interface CreateCallInput {
+  channelId: Id;
+  caller: string;
+  callee: string;
+  consent: boolean;
+  mode: CallMode;
+}
+
+// ── Voice calls: N-participant GROUP calls (a `kind:"human"` channel, relayed-only) ────────────
+// Extends the 1:1 DM calls above to a JOIN-ON-DEMAND model: `call_start` (first participant) /
+// `call_join` (every later one) on a group channel, server-orchestrated renegotiation on every
+// roster change, `call_end` per-participant LEAVE vs the last participant out (LAST-OUT) tearing
+// the whole call down + running the post-call pipeline — see src/calls/registry.ts's `startGroup`/
+// `joinGroup`/`leaveGroup`. Always `mode: "relayed"`/`consent: true` (no p2p mesh, D5's DM-only p2p
+// path doesn't extend here) — a group call is recorded by construction, same fail-loud-if-mediad-
+// unavailable posture as a solo memo (no live conversation to keep alive without it, unlike a 1:1
+// call's fail-open-calling downgrade). The durable `calls` row (CallRow above) is still created for
+// a group call — `caller`/`callee` both equal the STARTER's sub (vestigial, mirroring `startSolo`'s
+// `callee = caller` convention) — `call_participants` below is the actual source of truth for who
+// was on the call and when.
+
+/** caller -> server: start a group call on a `kind:"human"` channel (channel membership required).
+ * Rejected (`call_active`) if the channel already has a live call — a member should `call_join` it
+ * instead. */
+export interface CallStartFrame {
+  type: "call_start";
+  channelId: Id;
+}
+
+/** A member -> server: join an already-live group call. Adds a leg (MediadClient.addLeg) and
+ * triggers server-orchestrated renegotiation of every OTHER live leg (MediadClient.renegotiate) so
+ * their downstream picks up the new participant's track. */
+export interface CallJoinFrame {
+  type: "call_join";
+  channelId: Id;
+}
+
+/** Camera/screen-share on-off + the associated LOCAL video track ids, shared by
+ * {@link CallMediaFrame}/{@link CallMediaBroadcastFrame} and {@link CallRosterFrame}'s
+ * per-participant entries. `cameraTrackId`/`screenTrackId` are the CLIENT's own local video track
+ * ids (browser UUIDs, one per active camera/screen track) — they exist ONLY so a receiver can label
+ * which forwarded video tile is a camera vs. a screen share; the backend treats them as opaque
+ * strings, never parses/interprets them, and relays them exactly as sent. Absent/false is the
+ * default (a fresh joiner always starts with camera/screen off, see `CallParticipantJoinedFrame`). */
+export interface CallMediaState {
+  cameraOn: boolean;
+  screenOn: boolean;
+  cameraTrackId?: string;
+  screenTrackId?: string;
+}
+
+/** A participant -> server: their camera/screen on-off (and/or track id) state changed. Group calls
+ * (a `kind:"human"` channel's live call) AND 1:1 (DM) calls, p2p or relayed — a solo self-DM memo
+ * (no peer) is the only call shape the registry rejects/ignores this for (no crash). */
+export interface CallMediaFrame extends CallMediaState {
+  type: "call_media";
+  channelId: Id;
+}
+
+/** server -> every OTHER bound party's connection: `sub`'s media state changed — every other
+ * participant for a group call (mirrors `CallParticipantJoinedFrame`'s "every other" fan-out), the
+ * one peer for a 1:1 call — never echoed back to the sender. */
+export interface CallMediaBroadcastFrame extends CallMediaState {
+  type: "call_media";
+  channelId: Id;
+  sub: string;
+}
+
+/** server -> the JOINER's bound connection only, right after a winning `call_join`: who else is
+ * currently on the call (including the joiner itself) — the roster snapshot a client needs to render
+ * its participant list without a second round trip. Each entry carries that participant's CURRENT
+ * media state ({@link CallMediaState}) so a joiner renders existing camera/screen tiles without a
+ * separate round trip; a participant who has never sent `call_media` reads as camera/screen off. */
+export interface CallRosterFrame {
+  type: "call_roster";
+  channelId: Id;
+  participants: Array<{ sub: string } & CallMediaState>;
+}
+
+/** server -> every OTHER bound participant connection: a member joined the call. A joiner always
+ * starts with camera/screen off (matches `CallRosterFrame`'s per-participant default) — they signal
+ * otherwise via their own subsequent `call_media` frame, same as anyone else. */
+export interface CallParticipantJoinedFrame {
+  type: "call_participant_joined";
+  channelId: Id;
+  sub: string;
+}
+
+/** server -> every remaining bound participant connection: a member left the call (an explicit
+ * `call_end`, or their bound connection dropping) — the call itself stays up as long as at least one
+ * participant remains; the LAST one out is a normal `call_end`-style teardown (see CallEndFrame),
+ * not this frame. */
+export interface CallParticipantLeftFrame {
+  type: "call_participant_left";
+  channelId: Id;
+  sub: string;
+}
+
+/** The durable record of one participant's leg on a call (db/migrations/0021_call_participants.sql)
+ * — generalizes the DM/solo path's fixed caller/callee (+ LEG_CALLER_ID/LEG_CALLEE_ID) leg->sub map
+ * to an arbitrary N-participant call. Populated for EVERY relayed call (1:1, solo, AND group) the
+ * moment its mediad leg exists (`CallRegistry.accept`/`startSolo`/`startGroup`/`joinGroup`), so the
+ * crash-recovery reconciliation sweep (mediad-client.ts's `reconcileUnclaimedSessions` ->
+ * `kickReconciledTranscription`) and the live post-call pipeline (registry.ts's
+ * `runPostCallPipeline`) both read the SAME table instead of assuming exactly two legs. A row
+ * persists (with `leftAt` stamped) even after the participant leaves mid-call — their leg's audio
+ * still exists in mediad's finalize manifest and still needs transcribing. */
+export interface CallParticipantRow {
+  callId: Id;
+  sub: string;
+  legId: string;
+  joinedAt: string; // ISO-8601 UTC
+  leftAt?: string; // ISO-8601 UTC — set once this participant's leg is removed (leave, or call end)
+}
+
 export interface AppendAuditInput {
   actor: string;
   action: string;
@@ -397,6 +673,9 @@ export interface Store {
   /** The existing 1:1 DM channel whose two user members are exactly these subs (order-independent),
    * or null. Used to keep POST /dm idempotent (one DM per pair, never a duplicate). */
   findDmChannel(subA: string, subB: string): Promise<Channel | null>;
+  /** The user's self-DM ("notes to self") — a `kind:"dm"` channel whose only user member is `sub`
+   * (distinct from a 2-party DM, which `findDmChannel` matches). Backs the solo voice-memo flow. */
+  findSelfDmChannel(sub: string): Promise<Channel | null>;
 
   createAgent(input: Omit<Agent, "id" | "createdAt">): Promise<Agent>;
   getAgent(id: Id): Promise<Agent | null>;
@@ -495,6 +774,50 @@ export interface Store {
   getOutboundWebhook(channelId: Id, id: Id): Promise<OutboundWebhook | null>;
   deleteOutboundWebhook(channelId: Id, id: Id): Promise<boolean>; // revoke; false if not in this channel
   recordOutboundDelivery(id: Id, status: number, error: string | null): Promise<void>; // stamp last*
+
+  // Calls (1:1 DM voice calls — db/migrations/0019_calls.sql; see the "Voice calls" section above).
+  // CallRegistry (src/calls/registry.ts) owns the live ringing/active state machine; these persist
+  // the durable record from `active` onward and back §2.4's post-call pipeline.
+  /** Create the durable row for a call that just went `active` (first `call_accept`) — `consent`/
+   * `mode` are fixed here and never change. `startedAt` is stamped now (server clock). */
+  createCall(input: CreateCallInput): Promise<CallRow>;
+  /** Stamp `endedAt` (call_end, or the bound-connection-drop teardown). Idempotent-in-spirit is the
+   * caller's job (CallRegistry ends a call at most once); implementations may fail closed on an
+   * already-ended row, matching redactMessage's one-way-tombstone style. */
+  endCall(id: Id, endedAt: string): Promise<CallRow>;
+  getCall(id: Id): Promise<CallRow | null>;
+  /** Mirror mediad's actual recording-writer state onto the row (§2.3) — read by a reconnecting
+   * client's ● REC and stamped into the eventual transcript header, so both stay truthful across a
+   * backend restart (not just a live broadcast). */
+  setCallRecording(id: Id, recording: CallRecordingState): Promise<CallRow>;
+  /** Persist mediad's own session id (§2.4 v3.1 REQUIRED #5 — see CallRow.mediadSessionId's doc
+   * comment) — called once, right after `MediadClient.createSession` succeeds in `accept()`. */
+  setCallMediadSessionId(id: Id, mediadSessionId: string): Promise<CallRow>;
+  /** Claim the server-side-assembled mixed recording as this call's attachment (§2.4 ingest step,
+   * after blobs.write + addAttachment — this just links the attachment id onto the call row). */
+  setCallRecordingAttachment(id: Id, attachmentId: Id): Promise<CallRow>;
+  /** Record the posted transcript message id (§2.4's final step, after governedCallAppend). */
+  setCallTranscriptMessage(id: Id, messageId: Id): Promise<CallRow>;
+  /** Ended calls with no `recordingAttachmentId` yet — the startup-reconciliation candidate set
+   * (§2.4 v3.1 REQUIRED #5). The caller (mediad-client.ts's `reconcileUnclaimedSessions`) further
+   * filters to rows whose mediad session directory still exists on the shared volume; an unrecorded
+   * (`mode: "p2p"`) call has no mediad session and is naturally never actionable here. */
+  listUnclaimedEndedCalls(): Promise<CallRow[]>;
+
+  // Call participants (db/migrations/0021_call_participants.sql — see CallParticipantRow's doc
+  // comment). Populated for every relayed call (1:1, solo, group), not just group calls.
+  /** Record a participant's leg on a call — an UPSERT keyed on (callId, sub): a rejoin (a group
+   * participant who left and comes back) refreshes `legId`/`joinedAt` and clears `leftAt` rather
+   * than erroring, since a real client reconnect is expected to look exactly like this. */
+  addCallParticipant(input: { callId: Id; sub: string; legId: string }): Promise<CallParticipantRow>;
+  /** Stamp a participant's departure (their leg was removed — a group LEAVE, or the whole call
+   * ending). No-op if the participant/call is unknown (a race with an already-torn-down call is not
+   * an error here, matching endCall's "caller owns at-most-once" posture). */
+  setCallParticipantLeft(callId: Id, sub: string, leftAt: string): Promise<void>;
+  /** Every participant a call ever had, join order, INCLUDING ones who already left (their leg's
+   * audio still needs transcribing) — the leg->sub map `runPostCallPipeline`/
+   * `kickReconciledTranscription` iterate instead of a fixed caller/callee pair. */
+  listCallParticipants(callId: Id): Promise<CallParticipantRow[]>;
 
   appendAudit(input: AppendAuditInput): Promise<AuditEvent>;
   /** Recompute both chains end-to-end; used by the audit-review console + tests. */

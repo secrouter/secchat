@@ -24,6 +24,10 @@ dependencies:
   # secret service / web WebCrypto) so a relaunch restores the session instead of re-running SSO.
   # See lib/platform/session_store.dart.
   flutter_secure_storage: ^9.2.2
+  # Voice calls (docs/plans/voice-calls-plan.md §2.2/§3.3): getUserMedia + RTCPeerConnection only.
+  # No client recording stack (v3 moved recording server-side to secchat-mediad) — this package's
+  # weakest surface (client-side MediaRecorder) is deliberately unused.
+  flutter_webrtc: ^1.6.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

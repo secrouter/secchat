@@ -1,0 +1,809 @@
+/// The full-screen call view (voice-calls-plan.md §3.3's UI polish pass): the
+/// SUSTAINED call phases (`connecting`/`active`/`recordingMemo`) get a
+/// prominent, tab-bar-reachable screen instead of just [CallOverlay]'s
+/// compact bottom bar -- big controls, a live duration, and a mic-level
+/// meter so "is my mic actually working?" has an obvious visual answer
+/// instead of silence-and-hope. [ChatScreen] hosts this behind the "Call"
+/// bottom tab (see [CallTabBar]) once a call reaches one of those phases;
+/// [CallOverlay] still owns the transient ring/ended UI, which doesn't need
+/// (and shouldn't get) a whole screen to itself.
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../calls/call_controller.dart';
+import '../formatting.dart';
+import '../theme.dart';
+
+String _fmtDuration(Duration d) {
+  final m = d.inMinutes.toString().padLeft(2, '0');
+  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+  return '$m:$s';
+}
+
+/// True for the phases [CallScreen]/[CallTabBar] treat as "a call is
+/// actually up" -- long enough to be worth a dedicated screen and a bottom
+/// tab, as opposed to the transient ringing/ended states [CallOverlay]
+/// handles with a dialog-like overlay instead.
+bool isSustainedCallPhase(CallPhase phase) =>
+    phase == CallPhase.connecting || phase == CallPhase.active || phase == CallPhase.recordingMemo;
+
+/// Phases that occupy the full-screen call tab: a sustained call PLUS the
+/// terminal [CallPhase.ended] "Call Ended" screen. Ended stays in the tab (the
+/// user dismisses it with the Close button) instead of an auto-dismissing
+/// overlay banner over the chat.
+bool isCallTabPhase(CallPhase phase) => isSustainedCallPhase(phase) || phase == CallPhase.ended;
+
+/// Full-screen call UI for a live/connecting/recording call. Rebuilds via
+/// [AnimatedBuilder] on [controller], same pattern as [CallOverlay].
+class CallScreen extends StatefulWidget {
+  const CallScreen({super.key, required this.controller, required this.labelForSub});
+
+  final CallController controller;
+  final String Function(String sub) labelForSub;
+
+  @override
+  State<CallScreen> createState() => _CallScreenState();
+}
+
+class _CallScreenState extends State<CallScreen> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    // The controller only notifies on state CHANGES; the duration display
+    // needs to advance every second regardless (same pattern as
+    // `call_overlay.dart`'s `_CallBarState`/`_MemoRecordingBarState`).
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (context, _) {
+        final snap = widget.controller.snapshot;
+        // Terminal state: a "Call Ended" screen the user closes explicitly (the
+        // old overlay banner is gone) — closing returns to idle, which drops the
+        // whole tab view back to plain chat.
+        if (snap.phase == CallPhase.ended) {
+          return _EndedView(
+            controller: widget.controller,
+            // A solo memo and a group call BOTH leave peerSub null (no
+            // single fixed peer) -- isGroup is what actually tells them
+            // apart; see [CallSnapshot.isGroup]'s doc.
+            wasMemo: !snap.isGroup && snap.peerSub == null,
+            reason: snap.endReason,
+            errorMessage: snap.errorMessage,
+          );
+        }
+        final isMemo = snap.phase == CallPhase.recordingMemo;
+        final isGroup = snap.isGroup;
+        final peer = snap.peerSub == null ? '' : widget.labelForSub(snap.peerSub!);
+        final title = isGroup ? 'Group call' : (isMemo ? 'Voice memo' : peer);
+        final elapsed = snap.connectedAt == null ? null : DateTime.now().difference(snap.connectedAt!);
+        final statusText = snap.phase == CallPhase.connecting
+            ? 'Connecting…'
+            : isGroup
+            ? '${snap.participants.length + 1} in call' // +1 for me
+            : isMemo
+            ? (elapsed == null ? 'Starting…' : 'Recording…')
+            : (elapsed == null ? 'Connecting…' : 'Connected');
+        // Truthful ● REC (finding #7, call_overlay.dart): the server-pushed
+        // value for a 2-party call; always on for a solo memo (that's the
+        // whole point of the phase -- there's no separate "recording"
+        // sub-phase to gate on, see `CallPhase.recordingMemo`'s doc).
+        final recOn = isMemo || snap.recordingIndicatorOn;
+
+        // The FIRST remote participant currently screen-sharing -- a group
+        // call's roster, or (via the SAME `participants` map, see
+        // `CallSnapshot.participants`'s doc) a 1:1 call's peer. A remote
+        // share always wins the stage over our own (nothing stops both from
+        // being true at once; the OTHER party's content is what the room
+        // wants to look at).
+        String? remoteScreenSharer;
+        for (final p in snap.participants.values) {
+          if (p.screenOn) {
+            remoteScreenSharer = p.sub;
+            break;
+          }
+        }
+        final showLocalScreenStage = remoteScreenSharer == null && snap.localScreenOn;
+        final hasScreenStage = remoteScreenSharer != null || showLocalScreenStage;
+
+        return Material(
+          color: AppColors.bg,
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+              child: Column(
+                children: [
+                  const Spacer(flex: 2),
+                  if (hasScreenStage) ...[
+                    _ScreenShareStage(
+                      label: remoteScreenSharer != null
+                          ? '${widget.labelForSub(remoteScreenSharer)} is sharing their screen'
+                          : 'You are sharing your screen',
+                      child: remoteScreenSharer != null
+                          ? (widget.controller.buildRemoteScreenView(remoteScreenSharer) ??
+                                const SizedBox.shrink())
+                          : widget.controller.buildLocalScreenPreview(),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  isGroup
+                      ? _ParticipantGrid(
+                          participants: snap.participants.values.toList(),
+                          labelForSub: widget.labelForSub,
+                          controller: widget.controller,
+                        )
+                      : _SoloVisual(
+                          isMemo: isMemo,
+                          peer: peer,
+                          peerSub: snap.peerSub,
+                          controller: widget.controller,
+                        ),
+                  const SizedBox(height: 20),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.text,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (recOn) ...[
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: const BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 6),
+                        const Text(
+                          'REC',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.bad),
+                        ),
+                        const SizedBox(width: 12),
+                      ],
+                      Text(statusText, style: const TextStyle(fontSize: 14, color: AppColors.textMuted)),
+                    ],
+                  ),
+                  if (elapsed != null) ...[
+                    const SizedBox(height: 6),
+                    Text(_fmtDuration(elapsed), style: AppFonts.mono(fontSize: 18, color: AppColors.textFaint)),
+                  ],
+                  if (snap.recordingUnavailableNotice)
+                    _Notice(
+                      text: 'Recording unavailable — this call will NOT be recorded.',
+                    ),
+                  if (snap.recordingDeclinedNotice)
+                    _Notice(
+                      text: 'The other party declined recording — this call will NOT be recorded.',
+                    ),
+                  const Spacer(flex: 2),
+                  MicLevelMeter(level: snap.micLevel),
+                  // Own camera self-preview -- small, next to the mic meter
+                  // rather than in the grid/solo-visual slot (which is
+                  // reserved for OTHER parties -- see `_ParticipantTile`/
+                  // `_SoloVisual`'s remote-only video).
+                  if (!isMemo && snap.localCameraOn) ...[
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      key: const Key('local-camera-preview'),
+                      width: 96,
+                      height: 96,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(AppRadius.lg),
+                        child: widget.controller.buildLocalCameraPreview(),
+                      ),
+                    ),
+                  ],
+                  const Spacer(flex: 3),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // No peer to mute/show video FOR on a solo memo --
+                      // mediad records this connection's mic regardless of
+                      // the local mute toggle's UI existing or not, and
+                      // [startSoloRecord] never requests a camera/screen
+                      // track in the first place -- hiding these controls
+                      // avoids offering a toggle that can't do anything.
+                      if (!isMemo) ...[
+                        _BigControlButton(
+                          icon: snap.muted ? Icons.mic_off : Icons.mic,
+                          label: snap.muted ? 'Unmute' : 'Mute',
+                          background: snap.muted ? AppColors.warn : AppColors.surfaceRaised,
+                          foreground: snap.muted ? AppColors.onWarn : AppColors.text,
+                          onTap: widget.controller.toggleMute,
+                        ),
+                        const SizedBox(width: 18),
+                        _BigControlButton(
+                          icon: snap.localCameraOn ? Icons.videocam : Icons.videocam_off,
+                          label: snap.localCameraOn ? 'Stop video' : 'Video',
+                          background: snap.localCameraOn ? AppColors.accent : AppColors.surfaceRaised,
+                          foreground: snap.localCameraOn ? AppColors.onAccent : AppColors.text,
+                          onTap: widget.controller.toggleCamera,
+                        ),
+                        const SizedBox(width: 18),
+                        _BigControlButton(
+                          icon: snap.localScreenOn ? Icons.stop_screen_share : Icons.screen_share,
+                          label: snap.localScreenOn ? 'Stop share' : 'Share',
+                          background: snap.localScreenOn ? AppColors.accent : AppColors.surfaceRaised,
+                          foreground: snap.localScreenOn ? AppColors.onAccent : AppColors.text,
+                          onTap: widget.controller.toggleScreenShare,
+                        ),
+                        const SizedBox(width: 18),
+                      ],
+                      _BigControlButton(
+                        icon: Icons.call_end,
+                        label: isMemo ? 'Stop' : 'End call',
+                        background: AppColors.bad,
+                        foreground: Colors.white,
+                        onTap: widget.controller.hangUp,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The roster grid for a group call: one tile per OTHER participant
+/// ([CallSnapshot.participants] -- I don't get a tile for myself, matching
+/// the wire contract's roster shape). Wraps rather than a fixed grid so it
+/// degrades gracefully from a 2-party group call up to a dozen-odd tiles.
+class _ParticipantGrid extends StatelessWidget {
+  const _ParticipantGrid({
+    required this.participants,
+    required this.labelForSub,
+    required this.controller,
+  });
+
+  final List<CallParticipant> participants;
+  final String Function(String sub) labelForSub;
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    if (participants.isEmpty) {
+      // I've started/joined the call but nobody else is on it yet.
+      return const Text(
+        'Waiting for others to join…',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 14, color: AppColors.textMuted),
+      );
+    }
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 16,
+      runSpacing: 16,
+      children: [
+        for (final p in participants)
+          _ParticipantTile(sub: p.sub, label: labelForSub(p.sub), controller: controller),
+      ],
+    );
+  }
+}
+
+/// One participant's avatar + name in the [_ParticipantGrid] -- or their
+/// live camera video, when [CallController.buildRemoteCameraView] resolves
+/// one for them (their screen share, if any, goes to the big stage above
+/// the grid instead -- see `CallScreen`'s `_ScreenShareStage`, not here). No
+/// live speaking/mute indicator -- the wire contract carries no
+/// per-participant signal for either (see [CallParticipant]'s doc) -- the
+/// mic glyph is a static "on the call" marker, not a truthful mute state.
+class _ParticipantTile extends StatelessWidget {
+  const _ParticipantTile({required this.sub, required this.label, required this.controller});
+
+  final String sub;
+  final String label;
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final cameraView = controller.buildRemoteCameraView(sub);
+    return SizedBox(
+      key: Key('participant-tile-$sub'),
+      width: 76,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (cameraView != null)
+            SizedBox(
+              key: Key('video-tile-$sub'),
+              width: 56,
+              height: 56,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(28),
+                child: cameraView,
+              ),
+            )
+          else
+            Container(
+              width: 56,
+              height: 56,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+              child: Text(
+                initialsFor(label),
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
+              ),
+            ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.mic, size: 11, color: AppColors.textMuted),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The non-group (1:1 or solo memo) call's centerpiece -- the peer's live
+/// camera video when [CallController.buildRemoteCameraView] resolves one
+/// (never for a memo -- there's no peer), falling back to the same avatar
+/// circle this slot has always shown otherwise. A SEPARATE code path from
+/// [_ParticipantTile] (this call shape has no [CallParticipant] roster
+/// entry driving it -- just [CallSnapshot.peerSub]), so the same
+/// camera-vs-avatar branch is duplicated here rather than shared.
+class _SoloVisual extends StatelessWidget {
+  const _SoloVisual({
+    required this.isMemo,
+    required this.peer,
+    required this.peerSub,
+    required this.controller,
+  });
+
+  final bool isMemo;
+  final String peer;
+  final String? peerSub;
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final cameraView = (!isMemo && peerSub != null) ? controller.buildRemoteCameraView(peerSub!) : null;
+    if (cameraView != null) {
+      return SizedBox(
+        key: Key('video-tile-$peerSub'),
+        width: 200,
+        height: 200,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: cameraView,
+        ),
+      );
+    }
+    return Container(
+      width: 96,
+      height: 96,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+      child: isMemo
+          ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
+          : Text(
+              initialsFor(peer),
+              style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700, color: AppColors.accent),
+            ),
+    );
+  }
+}
+
+/// The big "main stage" shown above the grid/solo visual whenever anyone
+/// (a remote participant, or me) is screen-sharing -- CallScreen picks
+/// which [child]/[label] pair to pass in (remote share wins over a local
+/// one; see its call site's doc). A fixed 16:9 frame keeps the layout
+/// stable regardless of the shared content's actual aspect ratio.
+class _ScreenShareStage extends StatelessWidget {
+  const _ScreenShareStage({required this.child, required this.label});
+
+  final Widget child;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const Key('screen-share-stage'),
+      // A fixed footprint (not "fill the available width at 16:9", which
+      // overflows a short/narrow call screen -- the rest of the column
+      // already competes for the same vertical space via its `Spacer`s) --
+      // big enough to read text/shared content, small enough to always
+      // leave room for the grid/avatar, status text, and controls below it.
+      width: 280,
+      height: 158,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          child,
+          Positioned(
+            left: 8,
+            bottom: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppColors.overlay,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              child: Text(label, style: const TextStyle(fontSize: 11, color: AppColors.text)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Live horizontal mic-level meter (0.0–1.0) -- the debug aid: if the user
+/// is visibly speaking but this bar stays flat, the mic isn't capturing
+/// anything (wrong input device, OS-level mute, permission silently
+/// revoked, ...). Fed by [CallSnapshot.micLevel], which
+/// [WebrtcCallController] samples from [MediaSession.pollInputLevel] every
+/// ~150ms while the call is live.
+class MicLevelMeter extends StatelessWidget {
+  const MicLevelMeter({super.key, required this.level});
+
+  /// 0.0 (silent) – 1.0 (full scale). Values outside that range are clamped.
+  final double level;
+
+  @override
+  Widget build(BuildContext context) {
+    final clamped = level.clamp(0.0, 1.0);
+    // Green under normal speech levels, warm at a level that's likely
+    // clipping -- a second, coarser signal alongside the bar's length itself.
+    final fillColor = clamped > 0.85 ? AppColors.warn : AppColors.accent;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.graphic_eq, size: 14, color: AppColors.textMuted),
+            const SizedBox(width: 6),
+            const Text('Mic', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          child: Container(
+            height: 14,
+            width: double.infinity,
+            color: AppColors.surfaceRaised,
+            alignment: Alignment.centerLeft,
+            child: AnimatedFractionallySizedBox(
+              key: const Key('mic-level-fill'),
+              duration: const Duration(milliseconds: 120),
+              curve: Curves.easeOut,
+              widthFactor: clamped,
+              alignment: Alignment.centerLeft,
+              child: DecoratedBox(decoration: BoxDecoration(color: fillColor)),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The "Call Ended" terminal screen shown in the call tab. Replaces the old
+/// auto-dismissing overlay banner: the user reads it and taps Close, which
+/// dismisses the call ([CallController.dismiss] → idle) and returns to chat.
+class _EndedView extends StatelessWidget {
+  const _EndedView({
+    required this.controller,
+    required this.wasMemo,
+    required this.reason,
+    required this.errorMessage,
+  });
+
+  final CallController controller;
+  final bool wasMemo;
+  final CallEndReason reason;
+  final String? errorMessage;
+
+  String get _subtitle {
+    if (reason == CallEndReason.failed && errorMessage != null) return errorMessage!;
+    if (wasMemo) return 'Your voice memo is saved — the transcript will appear in this chat shortly.';
+    return switch (reason) {
+      CallEndReason.disconnect => 'Connection lost.',
+      CallEndReason.declined => 'The other party declined.',
+      CallEndReason.cancelled => 'Call cancelled.',
+      CallEndReason.missed => 'No answer.',
+      CallEndReason.taken => 'Answered on another device.',
+      CallEndReason.failed => 'The call failed.',
+      _ => 'The call has ended.',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.bg,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+          child: Column(
+            children: [
+              const Spacer(flex: 2),
+              Container(
+                width: 96,
+                height: 96,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+                child: const Icon(Icons.call_end, size: 40, color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Call Ended',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.text),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14, color: AppColors.textMuted),
+              ),
+              const Spacer(flex: 3),
+              _BigControlButton(
+                icon: Icons.close,
+                label: 'Close',
+                background: AppColors.accent,
+                foreground: AppColors.onAccent,
+                onTap: controller.dismiss,
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A large round call control (Mute / End / Close). Hovering it grows the
+/// circle and adds a colour-matched glow so the mouseover accent is
+/// unmistakable — the End/Close action in particular reads as a real button.
+class _BigControlButton extends StatefulWidget {
+  const _BigControlButton({
+    required this.icon,
+    required this.label,
+    required this.background,
+    required this.foreground,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color background;
+  final Color foreground;
+  final VoidCallback onTap;
+
+  @override
+  State<_BigControlButton> createState() => _BigControlButtonState();
+}
+
+class _BigControlButtonState extends State<_BigControlButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedScale(
+                scale: _hovered ? 1.16 : 1.0,
+                duration: const Duration(milliseconds: 130),
+                curve: Curves.easeOut,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 130),
+                  curve: Curves.easeOut,
+                  width: 72,
+                  height: 72,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: widget.background,
+                    shape: BoxShape.circle,
+                    boxShadow: _hovered
+                        ? [
+                            BoxShadow(
+                              color: widget.background.withValues(alpha: 0.55),
+                              blurRadius: 24,
+                              spreadRadius: 4,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Icon(widget.icon, color: widget.foreground, size: 30),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(widget.label, style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Notice extends StatelessWidget {
+  const _Notice({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: AppColors.warnBg,
+          border: Border.all(color: AppColors.warnBorder),
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.mic_off, size: 13, color: AppColors.warn),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(text, style: const TextStyle(fontSize: 11.5, color: AppColors.warn)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The bottom tab bar shown alongside [CallScreen] while
+/// [isSustainedCallPhase] is true -- lets the user hop back to Chat while
+/// the call keeps running (the call itself isn't torn down; only the tab
+/// selection changes), and back to Call to check on it. Rebuilds via
+/// [AnimatedBuilder] on [controller] so the ● REC dot / label track the live
+/// call state independent of whatever triggers `ChatScreen`'s own rebuilds.
+class CallTabBar extends StatelessWidget {
+  const CallTabBar({super.key, required this.controller, required this.selected, required this.onSelect});
+
+  final CallController controller;
+
+  /// 0 = Chat, 1 = Call.
+  final int selected;
+  final ValueChanged<int> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final snap = controller.snapshot;
+        final recording = snap.phase == CallPhase.recordingMemo || snap.recordingIndicatorOn;
+        return Material(
+          color: AppColors.surfaceRaised,
+          child: SafeArea(
+            top: false,
+            child: SizedBox(
+              height: 56,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _TabItem(
+                      icon: Icons.chat_bubble_outline,
+                      label: 'Chat',
+                      selected: selected == 0,
+                      onTap: () => onSelect(0),
+                    ),
+                  ),
+                  Expanded(
+                    child: _TabItem(
+                      icon: snap.phase == CallPhase.recordingMemo ? Icons.mic : Icons.call,
+                      label: snap.phase == CallPhase.recordingMemo ? 'Recording' : 'Call',
+                      selected: selected == 1,
+                      showDot: recording,
+                      onTap: () => onSelect(1),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _TabItem extends StatelessWidget {
+  const _TabItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.showDot = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final bool showDot;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? AppColors.accent : AppColors.textMuted;
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(icon, size: 20, color: color),
+              if (showDot)
+                Positioned(
+                  right: -5,
+                  top: -3,
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color)),
+        ],
+      ),
+    );
+  }
+}

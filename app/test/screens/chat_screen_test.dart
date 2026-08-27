@@ -1,15 +1,19 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secchat_app/calls/call_controller.dart';
 import 'package:secchat_app/commands.dart';
 import 'package:secchat_app/marking.dart';
 import 'package:secchat_app/models.dart';
 import 'package:secchat_app/platform/daemon_supervisor.dart';
 import 'package:secchat_app/screens/chat.dart';
+import 'package:secchat_app/widgets/call_button.dart';
+import 'package:secchat_app/widgets/call_screen.dart';
 import 'package:secchat_app/widgets/composer.dart';
 import 'package:secchat_app/widgets/marking_banner.dart';
 import 'package:secchat_app/widgets/sidebar.dart';
 
+import '../calls/fake_call_controller.dart';
 import '../fakes/fake_api_client.dart';
 
 /// Pumps enough frames to flush the chained Futures `ChatScreen` awaits on
@@ -36,6 +40,100 @@ void main() {
   // timers under the test binding).
   setUp(() => debugDaemonSupervisorFactory = () => NoopDaemonSupervisor());
   tearDownAll(() => debugDaemonSupervisorFactory = createDaemonSupervisor);
+
+  final defaultCallControllerFactory = debugCallControllerFactory;
+  tearDownAll(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+  group('call bottom tabs', () {
+    testWidgets('a sustained call auto-focuses the Call tab; Chat/Call switch without ending the call', (
+      tester,
+    ) async {
+      final fake = FakeApiClient(me: _principal, channels: _channels);
+      final callController = FakeCallController();
+      debugCallControllerFactory = ({required api, required mySub, stunUrls = const []}) => callController;
+      addTearDown(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+      await tester.pumpWidget(
+        MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+      );
+      await pumpSettled(tester);
+
+      // No call in progress: no bottom tab bar, normal chat only.
+      expect(find.byType(CallScreen), findsNothing);
+      expect(find.text('Call'), findsNothing);
+      expect(find.text('general'), findsWidgets);
+
+      // The call reaches a SUSTAINED phase (voice-calls-plan.md §3.3) --
+      // the tab bar appears and the Call tab is auto-selected.
+      callController.emit(
+        CallSnapshot(
+          phase: CallPhase.active,
+          channelId: 'c1',
+          peerSub: 'dev.bob',
+          connectedAt: DateTime.now(),
+        ),
+      );
+      await pumpSettled(tester);
+
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.text('Call'), findsOneWidget);
+      expect(find.byType(CallScreen), findsOneWidget);
+
+      // Tap Chat: the call keeps running (no hangUp call), but the chat
+      // body is what's showing.
+      await tester.tap(find.text('Chat'));
+      await pumpSettled(tester);
+      expect(callController.hangUpCalls, 0);
+      expect(find.text('general'), findsWidgets);
+
+      // Tap Call: back to the full-screen call view, same live call.
+      await tester.tap(find.text('Call'));
+      await pumpSettled(tester);
+      expect(find.byType(CallScreen), findsOneWidget);
+
+      // The call ends -- the tab bar STAYS (the old auto-dismiss banner is
+      // gone); the Call tab now shows a "Call Ended" screen the user closes
+      // explicitly.
+      callController.emit(
+        const CallSnapshot(phase: CallPhase.ended, channelId: 'c1', peerSub: 'dev.bob'),
+      );
+      await pumpSettled(tester);
+      expect(find.text('Call'), findsOneWidget); // tab bar still present
+      expect(find.byType(CallScreen), findsOneWidget);
+      expect(find.text('Call Ended'), findsOneWidget);
+
+      // Tapping Close dismisses the call; the following idle snapshot drops the
+      // whole tab view back to plain chat.
+      await tester.tap(find.text('Close'));
+      expect(callController.dismissCalls, 1);
+      callController.emit(const CallSnapshot());
+      await pumpSettled(tester);
+      expect(find.text('Call'), findsNothing);
+      expect(find.byType(CallScreen), findsNothing);
+    });
+  });
+
+  testWidgets('a human channel header shows the group call button', (tester) async {
+    final fake = FakeApiClient(me: _principal, channels: _channels);
+    final callController = FakeCallController();
+    debugCallControllerFactory = ({required api, required mySub, stunUrls = const []}) => callController;
+    addTearDown(() => debugCallControllerFactory = defaultCallControllerFactory);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // c1 ('general') is a ChannelKind.human channel and auto-selected first.
+    expect(find.byType(GroupCallButton), findsOneWidget);
+
+    await tester.tap(find.byType(GroupCallButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start call'));
+    await tester.pumpAndSettle();
+
+    expect(callController.startGroupCallCalls, ['c1']);
+  });
 
   testWidgets('on desktop, the daemon starts with a minted scoped runner token', (tester) async {
     tester.view.physicalSize = const Size(1400, 900); // the runner chip widens the top bar
@@ -1113,6 +1211,73 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Copy text'), findsOneWidget);
     expect(find.text('Edit…'), findsNothing);
+  });
+
+  testWidgets(
+      'a "system" transcript message offers "Correct transcript" (not author-gated) '
+      'and saving calls editMessage, while a normal user message keeps plain "Edit…"',
+      (tester) async {
+    final fake = FakeApiClient(
+      me: _principal, // dev.alice — not the author of either message below (there is no author)
+      channels: [_channels[0]],
+      messagesByChannel: {
+        'c1': [
+          Message(
+            id: 'm1',
+            seq: 1,
+            authorRef: 'system',
+            authorType: AuthorType.system,
+            displayName: 'Voice call',
+            content: 'transcript: bob said hello',
+            createdAt: DateTime(2026, 1, 1, 9, 30),
+          ),
+          Message(
+            id: 'm2',
+            seq: 2,
+            authorRef: 'bob',
+            authorType: AuthorType.user,
+            content: "bob's own message",
+            createdAt: DateTime(2026, 1, 1, 9, 31),
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: ChatScreen(api: fake, principal: _principal, onSignOut: () {})),
+    );
+    await pumpSettled(tester);
+
+    // The system message's menu offers "Correct…" (not "Edit…") — any channel
+    // member (not just an author, since a system message has none) may use it.
+    final menuButtons = find.byTooltip('Message actions');
+    expect(menuButtons, findsNWidgets(2));
+    await tester.tap(menuButtons.first);
+    await tester.pumpAndSettle();
+    expect(find.text('Correct…'), findsOneWidget);
+    expect(find.text('Edit…'), findsNothing);
+
+    await tester.tap(find.text('Correct…'));
+    await tester.pumpAndSettle();
+
+    // The dialog is relabeled too, and saving reuses the same editMessage machinery.
+    expect(find.text('Correct transcript'), findsOneWidget);
+    final field = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField));
+    await tester.enterText(field, 'transcript: bob said hello, corrected');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Save changes'));
+    await tester.pumpAndSettle();
+
+    expect(fake.editCalls, hasLength(1));
+    expect(fake.editCalls.single.messageId, 'm1');
+    expect(fake.editCalls.single.content, 'transcript: bob said hello, corrected');
+    expect(find.textContaining('transcript: bob said hello, corrected'), findsOneWidget);
+
+    // The normal user message (bob's, not alice's) is untouched: edit gating stays
+    // author-only, so a non-author sees no Edit… item and no Correct… either.
+    await tester.tap(menuButtons.last);
+    await tester.pumpAndSettle();
+    expect(find.text('Edit…'), findsNothing);
+    expect(find.text('Correct…'), findsNothing);
   });
 
   testWidgets('an edited message shows "(edited)" and View history opens the revision list', (tester) async {
