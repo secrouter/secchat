@@ -48,7 +48,7 @@ class CallButton extends StatelessWidget {
           color: AppColors.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.sm),
-            side: const BorderSide(color: AppColors.border),
+            side: BorderSide(color: AppColors.border),
           ),
           onSelected: (wantRecording) => controller.startCall(
             channelId: channelId,
@@ -64,7 +64,7 @@ class CallButton extends StatelessWidget {
                 detail: 'Not recorded',
               ),
             ),
-            const PopupMenuItem<bool>(
+            PopupMenuItem<bool>(
               value: true,
               child: _CallMenuRow(
                 icon: Icons.fiber_manual_record,
@@ -108,7 +108,7 @@ class SoloRecordButton extends StatelessWidget {
           color: AppColors.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.sm),
-            side: const BorderSide(color: AppColors.border),
+            side: BorderSide(color: AppColors.border),
           ),
           // The popup's `bool` value is `enroll` — whether to also save this
           // recording as a voiceprint. `wantRecording` is always true here:
@@ -119,7 +119,7 @@ class SoloRecordButton extends StatelessWidget {
             enroll: enroll,
           ),
           itemBuilder: (_) => [
-            const PopupMenuItem<bool>(
+            PopupMenuItem<bool>(
               value: false,
               child: _CallMenuRow(
                 icon: Icons.fiber_manual_record,
@@ -179,7 +179,7 @@ class GroupCallButton extends StatelessWidget {
           color: AppColors.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.sm),
-            side: const BorderSide(color: AppColors.border),
+            side: BorderSide(color: AppColors.border),
           ),
           onSelected: (action) {
             switch (action) {
@@ -214,11 +214,11 @@ class _CallMenuRow extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.detail,
-    this.iconColor = AppColors.textMuted,
+    this.iconColor,
   });
 
   final IconData icon;
-  final Color iconColor;
+  final Color? iconColor;
   final String label;
   final String detail;
 
@@ -226,18 +226,18 @@ class _CallMenuRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, size: 15, color: iconColor),
+        Icon(icon, size: 15, color: iconColor ?? AppColors.textMuted),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(label, style: const TextStyle(color: AppColors.text, fontSize: 13.5)),
+              Text(label, style: TextStyle(color: AppColors.text, fontSize: 13.5)),
               Text(
                 detail,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textFaint, fontSize: 11),
+                style: TextStyle(color: AppColors.textFaint, fontSize: 11),
               ),
             ],
           ),

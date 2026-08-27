@@ -156,7 +156,7 @@ class _LoginScreenState extends State<LoginScreen> {
         children: [
           const BrandMark(),
           const SizedBox(height: 10),
-          const Text(
+          Text(
             'Secure multi-agent chat, gated by policy.',
             style: TextStyle(color: AppColors.textMuted, fontSize: 13.5),
           ),
@@ -175,7 +175,7 @@ class _LoginScreenState extends State<LoginScreen> {
           TextField(
             controller: _usernameController,
             autofocus: !showSso,
-            style: const TextStyle(color: AppColors.text, fontSize: 14),
+            style: TextStyle(color: AppColors.text, fontSize: 14),
             decoration: const InputDecoration(hintText: 'e.g. alice'),
             onSubmitted: (_) => _submit(),
           ),
@@ -198,7 +198,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: canSubmit ? _submit : null,
                   style: AppButtonStyles.primary,
                   child: _submitting
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
@@ -218,12 +218,12 @@ class _LoginScreenState extends State<LoginScreen> {
           const SizedBox(height: 22),
           Container(
             padding: const EdgeInsets.only(top: 18),
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               border: Border(top: BorderSide(color: AppColors.border)),
             ),
             child: Text.rich(
               TextSpan(
-                style: const TextStyle(
+                style: TextStyle(
                   color: AppColors.textFaint,
                   fontSize: 12,
                   height: 1.6,
@@ -307,7 +307,7 @@ class _ErrorBanner extends StatelessWidget {
       ),
       child: Text(
         message,
-        style: const TextStyle(color: AppColors.bad, fontSize: 13),
+        style: TextStyle(color: AppColors.bad, fontSize: 13),
       ),
     );
   }
@@ -324,12 +324,12 @@ class _SectionDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const Expanded(child: Divider(color: AppColors.border)),
+        Expanded(child: Divider(color: AppColors.border)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           child: Text(
             label.toUpperCase(),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w600,
               letterSpacing: 0.6,
@@ -337,7 +337,7 @@ class _SectionDivider extends StatelessWidget {
             ),
           ),
         ),
-        const Expanded(child: Divider(color: AppColors.border)),
+        Expanded(child: Divider(color: AppColors.border)),
       ],
     );
   }
@@ -351,7 +351,7 @@ class _FieldLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Text(
     text.toUpperCase(),
-    style: const TextStyle(
+    style: TextStyle(
       fontSize: 12.5,
       fontWeight: FontWeight.w600,
       color: AppColors.textMuted,
@@ -389,7 +389,7 @@ class _LabeledCheckbox extends StatelessWidget {
                 onChanged: (v) => onChanged(v ?? false),
                 activeColor: AppColors.accent,
                 checkColor: AppColors.onAccent,
-                side: const BorderSide(color: AppColors.border),
+                side: BorderSide(color: AppColors.border),
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
             ),
@@ -397,7 +397,7 @@ class _LabeledCheckbox extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(color: AppColors.textMuted, fontSize: 13.5),
+                style: TextStyle(color: AppColors.textMuted, fontSize: 13.5),
               ),
             ),
           ],
@@ -429,12 +429,12 @@ class _ConsentPanel extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.gavel_outlined, size: 14, color: AppColors.warn),
+                  Icon(Icons.gavel_outlined, size: 14, color: AppColors.warn),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       kConsentTitle,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w700,
                         color: AppColors.text,
@@ -444,7 +444,7 @@ class _ConsentPanel extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 kConsentIntro,
                 style: TextStyle(fontSize: 11.5, color: AppColors.textMuted, height: 1.45),
               ),
@@ -455,11 +455,11 @@ class _ConsentPanel extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('•  ', style: TextStyle(color: AppColors.textFaint, fontSize: 11.5)),
+                      Text('•  ', style: TextStyle(color: AppColors.textFaint, fontSize: 11.5)),
                       Expanded(
                         child: Text(
                           point,
-                          style: const TextStyle(fontSize: 11, color: AppColors.textMuted, height: 1.4),
+                          style: TextStyle(fontSize: 11, color: AppColors.textMuted, height: 1.4),
                         ),
                       ),
                     ],

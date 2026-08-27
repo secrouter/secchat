@@ -84,7 +84,7 @@ class _NewItemDialogState extends State<_NewItemDialog> {
           children: [
             Text(
               widget.title,
-              style: const TextStyle(
+              style: TextStyle(
                 color: AppColors.text,
                 fontSize: 16,
                 fontWeight: FontWeight.w700,
@@ -93,7 +93,7 @@ class _NewItemDialogState extends State<_NewItemDialog> {
             const SizedBox(height: 6),
             Text(
               widget.description,
-              style: const TextStyle(
+              style: TextStyle(
                 color: AppColors.textMuted,
                 fontSize: 12.5,
                 height: 1.4,
@@ -103,7 +103,7 @@ class _NewItemDialogState extends State<_NewItemDialog> {
             TextField(
               controller: _controller,
               autofocus: true,
-              style: const TextStyle(color: AppColors.text, fontSize: 14),
+              style: TextStyle(color: AppColors.text, fontSize: 14),
               decoration: InputDecoration(hintText: widget.hint),
               onSubmitted: (_) => _submit(),
             ),

@@ -109,7 +109,7 @@ class ChatSidebar extends StatelessWidget {
         color: AppColors.surface,
         border: compact
             ? null
-            : const Border(right: BorderSide(color: AppColors.border)),
+            : Border(right: BorderSide(color: AppColors.border)),
       ),
       child: Column(
         children: [
@@ -159,7 +159,7 @@ class ChatSidebar extends StatelessWidget {
 
   Widget _buildList() {
     if (loading) {
-      return const Center(
+      return Center(
         child: SizedBox(
           width: 20,
           height: 20,
@@ -172,7 +172,7 @@ class ChatSidebar extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Text(
           errorText!,
-          style: const TextStyle(color: AppColors.bad, fontSize: 12.5),
+          style: TextStyle(color: AppColors.bad, fontSize: 12.5),
         ),
       );
     }
@@ -185,7 +185,7 @@ class ChatSidebar extends StatelessWidget {
             border: Border.all(color: AppColors.border),
             borderRadius: BorderRadius.circular(AppRadius.sm),
           ),
-          child: const Text(
+          child: Text(
             'No channels yet',
             textAlign: TextAlign.center,
             style: TextStyle(
@@ -277,7 +277,7 @@ class _SortControl extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
       child: Row(
         children: [
-          const Text(
+          Text(
             'SORT',
             style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: AppColors.textFaint),
           ),
@@ -342,7 +342,7 @@ class _ShowArchivedToggle extends StatelessWidget {
                 size: 15, color: AppColors.textMuted),
             const SizedBox(width: 8),
             Text(showArchived ? 'Hide archived' : 'Show archived',
-                style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+                style: TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
           ],
         ),
       ),
@@ -363,7 +363,7 @@ class _SectionHeader extends StatelessWidget {
         alignment: Alignment.centerLeft,
         child: Text(
           text,
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 11,
             fontWeight: FontWeight.w700,
             letterSpacing: 0.6,
@@ -417,7 +417,7 @@ class _UnreadBadge extends StatelessWidget {
       child: Text(
         count > 99 ? '99+' : '$count',
         textAlign: TextAlign.center,
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 10.5,
           fontWeight: FontWeight.w700,
           color: AppColors.onAccent,

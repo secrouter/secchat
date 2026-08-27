@@ -60,9 +60,9 @@ class _UserPickerDialogState extends State<_UserPickerDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Text(
+      title: Text(
         'New direct message',
         style: TextStyle(
           color: AppColors.text,
@@ -78,8 +78,8 @@ class _UserPickerDialogState extends State<_UserPickerDialog> {
             TextField(
               controller: _search,
               autofocus: true,
-              style: const TextStyle(color: AppColors.text, fontSize: 14),
-              decoration: const InputDecoration(
+              style: TextStyle(color: AppColors.text, fontSize: 14),
+              decoration: InputDecoration(
                 hintText: 'Search people or groups…',
                 prefixIcon: Icon(Icons.search, size: 18, color: AppColors.textFaint),
               ),
@@ -136,13 +136,13 @@ class _UserRow extends StatelessWidget {
                 width: 32,
                 height: 32,
                 alignment: Alignment.center,
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   color: AppColors.surfaceRaised,
                   shape: BoxShape.circle,
                 ),
                 child: Text(
                   initialsFor(user.label),
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11.5,
                     fontWeight: FontWeight.w700,
                     color: AppColors.accent,
@@ -157,7 +157,7 @@ class _UserRow extends StatelessWidget {
                     Text(
                       user.label,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 13.5,
                         fontWeight: FontWeight.w600,
                         color: AppColors.text,
@@ -178,7 +178,7 @@ class _UserRow extends StatelessWidget {
                   ],
                 ),
               ),
-              const Icon(Icons.alternate_email, size: 15, color: AppColors.textFaint),
+              Icon(Icons.alternate_email, size: 15, color: AppColors.textFaint),
             ],
           ),
         ),
@@ -200,7 +200,7 @@ class _Empty extends StatelessWidget {
         child: Text(
           text,
           textAlign: TextAlign.center,
-          style: const TextStyle(
+          style: TextStyle(
             color: AppColors.textFaint,
             fontSize: 13,
             fontStyle: FontStyle.italic,

@@ -78,15 +78,15 @@ class _AdminScreenState extends State<AdminScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.surface,
-        title: const Text('Revoke git SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        title: Text('Revoke git SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
         content: Text(
           "This drops $label's git key so it stops being injected into future coding sessions. "
           'The public key should also be removed from the git host. This cannot be undone.',
-          style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4),
+          style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Revoke', style: TextStyle(color: AppColors.bad))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text('Revoke', style: TextStyle(color: AppColors.bad))),
         ],
       ),
     );
@@ -111,12 +111,12 @@ class _AdminScreenState extends State<AdminScreen> {
       appBar: AppBar(
         backgroundColor: AppColors.surface,
         elevation: 0,
-        shape: const Border(bottom: BorderSide(color: AppColors.border)),
-        title: const Text(
+        shape: Border(bottom: BorderSide(color: AppColors.border)),
+        title: Text(
           'Admin console',
           style: TextStyle(color: AppColors.text, fontSize: 16, fontWeight: FontWeight.w600),
         ),
-        iconTheme: const IconThemeData(color: AppColors.textMuted),
+        iconTheme: IconThemeData(color: AppColors.textMuted),
         actions: [
           IconButton(
             onPressed: _loading ? null : _load,
@@ -133,7 +133,7 @@ class _AdminScreenState extends State<AdminScreen> {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: AppColors.accent));
+      return Center(child: CircularProgressIndicator(color: AppColors.accent));
     }
     if (_error != null) {
       return _ErrorState(message: _error!, onRetry: _load);
@@ -223,7 +223,7 @@ class _ChainBadge extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(sub, style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4)),
+                Text(sub, style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4)),
               ],
             ),
           ),
@@ -265,7 +265,7 @@ class _SummaryCards extends StatelessWidget {
               children: [
                 Text(
                   label.toUpperCase(),
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: AppColors.textMuted,
                     fontSize: 11,
                     letterSpacing: 0.6,
@@ -275,7 +275,7 @@ class _SummaryCards extends StatelessWidget {
                 const SizedBox(height: 8),
                 Text(
                   value,
-                  style: const TextStyle(color: AppColors.accent, fontSize: 28, fontWeight: FontWeight.w700),
+                  style: TextStyle(color: AppColors.accent, fontSize: 28, fontWeight: FontWeight.w700),
                 ),
               ],
             ),
@@ -292,7 +292,7 @@ class _GovernancePanel extends StatelessWidget {
 
   final List<AuditEvent> audit;
 
-  static const _categories = [
+  static final _categories = [
     ('message.redact', 'Redactions', AppColors.bad),
     ('message.dlp_flag', 'DLP spillage flags', AppColors.warn),
     ('channel.mark', 'Classification changes', AppColors.accent),
@@ -324,7 +324,7 @@ class _GovernancePanel extends StatelessWidget {
                     style: TextStyle(color: color, fontSize: 26, fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(height: 4),
-                  Text(label, style: const TextStyle(color: AppColors.text, fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text(label, style: TextStyle(color: AppColors.text, fontSize: 13, fontWeight: FontWeight.w600)),
                 ],
               ),
             ),
@@ -428,7 +428,7 @@ class _PoolPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!pool.configured) {
-      return const _Panel(
+      return _Panel(
         title: 'Agent pool',
         child: Text(
           'No Kubernetes agent pool is configured for this deployment.',
@@ -495,7 +495,7 @@ Widget _poolCard(String label, String value, {bool emphasize = false}) => Contai
     children: [
       Text(
         label.toUpperCase(),
-        style: const TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.6, fontWeight: FontWeight.w600),
+        style: TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.6, fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: 8),
       Text(
@@ -528,7 +528,7 @@ class _SshKeysPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!sshKeys.enabled && sshKeys.keys.isEmpty) {
-      return const _Panel(
+      return _Panel(
         title: 'Git SSH keys',
         child: Text(
           "Git SSH identities aren't enabled for this deployment.",
@@ -600,7 +600,7 @@ class _AuditPanel extends StatelessWidget {
               e.actAs == null ? _muted() : _mono(e.actAs!),
               _actionCode(e.action),
               e.target == null ? _muted() : _mono(e.target!),
-              e.detail == null ? _muted() : Text(e.detail!, style: const TextStyle(color: AppColors.text, fontSize: 12.5)),
+              e.detail == null ? _muted() : Text(e.detail!, style: TextStyle(color: AppColors.text, fontSize: 12.5)),
             ],
         ],
       ),
@@ -624,15 +624,15 @@ class _Panel extends StatelessWidget {
       children: [
         Container(
           padding: const EdgeInsets.only(left: 12),
-          decoration: const BoxDecoration(border: Border(left: BorderSide(color: AppColors.accent, width: 3))),
+          decoration: BoxDecoration(border: Border(left: BorderSide(color: AppColors.accent, width: 3))),
           child: Text(
             title.toUpperCase(),
-            style: const TextStyle(color: AppColors.text, fontSize: 13, letterSpacing: 0.6, fontWeight: FontWeight.w700),
+            style: TextStyle(color: AppColors.text, fontSize: 13, letterSpacing: 0.6, fontWeight: FontWeight.w700),
           ),
         ),
         if (note != null) ...[
           const SizedBox(height: 6),
-          Text(note!, style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
+          Text(note!, style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
         ],
         const SizedBox(height: 12),
         child,
@@ -683,7 +683,7 @@ class _DataTable extends StatelessWidget {
       child: Column(
         children: [
           Container(
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               color: AppColors.surfaceAlt,
               border: Border(bottom: BorderSide(color: AppColors.border)),
             ),
@@ -695,14 +695,14 @@ class _DataTable extends StatelessWidget {
                     flex: widths[i],
                     child: Text(
                       headers[i].toUpperCase(),
-                      style: const TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.5, fontWeight: FontWeight.w600),
+                      style: TextStyle(color: AppColors.textMuted, fontSize: 11, letterSpacing: 0.5, fontWeight: FontWeight.w600),
                     ),
                   ),
               ],
             ),
           ),
           if (rows.isEmpty)
-            const Padding(
+            Padding(
               padding: EdgeInsets.symmetric(vertical: 22),
               child: Text('none', style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic)),
             )
@@ -710,7 +710,7 @@ class _DataTable extends StatelessWidget {
             for (var r = 0; r < rows.length; r++)
               Container(
                 decoration: BoxDecoration(
-                  border: r == rows.length - 1 ? null : const Border(bottom: BorderSide(color: AppColors.borderSoft)),
+                  border: r == rows.length - 1 ? null : Border(bottom: BorderSide(color: AppColors.borderSoft)),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 child: Row(
@@ -730,7 +730,7 @@ class _DataTable extends StatelessWidget {
 Widget _cellWithId(String label, String id, {bool pillLabel = false}) => Column(
   crossAxisAlignment: CrossAxisAlignment.start,
   children: [
-    pillLabel ? _pill(label) : Text(label, style: const TextStyle(color: AppColors.text, fontSize: 13)),
+    pillLabel ? _pill(label) : Text(label, style: TextStyle(color: AppColors.text, fontSize: 13)),
     const SizedBox(height: 2),
     Text(shortId(id), style: AppFonts.mono(fontSize: 11, color: AppColors.textFaint)),
   ],
@@ -738,11 +738,11 @@ Widget _cellWithId(String label, String id, {bool pillLabel = false}) => Column(
 
 Widget _mono(String text) => Text(text, style: AppFonts.mono(fontSize: 12, color: AppColors.textMuted));
 
-Widget _muted() => const Text('—', style: TextStyle(color: AppColors.textFaint));
+Widget _muted() => Text('—', style: TextStyle(color: AppColors.textFaint));
 
-Widget _pill(String label, {Color tone = AppColors.textMuted}) => Align(
+Widget _pill(String label, {Color? tone}) => Align(
   alignment: Alignment.centerLeft,
-  child: PillBadge(label, color: tone, background: AppColors.surfaceAlt, borderColor: AppColors.border),
+  child: PillBadge(label, color: tone ?? AppColors.textMuted, background: AppColors.surfaceAlt, borderColor: AppColors.border),
 );
 
 Widget _statusPill(String status) {
@@ -776,14 +776,14 @@ class _ErrorState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.error_outline, color: AppColors.bad, size: 30),
+          Icon(Icons.error_outline, color: AppColors.bad, size: 30),
           const SizedBox(height: 12),
-          Text(message, style: const TextStyle(color: AppColors.textMuted, fontSize: 14)),
+          Text(message, style: TextStyle(color: AppColors.textMuted, fontSize: 14)),
           const SizedBox(height: 16),
           TextButton.icon(
             onPressed: onRetry,
-            icon: const Icon(Icons.refresh, size: 16, color: AppColors.accent),
-            label: const Text('Retry', style: TextStyle(color: AppColors.accent)),
+            icon: Icon(Icons.refresh, size: 16, color: AppColors.accent),
+            label: Text('Retry', style: TextStyle(color: AppColors.accent)),
           ),
         ],
       ),

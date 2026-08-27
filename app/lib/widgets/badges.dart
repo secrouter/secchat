@@ -10,23 +10,23 @@ class PillBadge extends StatelessWidget {
   const PillBadge(
     this.label, {
     super.key,
-    this.color = AppColors.textFaint,
-    this.background = AppColors.surfaceAlt,
-    this.borderColor = AppColors.border,
+    this.color,
+    this.background,
+    this.borderColor,
   });
 
   final String label;
-  final Color color;
-  final Color background;
-  final Color borderColor;
+  final Color? color;
+  final Color? background;
+  final Color? borderColor;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
-        color: background,
-        border: Border.all(color: borderColor),
+        color: background ?? AppColors.surfaceAlt,
+        border: Border.all(color: borderColor ?? AppColors.border),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -36,7 +36,7 @@ class PillBadge extends StatelessWidget {
           fontWeight: FontWeight.w700,
           letterSpacing: 0.4,
           height: 1.3,
-          color: color,
+          color: color ?? AppColors.textFaint,
         ),
       ),
     );

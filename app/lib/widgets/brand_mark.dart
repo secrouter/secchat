@@ -34,7 +34,7 @@ class BrandMark extends StatelessWidget {
               letterSpacing: -0.2,
               height: 1,
             ),
-            children: const [
+            children: [
               TextSpan(text: 'Sec', style: TextStyle(color: AppColors.accent)),
               TextSpan(text: 'Chat', style: TextStyle(color: AppColors.text)),
             ],

@@ -79,7 +79,7 @@ class _PinsDialogState extends State<_PinsDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: dialogWidth(context, 520), maxHeight: 560),
@@ -91,11 +91,11 @@ class _PinsDialogState extends State<_PinsDialog> {
               padding: const EdgeInsets.fromLTRB(18, 16, 12, 10),
               child: Row(
                 children: [
-                  const Icon(Icons.push_pin_outlined, size: 18, color: AppColors.accent),
+                  Icon(Icons.push_pin_outlined, size: 18, color: AppColors.accent),
                   const SizedBox(width: 8),
                   Text(
                     'Pinned${pins != null ? ' · ${pins.length}' : ''}',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.text),
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.text),
                   ),
                   const Spacer(),
                   IconButton(
@@ -107,7 +107,7 @@ class _PinsDialogState extends State<_PinsDialog> {
                 ],
               ),
             ),
-            const Divider(height: 1, color: AppColors.border),
+            Divider(height: 1, color: AppColors.border),
             Flexible(child: _body(pins)),
           ],
         ),
@@ -119,7 +119,7 @@ class _PinsDialogState extends State<_PinsDialog> {
     if (_error != null) {
       return Padding(
         padding: const EdgeInsets.all(24),
-        child: Center(child: Text(_error!, style: const TextStyle(color: AppColors.bad))),
+        child: Center(child: Text(_error!, style: TextStyle(color: AppColors.bad))),
       );
     }
     if (pins == null) {
@@ -129,8 +129,8 @@ class _PinsDialogState extends State<_PinsDialog> {
       );
     }
     if (pins.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 48),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 48),
         child: Center(
           child: Text(
             'No pinned messages.\nPin a message from its ⋮ menu.',
@@ -144,7 +144,7 @@ class _PinsDialogState extends State<_PinsDialog> {
       shrinkWrap: true,
       padding: const EdgeInsets.symmetric(vertical: 6),
       itemCount: pins.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
+      separatorBuilder: (_, __) => Divider(height: 1, color: AppColors.border),
       itemBuilder: (context, i) => _PinRow(
         pin: pins[i],
         authorLabel: widget.labelForSub(pins[i].authorRef),

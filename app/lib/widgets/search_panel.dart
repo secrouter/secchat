@@ -80,9 +80,9 @@ class _SearchDialogState extends State<_SearchDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Text(
+      title: Text(
         'Search messages',
         style: TextStyle(
           color: AppColors.text,
@@ -100,10 +100,10 @@ class _SearchDialogState extends State<_SearchDialog> {
               autofocus: true,
               textInputAction: TextInputAction.search,
               onSubmitted: (_) => _run(),
-              style: const TextStyle(color: AppColors.text, fontSize: 14),
+              style: TextStyle(color: AppColors.text, fontSize: 14),
               decoration: InputDecoration(
                 hintText: 'Search your channels…',
-                prefixIcon: const Icon(Icons.search, size: 18, color: AppColors.textFaint),
+                prefixIcon: Icon(Icons.search, size: 18, color: AppColors.textFaint),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.arrow_forward, size: 18),
                   tooltip: 'Search',
@@ -127,7 +127,7 @@ class _SearchDialogState extends State<_SearchDialog> {
 
   Widget _body() {
     if (_searching) {
-      return const Center(
+      return Center(
         child: SizedBox(
           width: 22,
           height: 22,
@@ -140,7 +140,7 @@ class _SearchDialogState extends State<_SearchDialog> {
         child: Text(
           _error!,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: AppColors.bad, fontSize: 13),
+          style: TextStyle(color: AppColors.bad, fontSize: 13),
         ),
       );
     }
@@ -192,7 +192,7 @@ class _HitRow extends StatelessWidget {
                     child: Text(
                       channelLabel,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w700,
                         color: AppColors.accent,
@@ -211,7 +211,7 @@ class _HitRow extends StatelessWidget {
                 snippet,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
+                style: TextStyle(fontSize: 13, color: AppColors.textMuted),
               ),
             ],
           ),
@@ -234,7 +234,7 @@ class _Hint extends StatelessWidget {
         child: Text(
           text,
           textAlign: TextAlign.center,
-          style: const TextStyle(
+          style: TextStyle(
             color: AppColors.textFaint,
             fontSize: 13,
             fontStyle: FontStyle.italic,

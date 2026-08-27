@@ -81,9 +81,9 @@ class _MarkingPickerDialogState extends State<_MarkingPickerDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Row(
+      title: Row(
         children: [
           BrandIcon('secure', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
@@ -99,7 +99,7 @@ class _MarkingPickerDialogState extends State<_MarkingPickerDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'When a channel is marked, the channel is the portion — every '
               'message inherits this marking, and none may exceed it.',
               style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.4),
@@ -190,9 +190,9 @@ class _LevelRow extends StatelessWidget {
               ),
               const Spacer(),
               if (selected)
-                const Icon(Icons.check, color: AppColors.accent, size: 18)
+                Icon(Icons.check, color: AppColors.accent, size: 18)
               else if (disabled)
-                const Icon(Icons.lock_outline, color: AppColors.textFaint, size: 15),
+                Icon(Icons.lock_outline, color: AppColors.textFaint, size: 15),
             ],
           ),
         ),

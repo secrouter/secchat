@@ -192,8 +192,8 @@ class OutboundListBody extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(22, 12, 22, 0),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
           child: Text(
             'SecChat POSTs a signed JSON payload to each URL when a subscribed event fires. Message '
             'content is sent only when "include content" is on.',
@@ -203,15 +203,15 @@ class OutboundListBody extends StatelessWidget {
         if (error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
-            child: Text(error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
+            child: Text(error!, style: TextStyle(color: AppColors.bad, fontSize: 12.5)),
           ),
         const SizedBox(height: 12),
         Flexible(
           child: list == null
-              ? const Center(child: Padding(padding: EdgeInsets.all(28), child: CircularProgressIndicator(color: AppColors.accent)))
+              ? Center(child: Padding(padding: const EdgeInsets.all(28), child: CircularProgressIndicator(color: AppColors.accent)))
               : byChannel.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 30, horizontal: 22),
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 22),
                   child: Text('No outbound webhooks yet.', style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic)),
                 )
               : ListView(
@@ -222,7 +222,7 @@ class OutboundListBody extends StatelessWidget {
                       if (grouped)
                         Padding(
                           padding: const EdgeInsets.only(top: 6, bottom: 8),
-                          child: Text(entry.key, style: const TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w700)),
+                          child: Text(entry.key, style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w700)),
                         ),
                       for (final w in entry.value) ...[
                         _OutboundTile(api: api, hook: w, busy: busy, onChanged: onChanged),
@@ -232,7 +232,7 @@ class OutboundListBody extends StatelessWidget {
                   ],
                 ),
         ),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: AppColors.border),
         Padding(
           padding: const EdgeInsets.fromLTRB(22, 14, 22, 20),
           child: createPicker ??
@@ -250,7 +250,7 @@ class OutboundListBody extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  if (busy) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent)),
+                  if (busy) SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent)),
                 ],
               ),
         ),
@@ -299,11 +299,11 @@ class _OutboundTileState extends State<_OutboundTile> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
-        title: const Text('Revoke outbound webhook?', style: TextStyle(color: AppColors.text, fontSize: 16)),
-        content: Text('SecChat will stop POSTing to ${widget.hook.url}.', style: const TextStyle(color: AppColors.textMuted, fontSize: 13)),
+        title: Text('Revoke outbound webhook?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: Text('SecChat will stop POSTing to ${widget.hook.url}.', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
-          TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Revoke', style: TextStyle(color: AppColors.bad))),
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Revoke', style: TextStyle(color: AppColors.bad))),
         ],
       ),
     );
@@ -336,8 +336,8 @@ class _OutboundTileState extends State<_OutboundTile> {
               ),
               const SizedBox(width: 8),
               if (_testing)
-                const Padding(
-                  padding: EdgeInsets.all(8),
+                Padding(
+                  padding: const EdgeInsets.all(8),
                   child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent)),
                 )
               else
@@ -471,7 +471,7 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       backgroundColor: AppColors.surface,
-      title: const Text('New outbound webhook', style: TextStyle(color: AppColors.text, fontSize: 16)),
+      title: Text('New outbound webhook', style: TextStyle(color: AppColors.text, fontSize: 16)),
       // dialogWidth caps to the phone viewport; the scroll view keeps the tall body (URL field +
       // event checkboxes + content switch) usable when the autofocused URL field raises the soft
       // keyboard and halves the dialog's height budget.
@@ -485,8 +485,8 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
             TextField(
               controller: _url,
               autofocus: true,
-              style: const TextStyle(color: AppColors.text, fontSize: 13.5),
-              decoration: const InputDecoration(
+              style: TextStyle(color: AppColors.text, fontSize: 13.5),
+              decoration: InputDecoration(
                 hintText: 'https://receiver.example/webhook',
                 hintStyle: TextStyle(color: AppColors.textFaint),
                 labelText: 'Destination URL',
@@ -494,14 +494,14 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
               ),
             ),
             const SizedBox(height: 14),
-            const Align(alignment: Alignment.centerLeft, child: Text('Events', style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w600))),
+            Align(alignment: Alignment.centerLeft, child: Text('Events', style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w600))),
             for (final e in kOutboundEvents)
               CheckboxListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 controlAffinity: ListTileControlAffinity.leading,
                 activeColor: AppColors.accent,
-                title: Text(e, style: const TextStyle(color: AppColors.text, fontSize: 13)),
+                title: Text(e, style: TextStyle(color: AppColors.text, fontSize: 13)),
                 value: _events.contains(e),
                 onChanged: _busy ? null : (v) => setState(() => v == true ? _events.add(e) : _events.remove(e)),
               ),
@@ -509,27 +509,27 @@ class _OutboundCreateDialogState extends State<_OutboundCreateDialog> {
               dense: true,
               contentPadding: EdgeInsets.zero,
               activeThumbColor: AppColors.warn,
-              title: const Text('Include message content', style: TextStyle(color: AppColors.text, fontSize: 13)),
-              subtitle: const Text('Egresses content, not just metadata', style: TextStyle(color: AppColors.textFaint, fontSize: 11)),
+              title: Text('Include message content', style: TextStyle(color: AppColors.text, fontSize: 13)),
+              subtitle: Text('Egresses content, not just metadata', style: TextStyle(color: AppColors.textFaint, fontSize: 11)),
               value: _includeContent,
               onChanged: _busy ? null : (v) => setState(() => _includeContent = v),
             ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(_error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
+                child: Text(_error!, style: TextStyle(color: AppColors.bad, fontSize: 12.5)),
               ),
           ],
           ),
         ),
       ),
       actions: [
-        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
         ElevatedButton(
           onPressed: _busy ? null : _submit,
           style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent, foregroundColor: AppColors.onAccent, elevation: 0),
           child: _busy
-              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.onAccent))
+              ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.onAccent))
               : const Text('Create'),
         ),
       ],
@@ -549,7 +549,7 @@ class _ChannelPickerRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (channels.isEmpty) {
-      return const Text('No channels to add a webhook to.', style: TextStyle(color: AppColors.textFaint, fontSize: 12.5));
+      return Text('No channels to add a webhook to.', style: TextStyle(color: AppColors.textFaint, fontSize: 12.5));
     }
     return Row(
       children: [
@@ -567,8 +567,8 @@ class _ChannelPickerRow extends StatelessWidget {
                 isExpanded: true,
                 isDense: true,
                 dropdownColor: AppColors.surfaceAlt,
-                style: const TextStyle(color: AppColors.text, fontSize: 13),
-                icon: const Icon(Icons.arrow_drop_down, color: AppColors.textMuted),
+                style: TextStyle(color: AppColors.text, fontSize: 13),
+                icon: Icon(Icons.arrow_drop_down, color: AppColors.textMuted),
                 onChanged: onChanged,
                 items: [
                   for (final c in channels)

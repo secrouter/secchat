@@ -119,7 +119,7 @@ class _MembersDialogState extends State<_MembersDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: dialogWidth(context, 480), maxHeight: 560),
@@ -131,11 +131,11 @@ class _MembersDialogState extends State<_MembersDialog> {
               padding: const EdgeInsets.fromLTRB(18, 16, 12, 10),
               child: Row(
                 children: [
-                  const BrandIcon('principal', size: 18, color: AppColors.accent),
+                  BrandIcon('principal', size: 18, color: AppColors.accent),
                   const SizedBox(width: 8),
                   Text(
                     'Members${members != null ? ' · ${members.length}' : ''}',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.text),
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.text),
                   ),
                   const Spacer(),
                   if (canManage)
@@ -153,7 +153,7 @@ class _MembersDialogState extends State<_MembersDialog> {
                 ],
               ),
             ),
-            const Divider(height: 1, color: AppColors.border),
+            Divider(height: 1, color: AppColors.border),
             Flexible(child: _body(members, canManage)),
           ],
         ),
@@ -165,7 +165,7 @@ class _MembersDialogState extends State<_MembersDialog> {
     if (_error != null) {
       return Padding(
         padding: const EdgeInsets.all(24),
-        child: Center(child: Text(_error!, style: const TextStyle(color: AppColors.bad))),
+        child: Center(child: Text(_error!, style: TextStyle(color: AppColors.bad))),
       );
     }
     if (members == null) {
@@ -178,7 +178,7 @@ class _MembersDialogState extends State<_MembersDialog> {
       shrinkWrap: true,
       padding: const EdgeInsets.symmetric(vertical: 6),
       itemCount: members.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
+      separatorBuilder: (_, __) => Divider(height: 1, color: AppColors.border),
       itemBuilder: (context, i) => _MemberRow(
         member: members[i],
         isSelf: members[i].memberRef == widget.currentUserSub,
@@ -244,7 +244,7 @@ class _MemberRow extends StatelessWidget {
               children: [
                 Text(
                   '${member.label}${isSelf ? ' (you)' : ''}',
-                  style: const TextStyle(fontSize: 13.5, color: AppColors.text, fontWeight: FontWeight.w600),
+                  style: TextStyle(fontSize: 13.5, color: AppColors.text, fontWeight: FontWeight.w600),
                 ),
                 if (member.email != null && member.email!.isNotEmpty)
                   Text(member.email!, style: AppFonts.mono(fontSize: 10.5, color: AppColors.textFaint)),
@@ -265,7 +265,7 @@ class _MemberRow extends StatelessWidget {
             const SizedBox(width: 4),
             PopupMenuButton<String>(
               tooltip: 'Manage member',
-              icon: const Icon(Icons.more_vert, size: 16, color: AppColors.textMuted),
+              icon: Icon(Icons.more_vert, size: 16, color: AppColors.textMuted),
               color: AppColors.surfaceRaised,
               onSelected: (v) {
                 switch (v) {

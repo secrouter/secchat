@@ -627,7 +627,7 @@ class _MessageComposerState extends State<MessageComposer> {
                 child: Container(
                   color: AppColors.accentSoft,
                   alignment: Alignment.center,
-                  child: const Text(
+                  child: Text(
                     'Drop files to attach',
                     style: TextStyle(color: AppColors.accent, fontSize: 14, fontWeight: FontWeight.w700),
                   ),
@@ -768,7 +768,7 @@ class _MessageComposerState extends State<MessageComposer> {
       padding: EdgeInsets.zero,
       color: AppColors.surfaceRaised,
       position: PopupMenuPosition.under,
-      icon: const Icon(Icons.label_important_outline, size: 17, color: AppColors.textMuted),
+      icon: Icon(Icons.label_important_outline, size: 17, color: AppColors.textMuted),
       onSelected: (level) => _linePrefix('(${_portionToken(level)}) '),
       itemBuilder: (_) => [
         for (final l in widget.markingLevels)
@@ -849,7 +849,7 @@ class _MessageComposerState extends State<MessageComposer> {
                 ),
                 if (l == _marking) ...[
                   const Spacer(),
-                  const Icon(Icons.check, size: 15, color: AppColors.accent),
+                  Icon(Icons.check, size: 15, color: AppColors.accent),
                 ],
               ],
             ),
@@ -921,7 +921,7 @@ class _MessageComposerState extends State<MessageComposer> {
   Widget _attachButton() {
     return IconButton(
       icon: _attaching
-          ? const SizedBox(
+          ? SizedBox(
               width: 16, height: 16,
               child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.textMuted),
             )
@@ -992,8 +992,8 @@ class _MessageComposerState extends State<MessageComposer> {
     return MenuAnchor(
       controller: _emojiMenu,
       style: MenuStyle(
-        backgroundColor: const WidgetStatePropertyAll(AppColors.surfaceRaised),
-        side: const WidgetStatePropertyAll(BorderSide(color: AppColors.border)),
+        backgroundColor: WidgetStatePropertyAll(AppColors.surfaceRaised),
+        side: WidgetStatePropertyAll(BorderSide(color: AppColors.border)),
         shape: WidgetStatePropertyAll(
           RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.sm),
@@ -1039,7 +1039,7 @@ class _MessageComposerState extends State<MessageComposer> {
         maxLines: null,
         keyboardType: TextInputType.multiline,
         textInputAction: TextInputAction.newline,
-        style: const TextStyle(color: AppColors.text, fontSize: 14),
+        style: TextStyle(color: AppColors.text, fontSize: 14),
         decoration: const InputDecoration(hintText: 'Message…'),
       ),
     );
@@ -1052,7 +1052,7 @@ class _MessageComposerState extends State<MessageComposer> {
         onPressed: _canSend ? _handleSend : null,
         style: AppButtonStyles.primary,
         child: _sending
-            ? const SizedBox(
+            ? SizedBox(
                 width: 16,
                 height: 16,
                 child: CircularProgressIndicator(
@@ -1100,7 +1100,7 @@ class _MessageComposerState extends State<MessageComposer> {
             child: SingleChildScrollView(
               primary: false,
               child: draft.trim().isEmpty
-                  ? const Text(
+                  ? Text(
                       'Nothing to preview yet.',
                       style: TextStyle(
                         color: AppColors.textFaint,
@@ -1168,7 +1168,7 @@ class _SuggestionStrip extends StatelessWidget {
                       child: Text(
                         command.summary,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 12.5,
                           color: AppColors.textMuted,
                         ),
@@ -1211,11 +1211,11 @@ class _MentionStrip extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: Row(
                   children: [
-                    const Icon(Icons.alternate_email, size: 14, color: AppColors.accent),
+                    Icon(Icons.alternate_email, size: 14, color: AppColors.accent),
                     const SizedBox(width: 8),
                     Text(
                       user.label,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 13,
                         color: AppColors.text,
                         fontWeight: FontWeight.w600,

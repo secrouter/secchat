@@ -68,11 +68,21 @@ class ChatScreen extends StatefulWidget {
     required this.api,
     required this.principal,
     required this.onSignOut,
+    this.isLightMode = false,
+    this.onToggleTheme,
   });
 
   final ApiClient api;
   final Principal principal;
   final VoidCallback onSignOut;
+
+  /// Whether light mode is currently active -- drives the "Light mode" /
+  /// "Dark mode" label in [AppTopBar]'s overflow menu.
+  final bool isLightMode;
+
+  /// Flips the light/dark theme. Null ⇒ no toggle affordance (not expected
+  /// in practice; app.dart always provides one).
+  final VoidCallback? onToggleTheme;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -1310,9 +1320,9 @@ class _ChatScreenState extends State<ChatScreen> {
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.lg),
-          side: const BorderSide(color: AppColors.border),
+          side: BorderSide(color: AppColors.border),
         ),
-        title: const Text(
+        title: Text(
           'Slash commands',
           style: TextStyle(
             color: AppColors.text,
@@ -1357,7 +1367,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       const SizedBox(height: 2),
                       Text(
                         command.summary,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 13,
                           color: AppColors.textMuted,
                         ),
@@ -1584,7 +1594,7 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(height: 8),
             _ConnRow(status: _connStatus),
             const SizedBox(height: 4),
-            const Divider(color: AppColors.borderSoft, height: 17),
+            Divider(color: AppColors.borderSoft, height: 17),
           ],
         ),
       ),
@@ -1596,7 +1606,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// anything destructive being hit by accident.
   Widget _drawerFooter() {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surfaceAlt,
         border: Border(top: BorderSide(color: AppColors.border)),
       ),
@@ -1619,7 +1629,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         Text(
                           widget.principal.label,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: AppColors.text,
@@ -1629,7 +1639,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           Text(
                             widget.principal.groups.first,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 11,
                               color: AppColors.textFaint,
                             ),
@@ -1707,6 +1717,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 onAdmin: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(builder: (_) => AdminScreen(api: widget.api)),
                 ),
+                isLightMode: widget.isLightMode,
+                onToggleTheme: widget.onToggleTheme,
               ),
               Expanded(
                 child: Row(
@@ -2040,7 +2052,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildTranscript(Channel selected) {
     if (_loadingMessages) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(color: AppColors.accent),
       );
     }
@@ -2154,7 +2166,7 @@ class _ThreadHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surface,
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
@@ -2168,7 +2180,7 @@ class _ThreadHeader extends StatelessWidget {
             visualDensity: VisualDensity.compact,
           ),
           const SizedBox(width: 4),
-          const Text(
+          Text(
             'Thread',
             style: TextStyle(
               fontSize: 15,
@@ -2265,7 +2277,7 @@ class _ChannelHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surface,
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
@@ -2281,7 +2293,7 @@ class _ChannelHeader extends StatelessWidget {
             child: Text(
               title,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.w600,
                 color: AppColors.text,
@@ -2391,7 +2403,7 @@ class _ModelPicker extends StatelessWidget {
         underline: const SizedBox.shrink(),
         borderRadius: BorderRadius.circular(8),
         dropdownColor: AppColors.surface,
-        icon: const Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
+        icon: Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
         style: AppFonts.mono(fontSize: 12, color: AppColors.text),
         items: [
           for (final id in ids)
@@ -2463,12 +2475,12 @@ class _InlineError extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline, color: AppColors.bad, size: 28),
+            Icon(Icons.error_outline, color: AppColors.bad, size: 28),
             const SizedBox(height: 10),
             Text(
               text,
               textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.bad, fontSize: 13),
+              style: TextStyle(color: AppColors.bad, fontSize: 13),
             ),
             const SizedBox(height: 14),
             OutlinedButton(
@@ -2515,7 +2527,7 @@ class _CompactBar extends StatelessWidget {
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 4),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surface,
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
@@ -2583,7 +2595,7 @@ class _CompactBar extends StatelessWidget {
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w600,
                     color: AppColors.text,
@@ -2594,7 +2606,7 @@ class _CompactBar extends StatelessWidget {
                     subtitle!,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: AppColors.textFaint),
+                    style: TextStyle(fontSize: 11, color: AppColors.textFaint),
                   ),
               ],
             ),
@@ -2650,7 +2662,7 @@ class _DrawerTile extends StatelessWidget {
                 child: Text(
                   label,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13.5, color: AppColors.text),
+                  style: TextStyle(fontSize: 13.5, color: AppColors.text),
                 ),
               ),
               if (badge != null)
@@ -2662,7 +2674,7 @@ class _DrawerTile extends StatelessWidget {
                   ),
                   child: Text(
                     badge!,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
                       color: AppColors.onAccent,
@@ -2732,7 +2744,7 @@ class _Initials extends StatelessWidget {
       ),
       child: Text(
         initials,
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.w700,
           color: AppColors.accent,

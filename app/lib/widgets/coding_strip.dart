@@ -108,16 +108,16 @@ class _CodingStripState extends State<CodingStrip> {
         // Yellow — execute once.
         ExecuteMode.once => (
           label: 'Execute granted (once)',
-          color: Color(0xFFE8D14D),
-          bg: Color(0xFF2C2810),
-          border: Color(0xFF7A6E20),
+          color: AppColors.executeOnce,
+          bg: AppColors.executeOnceBg,
+          border: AppColors.executeOnceBorder,
         ),
         // Orange — continual execution.
         ExecuteMode.continual => (
           label: 'Continual execution',
-          color: Color(0xFFE8823D),
-          bg: Color(0xFF2C1B10),
-          border: Color(0xFF7A4420),
+          color: AppColors.executeCont,
+          bg: AppColors.executeContBg,
+          border: AppColors.executeContBorder,
         ),
       };
 
@@ -133,10 +133,10 @@ class _CodingStripState extends State<CodingStrip> {
       mainAxisSize: MainAxisSize.min,
       children: [
         PillBadge(badge.label, color: badge.color, background: badge.bg, borderColor: badge.border),
-        if (widget.thinking && !widget.sessionEnded) ...const [
-          SizedBox(width: 10),
+        if (widget.thinking && !widget.sessionEnded) ...[
+          const SizedBox(width: 10),
           SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.warn)),
-          SizedBox(width: 6),
+          const SizedBox(width: 6),
           Text('thinking…', style: TextStyle(color: AppColors.textMuted, fontSize: 12, fontStyle: FontStyle.italic)),
         ],
       ],
@@ -146,7 +146,7 @@ class _CodingStripState extends State<CodingStrip> {
         ? const PillBadge('Ended')
         : widget.canGrant
             ? _ModeDropdown(mode: widget.executeMode, busy: _busy, onSelected: _setMode)
-            : const Text(
+            : Text(
                 'Only the owner can change execution mode',
                 style: TextStyle(color: AppColors.textFaint, fontSize: 12),
               );
@@ -156,7 +156,7 @@ class _CodingStripState extends State<CodingStrip> {
       children: [
         Container(
           padding: EdgeInsets.symmetric(horizontal: compact ? 14 : 22, vertical: 10),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: AppColors.warnBg,
             border: Border(bottom: BorderSide(color: AppColors.warnBorder)),
           ),
@@ -169,7 +169,7 @@ class _CodingStripState extends State<CodingStrip> {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.terminal, size: 16, color: AppColors.warn),
+                        Icon(Icons.terminal, size: 16, color: AppColors.warn),
                         const SizedBox(width: 10),
                         Expanded(child: Align(alignment: Alignment.centerLeft, child: modeBadge)),
                         IconButton(
@@ -196,7 +196,7 @@ class _CodingStripState extends State<CodingStrip> {
                                 runSpacing: 8,
                                 crossAxisAlignment: WrapCrossAlignment.center,
                                 children: [
-                                  const Text(
+                                  Text(
                                     'Coding agent session',
                                     style: TextStyle(
                                         color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
@@ -213,9 +213,9 @@ class _CodingStripState extends State<CodingStrip> {
                 )
               : Row(
                   children: [
-                    const Icon(Icons.terminal, size: 16, color: AppColors.warn),
+                    Icon(Icons.terminal, size: 16, color: AppColors.warn),
                     const SizedBox(width: 10),
-                    const Text(
+                    Text(
                       'Coding agent session',
                       style: TextStyle(color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600),
                     ),
@@ -268,14 +268,14 @@ class _ModeDropdown extends StatelessWidget {
           value: mode,
           isDense: true,
           icon: busy
-              ? const SizedBox(
+              ? SizedBox(
                   width: 12, height: 12,
                   child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.warn),
                 )
-              : const Icon(Icons.arrow_drop_down, color: AppColors.warn),
+              : Icon(Icons.arrow_drop_down, color: AppColors.warn),
           dropdownColor: AppColors.surface,
           borderRadius: BorderRadius.circular(AppRadius.sm),
-          style: const TextStyle(color: AppColors.text, fontSize: 12.5, fontWeight: FontWeight.w600),
+          style: TextStyle(color: AppColors.text, fontSize: 12.5, fontWeight: FontWeight.w600),
           onChanged: busy ? null : (m) { if (m != null) onSelected(m); },
           items: [
             for (final m in ExecuteMode.values)
