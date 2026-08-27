@@ -17,6 +17,8 @@ import { resolveMentions } from "../mentions/parse.ts";
 import { Router } from "./router.ts";
 import { handleAssistantTurn } from "../assistant/service.ts";
 import { isAdmin } from "../admin/gate.ts";
+import { buildAuditVerify } from "../admin/verify.ts";
+import { buildEvidence } from "../admin/evidence.ts";
 import { formatUserMessageForAgent } from "../agent/chat-protocol.ts";
 import { canGrantExecute } from "../agent/gate.ts";
 import { launchEnvironmentsFor, resolveLaunchEnv } from "../agent/launch-env.ts";
@@ -1854,6 +1856,59 @@ function buildRouter(
       return;
     }
     sendJson(res, 200, await admin.overview());
+  });
+
+  // Detailed tamper-evidence verification (AU 3.3.8, spec B.7 secchat entry): recomputes the
+  // global audit chain AND every channel's message chain (src/admin/verify.ts, over the SAME pure
+  // verifiers as Store.verifyChains's boolean summary above — never a second implementation),
+  // reporting a per-channel verdict + broken-at-seq detail an operator can actually act on. Same
+  // admin gate as /admin/api/overview.
+  router.add("GET", "/admin/api/audit/verify", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    sendJson(res, 200, await buildAuditVerify(store));
+  });
+
+  // One-shot CMMC evidence bundle (spec B.6): product/version/config-posture (SANITIZED — names
+  // and booleans only, never a secret/token/DSN)/tamper-evidence verdict/recent audit
+  // events/control self-assessment (src/admin/evidence.ts). Same admin gate as
+  // /admin/api/overview; downloaded (Content-Disposition) like secrouter's own evidence route so
+  // the console's "download evidence" action just works. `generatedBy` is the REQUESTING admin's
+  // own principal id — never a service identity.
+  router.add("GET", "/admin/api/evidence", async ({ res, principal }) => {
+    if (!admin) {
+      sendJson(res, 404, { error: "admin_unavailable" });
+      return;
+    }
+    if (!isAdmin(principal, admin.adminGroup)) {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const bundle = await buildEvidence(
+      {
+        store,
+        marking,
+        dlp,
+        capabilities,
+        adminGroup: admin.adminGroup,
+        stepUpConfigured: stepUp !== undefined,
+        poolConfigured: poolConfigured ?? false,
+        voiceConfigured: calls !== undefined,
+      },
+      principal.sub,
+    );
+    const today = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "content-disposition": `attachment; filename="secchat-evidence-${today}.json"`,
+    });
+    res.end(JSON.stringify(bundle, null, 2));
   });
 
   // Agent-pool observability (admin-gated): deployment limits + the live pool sessions (metadata

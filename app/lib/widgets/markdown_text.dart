@@ -48,7 +48,7 @@ class MarkdownText extends StatelessWidget {
   Widget build(BuildContext context) {
     final base =
         baseStyle ??
-        const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4);
+        TextStyle(color: AppColors.text, fontSize: 14, height: 1.4);
     return MarkdownBody(
       data: text,
       // Not selectable: SelectableText internals break existing widget-test
@@ -77,7 +77,7 @@ class MarkdownText extends StatelessWidget {
     );
     return MarkdownStyleSheet(
       p: base,
-      a: const TextStyle(
+      a: TextStyle(
         color: AppColors.link,
         decoration: TextDecoration.underline,
         decorationColor: AppColors.link,
@@ -110,11 +110,11 @@ class MarkdownText extends StatelessWidget {
       ),
       blockquote: base.copyWith(color: AppColors.textFaint),
       blockquotePadding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
-      blockquoteDecoration: const BoxDecoration(
+      blockquoteDecoration: BoxDecoration(
         border: Border(left: BorderSide(color: AppColors.codeBorder, width: 3)),
       ),
       listBullet: base,
-      horizontalRuleDecoration: const BoxDecoration(
+      horizontalRuleDecoration: BoxDecoration(
         border: Border(top: BorderSide(color: AppColors.codeBorder)),
       ),
       tableHead: base.copyWith(fontWeight: FontWeight.w700),

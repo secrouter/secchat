@@ -107,13 +107,13 @@ class _CallRingScreen extends StatelessWidget {
                     width: 56,
                     height: 56,
                     alignment: Alignment.center,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: AppColors.surfaceRaised,
                       shape: BoxShape.circle,
                     ),
                     child: Text(
                       initialsFor(peer),
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w700,
                         color: AppColors.accent,
@@ -123,7 +123,7 @@ class _CallRingScreen extends StatelessWidget {
                   const SizedBox(height: 14),
                   Text(
                     peer,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 17,
                       fontWeight: FontWeight.w700,
                       color: AppColors.text,
@@ -132,7 +132,7 @@ class _CallRingScreen extends StatelessWidget {
                   const SizedBox(height: 4),
                   Text(
                     snap.amCaller ? 'Calling…' : 'Incoming call',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 13,
                       color: AppColors.textMuted,
                     ),
@@ -150,7 +150,7 @@ class _CallRingScreen extends StatelessWidget {
                         '$peer wants to record this call. Recording only happens with your '
                         'consent — decline to keep it unrecorded, or accept without recording.',
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 12,
                           color: AppColors.warn,
                           height: 1.4,
@@ -243,7 +243,7 @@ class _RingAction extends StatelessWidget {
             Text(
               label,
               textAlign: TextAlign.center,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 10.5,
                 color: AppColors.textMuted,
                 height: 1.2,

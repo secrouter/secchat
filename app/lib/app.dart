@@ -8,6 +8,7 @@ import 'models.dart';
 import 'platform/browser_redirect.dart';
 import 'platform/native_sso.dart';
 import 'platform/session_store.dart';
+import 'platform/theme_prefs.dart';
 import 'screens/chat.dart';
 import 'screens/login.dart';
 import 'theme.dart';
@@ -66,10 +67,28 @@ class _SecChatAppState extends State<SecChatApp> {
   /// no query at all).
   String? _ssoError;
 
+  /// Light/dark theme toggle. Defaults to dark (unchanged look for existing
+  /// users) until the saved preference (if any) loads asynchronously in
+  /// [initState] -- see [ThemePrefs].
+  bool _isLightMode = false;
+
   @override
   void initState() {
     super.initState();
     unawaited(_boot());
+    unawaited(_loadThemePref());
+  }
+
+  Future<void> _loadThemePref() async {
+    final saved = await ThemePrefs.loadIsLightMode();
+    if (saved == null || !mounted) return;
+    setState(() => _isLightMode = saved);
+  }
+
+  void _toggleTheme() {
+    final next = !_isLightMode;
+    setState(() => _isLightMode = next);
+    unawaited(ThemePrefs.saveIsLightMode(next));
   }
 
   /// Runs once at startup: checks whether SSO is configured, then probes
@@ -228,13 +247,15 @@ class _SecChatAppState extends State<SecChatApp> {
     return MaterialApp(
       title: 'SecChat',
       debugShowCheckedModeBanner: false,
-      theme: buildSecChatTheme(),
+      theme: buildSecChatTheme(_isLightMode ? Brightness.light : Brightness.dark),
       home: _buildHome(),
     );
   }
 
   Widget _buildHome() {
-    if (_booting) return const _BootSplash();
+    // Not `const`: [_BootSplash] reads [AppColors] getters, which are no
+    // longer compile-time constants now that the palette is switchable.
+    if (_booting) return _BootSplash();
     final api = _api;
     final principal = _principal;
     if (api != null && principal != null) {
@@ -242,6 +263,8 @@ class _SecChatAppState extends State<SecChatApp> {
         api: api,
         principal: principal,
         onSignOut: _handleSignOut,
+        isLightMode: _isLightMode,
+        onToggleTheme: _toggleTheme,
       );
     }
     return LoginScreen(
@@ -260,11 +283,9 @@ class _SecChatAppState extends State<SecChatApp> {
 /// reload that's actually signed in via cookie doesn't flash the login
 /// screen first.
 class _BootSplash extends StatelessWidget {
-  const _BootSplash();
-
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
+    return Scaffold(
       backgroundColor: AppColors.bg,
       body: Center(
         child: SizedBox(

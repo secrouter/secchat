@@ -15,9 +15,9 @@ Future<bool?> showStepUpDialog(BuildContext context, {String? action}) {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Row(
+      title: Row(
         children: [
           BrandIcon('secure', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
@@ -32,7 +32,7 @@ Future<bool?> showStepUpDialog(BuildContext context, {String? action}) {
         child: Text(
           'This is a privileged action${action == null ? '' : ' ($action)'} and needs a fresh '
           'confirmation of your identity. Re-authenticate to continue.',
-          style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
+          style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
         ),
       ),
       actions: [

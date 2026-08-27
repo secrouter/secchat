@@ -33,9 +33,9 @@ class _HistoryDialog extends StatelessWidget {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Row(
+      title: Row(
         children: [
           BrandIcon('history', color: AppColors.accent, size: 20),
           SizedBox(width: 8),
@@ -52,7 +52,7 @@ class _HistoryDialog extends StatelessWidget {
       content: SizedBox(
         width: dialogWidth(context, 480),
         child: revisions.isEmpty
-            ? const Text(
+            ? Text(
                 'No history available.',
                 style: TextStyle(color: AppColors.textMuted, fontSize: 13),
               )
@@ -115,7 +115,7 @@ class _RevisionTile extends StatelessWidget {
             children: [
               Text(
                 label,
-                style: const TextStyle(
+                style: TextStyle(
                   color: AppColors.text,
                   fontSize: 12.5,
                   fontWeight: FontWeight.w700,
@@ -134,7 +134,7 @@ class _RevisionTile extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           revision.content == null
-              ? const Text(
+              ? Text(
                   'content redacted',
                   style: TextStyle(
                     fontStyle: FontStyle.italic,
@@ -144,7 +144,7 @@ class _RevisionTile extends StatelessWidget {
                 )
               : MarkdownText(
                   revision.content!,
-                  baseStyle: const TextStyle(
+                  baseStyle: TextStyle(
                     color: AppColors.text,
                     fontSize: 13.5,
                     height: 1.4,

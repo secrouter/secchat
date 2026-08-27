@@ -266,7 +266,7 @@ class _LoadOlderControl extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: loading
-            ? const SizedBox(
+            ? SizedBox(
                 width: 16,
                 height: 16,
                 child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.textMuted),
@@ -525,7 +525,7 @@ class _MessageBubble extends StatelessWidget {
           ),
         const SizedBox(height: 2),
         if (message.isRedacted)
-          const Text(
+          Text(
             'message redacted',
             style: TextStyle(fontStyle: FontStyle.italic, color: AppColors.textFaint, fontSize: 14),
           )
@@ -542,7 +542,7 @@ class _MessageBubble extends StatelessWidget {
         else
           MarkdownText(
             message.content!,
-            baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+            baseStyle: TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
           ),
         // DLP: this message's content tripped a data-loss rule (flag mode). Surfaced as a warning
         // so it can be reviewed / redacted; the durable record is the audit trail.
@@ -607,7 +607,7 @@ class _MessageBubble extends StatelessWidget {
     if (isAgent) {
       decoration = BoxDecoration(
         color: AppColors.accentSoft,
-        border: const Border(
+        border: Border(
           left: BorderSide(color: AppColors.accentBorder, width: 2),
         ),
         borderRadius: BorderRadius.circular(AppRadius.sm),
@@ -683,10 +683,10 @@ class _Avatar extends StatelessWidget {
         ),
       ),
       child: isAgent
-          ? const Icon(Icons.auto_awesome, size: 13, color: AppColors.accent)
+          ? Icon(Icons.auto_awesome, size: 13, color: AppColors.accent)
           : Text(
               initialsFor(label ?? ref),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
                 color: AppColors.textMuted,
@@ -708,7 +708,7 @@ class _OutputTile extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surfaceAlt,
         border: Border(left: BorderSide(color: AppColors.textFaint, width: 2)),
         borderRadius: BorderRadius.horizontal(
@@ -783,7 +783,7 @@ class _DecisionTile extends StatelessWidget {
           if (reason != null && reason!.isNotEmpty)
             Text(
               reason!,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12.5,
                 color: AppColors.textMuted,
               ),
@@ -907,8 +907,8 @@ class _AddReactionButtonState extends State<_AddReactionButton> {
     return MenuAnchor(
       controller: _menu,
       style: MenuStyle(
-        backgroundColor: const WidgetStatePropertyAll(AppColors.surfaceRaised),
-        side: const WidgetStatePropertyAll(BorderSide(color: AppColors.border)),
+        backgroundColor: WidgetStatePropertyAll(AppColors.surfaceRaised),
+        side: WidgetStatePropertyAll(BorderSide(color: AppColors.border)),
         shape: WidgetStatePropertyAll(
           RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
         ),
@@ -934,7 +934,7 @@ class _AddReactionButtonState extends State<_AddReactionButton> {
             border: Border.all(color: AppColors.border),
             borderRadius: BorderRadius.circular(999),
           ),
-          child: const Icon(
+          child: Icon(
             Icons.add_reaction_outlined,
             size: 14,
             color: AppColors.textFaint,
@@ -957,7 +957,7 @@ class _ErrorTile extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.badBg,
         border: Border(left: BorderSide(color: AppColors.badBorder, width: 2)),
         borderRadius: BorderRadius.horizontal(right: Radius.circular(AppRadius.sm)),
@@ -965,7 +965,7 @@ class _ErrorTile extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.error_outline, size: 14, color: AppColors.bad),
+          Icon(Icons.error_outline, size: 14, color: AppColors.bad),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -1062,7 +1062,7 @@ class _MessageMenu extends StatelessWidget {
         padding: EdgeInsets.zero,
         iconSize: compact ? 18 : 15,
         position: PopupMenuPosition.under,
-        icon: const Icon(Icons.more_horiz, color: AppColors.textFaint),
+        icon: Icon(Icons.more_horiz, color: AppColors.textFaint),
         color: AppColors.surfaceRaised,
         onSelected: (value) {
           switch (value) {
@@ -1086,12 +1086,12 @@ class _MessageMenu extends StatelessWidget {
                 children: [
                   Icon(isPinned ? Icons.push_pin : Icons.push_pin_outlined, size: 15, color: AppColors.text),
                   const SizedBox(width: 8),
-                  Text(isPinned ? 'Unpin' : 'Pin', style: const TextStyle(color: AppColors.text, fontSize: 13)),
+                  Text(isPinned ? 'Unpin' : 'Pin', style: TextStyle(color: AppColors.text, fontSize: 13)),
                 ],
               ),
             ),
           if (onCopy != null)
-            const PopupMenuItem<String>(
+            PopupMenuItem<String>(
               value: 'copy',
               child: Row(
                 children: [
@@ -1106,20 +1106,20 @@ class _MessageMenu extends StatelessWidget {
               value: 'edit',
               child: Row(
                 children: [
-                  const Icon(Icons.edit_outlined, size: 15, color: AppColors.text),
+                  Icon(Icons.edit_outlined, size: 15, color: AppColors.text),
                   const SizedBox(width: 8),
                   Text(
                     // Kept short — "Correct transcript…" doesn't fit the menu's available
                     // width next to a left-aligned system message near the trailing edge.
                     // The dialog it opens spells the action out in full.
                     isCorrection ? 'Correct…' : 'Edit…',
-                    style: const TextStyle(color: AppColors.text, fontSize: 13),
+                    style: TextStyle(color: AppColors.text, fontSize: 13),
                   ),
                 ],
               ),
             ),
           if (onViewHistory != null)
-            const PopupMenuItem<String>(
+            PopupMenuItem<String>(
               value: 'history',
               child: Row(
                 children: [
@@ -1130,7 +1130,7 @@ class _MessageMenu extends StatelessWidget {
               ),
             ),
           if (onRedact != null)
-            const PopupMenuItem<String>(
+            PopupMenuItem<String>(
               value: 'redact',
               child: Row(
                 children: [
@@ -1192,12 +1192,12 @@ class _AttachmentCard extends StatelessWidget {
                   attachment.filename,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: AppColors.text, fontSize: 13, fontWeight: FontWeight.w600),
+                  style: TextStyle(color: AppColors.text, fontSize: 13, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 2),
                 Row(
                   children: [
-                    Text(_size, style: const TextStyle(color: AppColors.textFaint, fontSize: 11)),
+                    Text(_size, style: TextStyle(color: AppColors.textFaint, fontSize: 11)),
                     if (elevated) ...[
                       const SizedBox(width: 6),
                       Container(
@@ -1244,7 +1244,7 @@ class _DlpWarning extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.warning_amber_rounded, size: 14, color: AppColors.bad),
+          Icon(Icons.warning_amber_rounded, size: 14, color: AppColors.bad),
           const SizedBox(width: 6),
           Flexible(
             child: Text(
@@ -1277,7 +1277,7 @@ class _SummaryContent extends StatelessWidget {
       children: [
         Text(
           header,
-          style: const TextStyle(
+          style: TextStyle(
             color: AppColors.accent,
             fontSize: 12.5,
             fontWeight: FontWeight.w700,
@@ -1288,7 +1288,7 @@ class _SummaryContent extends StatelessWidget {
           const SizedBox(height: 3),
           MarkdownText(
             body,
-            baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+            baseStyle: TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
           ),
         ],
       ],
@@ -1328,7 +1328,7 @@ class _ElevatedContent extends StatelessWidget {
                   children: [
                     MarkdownText(
                       message.content!,
-                      baseStyle: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+                      baseStyle: TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
                     ),
                     if (onToggleReveal != null) ...[
                       const SizedBox(height: 8),
@@ -1417,14 +1417,14 @@ class _SystemDivider extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
       child: Row(
         children: [
-          const Expanded(
+          Expanded(
             child: Divider(color: AppColors.borderSoft, height: 1),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(
               text.toUpperCase(),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 11.5,
                 color: AppColors.textFaint,
                 letterSpacing: 0.5,
@@ -1432,7 +1432,7 @@ class _SystemDivider extends StatelessWidget {
               ),
             ),
           ),
-          const Expanded(
+          Expanded(
             child: Divider(color: AppColors.borderSoft, height: 1),
           ),
         ],
@@ -1456,7 +1456,7 @@ class _TypingBubble extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
         color: AppColors.accentSoft,
-        border: const Border(
+        border: Border(
           left: BorderSide(color: AppColors.accentBorder, width: 2),
         ),
         borderRadius: BorderRadius.circular(AppRadius.sm),
@@ -1470,7 +1470,7 @@ class _TypingBubble extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Assistant',
                   style: TextStyle(
                     fontSize: 13.5,
@@ -1487,7 +1487,7 @@ class _TypingBubble extends StatelessWidget {
                       children: [
                         TextSpan(
                           text: typing.text,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: AppColors.text,
                             fontSize: 14,
                             height: 1.4,
@@ -1567,7 +1567,7 @@ class _Dot extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     width: 5,
     height: 5,
-    decoration: const BoxDecoration(
+    decoration: BoxDecoration(
       color: AppColors.accent,
       shape: BoxShape.circle,
     ),

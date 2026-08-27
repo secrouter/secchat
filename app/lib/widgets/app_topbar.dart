@@ -27,6 +27,8 @@ class AppTopBar extends StatelessWidget {
     this.onSshKeys,
     this.onWebhooks,
     this.onAdmin,
+    this.isLightMode = false,
+    this.onToggleTheme,
   });
 
   final Principal principal;
@@ -44,6 +46,13 @@ class AppTopBar extends StatelessWidget {
   /// ([Principal.isAdmin]); null ⇒ never shown.
   final VoidCallback? onAdmin;
 
+  /// Whether light mode is currently active -- drives the toggle item's label ("Light mode" /
+  /// "Dark mode") in the overflow menu.
+  final bool isLightMode;
+
+  /// Flips the light/dark theme. Null ⇒ hidden from the menu (not expected in practice).
+  final VoidCallback? onToggleTheme;
+
   /// The bundled runner daemon's live state (desktop). Null ⇒ no runner chip (web/mobile).
   final ValueListenable<RunnerDaemonState>? runnerState;
 
@@ -58,7 +67,7 @@ class AppTopBar extends StatelessWidget {
     return Container(
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: AppColors.surface,
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
@@ -92,6 +101,8 @@ class AppTopBar extends StatelessWidget {
             onSshKeys: onSshKeys,
             onWebhooks: onWebhooks,
             onAdmin: onAdmin,
+            isLightMode: isLightMode,
+            onToggleTheme: onToggleTheme,
           ),
           IconButton(
             onPressed: onSignOut,
@@ -109,12 +120,21 @@ class AppTopBar extends StatelessWidget {
 /// be separate icons — Git SSH key, the global Webhooks manager, and (admins only) the Admin
 /// console. Each entry appears only when its callback is provided (and, for Admin, [isAdmin]).
 class _AppMenu extends StatelessWidget {
-  const _AppMenu({required this.isAdmin, this.onSshKeys, this.onWebhooks, this.onAdmin});
+  const _AppMenu({
+    required this.isAdmin,
+    this.onSshKeys,
+    this.onWebhooks,
+    this.onAdmin,
+    this.isLightMode = false,
+    this.onToggleTheme,
+  });
 
   final bool isAdmin;
   final VoidCallback? onSshKeys;
   final VoidCallback? onWebhooks;
   final VoidCallback? onAdmin;
+  final bool isLightMode;
+  final VoidCallback? onToggleTheme;
 
   @override
   Widget build(BuildContext context) {
@@ -122,15 +142,21 @@ class _AppMenu extends StatelessWidget {
       if (onSshKeys != null) _item(Icons.vpn_key, 'Git SSH key', onSshKeys!),
       if (onWebhooks != null) _item(Icons.webhook, 'Webhooks', onWebhooks!),
       if (onAdmin != null && isAdmin) _item(Icons.admin_panel_settings, 'Admin console', onAdmin!),
+      if (onToggleTheme != null)
+        _item(
+          isLightMode ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
+          isLightMode ? 'Dark mode' : 'Light mode',
+          onToggleTheme!,
+        ),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
     return PopupMenuButton<VoidCallback>(
       tooltip: 'Menu',
-      icon: const Icon(Icons.menu, size: 18, color: AppColors.textMuted),
+      icon: Icon(Icons.menu, size: 18, color: AppColors.textMuted),
       color: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.sm),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       onSelected: (action) => action(),
       itemBuilder: (_) => items,
@@ -144,7 +170,7 @@ class _AppMenu extends StatelessWidget {
         children: [
           Icon(icon, size: 17, color: AppColors.textMuted),
           const SizedBox(width: 10),
-          Text(label, style: const TextStyle(color: AppColors.text, fontSize: 13.5)),
+          Text(label, style: TextStyle(color: AppColors.text, fontSize: 13.5)),
         ],
       ),
     );
@@ -215,7 +241,7 @@ class _ConnIndicator extends StatelessWidget {
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 7),
-        Text(label, style: const TextStyle(fontSize: 12, color: AppColors.textFaint)),
+        Text(label, style: TextStyle(fontSize: 12, color: AppColors.textFaint)),
       ],
     );
   }
@@ -242,13 +268,13 @@ class _UserChip extends StatelessWidget {
             width: 28,
             height: 28,
             alignment: Alignment.center,
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               color: AppColors.surfaceRaised,
               shape: BoxShape.circle,
             ),
             child: Text(
               initialsFor(principal.label),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
                 color: AppColors.accent,
@@ -265,7 +291,7 @@ class _UserChip extends StatelessWidget {
                 children: [
                   Text(
                     principal.label,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
                       color: AppColors.text,
@@ -273,7 +299,7 @@ class _UserChip extends StatelessWidget {
                   ),
                   if (principal.isAdmin) ...[
                     const SizedBox(width: 6),
-                    const PillBadge(
+                    PillBadge(
                       'Admin',
                       color: AppColors.accent,
                       background: AppColors.accentSoft,

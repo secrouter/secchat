@@ -87,8 +87,8 @@ class _SshKeyDialogState extends State<_SshKeyDialog> {
       barrierColor: AppColors.overlay,
       builder: (dialogCtx) => AlertDialog(
         backgroundColor: AppColors.surface,
-        title: const Text('Regenerate SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
-        content: const Text(
+        title: Text('Regenerate SSH key?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: Text(
           'This replaces your current key. The old key stops working everywhere you added it — '
           'remove it from your git host and add the new one.',
           style: TextStyle(color: AppColors.textMuted, fontSize: 13),
@@ -140,9 +140,9 @@ class _SshKeyDialogState extends State<_SshKeyDialog> {
     return AlertDialog(
       backgroundColor: AppColors.surface,
       title: Row(
-        children: const [
+        children: [
           Icon(Icons.vpn_key, size: 18, color: AppColors.accent),
-          SizedBox(width: 8),
+          const SizedBox(width: 8),
           Text('Git SSH key', style: TextStyle(color: AppColors.text, fontSize: 16)),
         ],
       ),
@@ -156,7 +156,7 @@ class _SshKeyDialogState extends State<_SshKeyDialog> {
       case _Phase.loading:
         return const SizedBox(height: 80, child: Center(child: CircularProgressIndicator(strokeWidth: 2)));
       case _Phase.notEnabled:
-        return const Text(
+        return Text(
           'Git SSH keys are not enabled on this deployment. An operator sets SECCHAT_SECRET_KEY to '
           'turn on server-managed keys for the agent pool.',
           style: TextStyle(color: AppColors.textMuted, fontSize: 13),
@@ -166,19 +166,19 @@ class _SshKeyDialogState extends State<_SshKeyDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'A key SecChat generates and injects into your coding agents (the online pool and your '
               'desktop) so git authenticates as you. Add the public key to your git host once.',
               style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, height: 1.4),
             ),
             const SizedBox(height: 14),
             if (_key == null)
-              const Text('No key yet.', style: TextStyle(color: AppColors.textFaint, fontSize: 13))
+              Text('No key yet.', style: TextStyle(color: AppColors.textFaint, fontSize: 13))
             else
               _keyView(_key!),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(_error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
+              Text(_error!, style: TextStyle(color: AppColors.bad, fontSize: 12.5)),
             ],
           ],
         );

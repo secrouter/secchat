@@ -30,7 +30,7 @@ class _MentionsDialog extends StatelessWidget {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: dialogWidth(context, 520), maxHeight: 560),
@@ -42,9 +42,9 @@ class _MentionsDialog extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(18, 16, 18, 10),
               child: Row(
                 children: [
-                  const Icon(Icons.alternate_email, size: 18, color: AppColors.accent),
+                  Icon(Icons.alternate_email, size: 18, color: AppColors.accent),
                   const SizedBox(width: 8),
-                  const Text(
+                  Text(
                     'Mentions',
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.text),
                   ),
@@ -58,11 +58,11 @@ class _MentionsDialog extends StatelessWidget {
                 ],
               ),
             ),
-            const Divider(height: 1, color: AppColors.border),
+            Divider(height: 1, color: AppColors.border),
             Flexible(
               child: mentions.isEmpty
-                  ? const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 48),
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 48),
                       child: Center(
                         child: Text(
                           'No mentions yet.\nYou’ll see it here when someone @mentions you.',
@@ -75,7 +75,7 @@ class _MentionsDialog extends StatelessWidget {
                       shrinkWrap: true,
                       padding: const EdgeInsets.symmetric(vertical: 6),
                       itemCount: mentions.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
+                      separatorBuilder: (_, __) => Divider(height: 1, color: AppColors.border),
                       itemBuilder: (context, i) => _MentionRow(
                         mention: mentions[i],
                         channelLabel: channelLabel(mentions[i].channelId),
@@ -114,7 +114,7 @@ class _MentionRow extends StatelessWidget {
                   style: AppFonts.mono(fontSize: 11.5, color: AppColors.accent).copyWith(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(width: 8),
-                Text('from ${mention.authorSub}', style: const TextStyle(fontSize: 11.5, color: AppColors.textFaint)),
+                Text('from ${mention.authorSub}', style: TextStyle(fontSize: 11.5, color: AppColors.textFaint)),
               ],
             ),
             const SizedBox(height: 4),

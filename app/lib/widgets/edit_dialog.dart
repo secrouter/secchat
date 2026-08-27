@@ -65,15 +65,15 @@ class _EditDialogState extends State<_EditDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       title: Row(
         children: [
-          const Icon(Icons.edit_outlined, color: AppColors.accent, size: 20),
+          Icon(Icons.edit_outlined, color: AppColors.accent, size: 20),
           const SizedBox(width: 8),
           Text(
             widget.isCorrection ? 'Correct transcript' : 'Edit message',
-            style: const TextStyle(
+            style: TextStyle(
               color: AppColors.text,
               fontSize: 16,
               fontWeight: FontWeight.w700,
@@ -94,7 +94,7 @@ class _EditDialogState extends State<_EditDialog> {
                       'recorded in the audit trail.'
                   : 'Your original text is kept in the message history, and the edit — '
                       'who and when — is recorded in the audit trail.',
-              style: const TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
+              style: TextStyle(color: AppColors.textMuted, fontSize: 13, height: 1.45),
             ),
             const SizedBox(height: 14),
             // Cmd/Ctrl+Enter saves; plain Enter inserts a newline (this is a body editor).
@@ -108,7 +108,7 @@ class _EditDialogState extends State<_EditDialog> {
                 autofocus: true,
                 minLines: 2,
                 maxLines: 10,
-                style: const TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
+                style: TextStyle(color: AppColors.text, fontSize: 14, height: 1.4),
                 decoration: const InputDecoration(hintText: 'Message text'),
               ),
             ),

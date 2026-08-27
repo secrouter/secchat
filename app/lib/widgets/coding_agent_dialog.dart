@@ -112,12 +112,12 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'New coding agent',
               style: TextStyle(color: AppColors.text, fontSize: 16, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            const Text(
+            Text(
               'Starts a coding session; tool execution is gated behind an explicit grant.',
               style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, height: 1.4),
             ),
@@ -125,14 +125,14 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             TextField(
               controller: _controller,
               autofocus: true,
-              style: const TextStyle(color: AppColors.text, fontSize: 14),
+              style: TextStyle(color: AppColors.text, fontSize: 14),
               decoration: const InputDecoration(hintText: 'e.g. release-helper'),
               onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _submit(),
             ),
             if (widget.models.isNotEmpty) ...[
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'MODEL',
                 style: TextStyle(color: AppColors.textFaint, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6),
               ),
@@ -141,7 +141,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
                 initialValue: _selectedModel,
                 isExpanded: true,
                 dropdownColor: AppColors.surface,
-                style: const TextStyle(color: AppColors.text, fontSize: 13),
+                style: TextStyle(color: AppColors.text, fontSize: 13),
                 items: [
                   for (final m in widget.models)
                     DropdownMenuItem(value: m, child: Text(m, overflow: TextOverflow.ellipsis)),
@@ -152,7 +152,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -169,7 +169,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               ],
             ),
             const SizedBox(height: 18),
-            const Text(
+            Text(
               'LAUNCH ENVIRONMENT',
               style: TextStyle(
                 color: AppColors.textFaint,
@@ -186,12 +186,12 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             ),
             if (_selectedEnv == 'pool' && widget.analyzers.isNotEmpty) ...[
               const SizedBox(height: 14),
-              const Text(
+              Text(
                 'ANALYSIS TOOLS',
                 style: TextStyle(color: AppColors.textFaint, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.6),
               ),
               const SizedBox(height: 2),
-              const Text(
+              Text(
                 'Extra tooling containers attached to the agent, sharing its workspace.',
                 style: TextStyle(color: AppColors.textMuted, fontSize: 11.5, height: 1.35),
               ),
@@ -201,7 +201,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
                   contentPadding: EdgeInsets.zero,
                   controlAffinity: ListTileControlAffinity.leading,
                   activeColor: AppColors.accent,
-                  title: Text(a, style: const TextStyle(color: AppColors.text, fontSize: 13)),
+                  title: Text(a, style: TextStyle(color: AppColors.text, fontSize: 13)),
                   value: _analysis.contains(a),
                   onChanged: (v) => setState(() => v == true ? _analysis.add(a) : _analysis.remove(a)),
                 ),
@@ -210,7 +210,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               const SizedBox(height: 6),
               Row(
                 children: [
-                  const Expanded(
+                  Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -229,7 +229,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             ],
             if (_showWorkspace) ...[
               const SizedBox(height: 14),
-              const Text(
+              Text(
                 'LOCAL FOLDER (OPTIONAL)',
                 style: TextStyle(
                   color: AppColors.textFaint,
@@ -241,11 +241,11 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
               const SizedBox(height: 6),
               TextField(
                 controller: _workspaceController,
-                style: const TextStyle(color: AppColors.text, fontSize: 13),
+                style: TextStyle(color: AppColors.text, fontSize: 13),
                 decoration: const InputDecoration(hintText: '~/project or /Users/you/project'),
               ),
               const SizedBox(height: 4),
-              const Text(
+              Text(
                 'An EXISTING folder on your Mac (~ and absolute paths work). The agent works there — '
                 'reads freely; edits still need your grant. Blank = a private scratch workspace. The '
                 'agent shows its actual workspace when it starts.',
@@ -254,7 +254,7 @@ class _CodingAgentDialogState extends State<_CodingAgentDialog> {
             ],
             if (!anyAvailable) ...[
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 'No launch environment is available yet — connect your desktop app to run a coding agent.',
                 style: TextStyle(color: AppColors.warn, fontSize: 12, height: 1.4),
               ),
@@ -328,7 +328,7 @@ class _EnvOption extends StatelessWidget {
                         children: [
                           Text(
                             env.label,
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: AppColors.text,
                               fontSize: 13.5,
                               fontWeight: FontWeight.w600,
@@ -344,7 +344,7 @@ class _EnvOption extends StatelessWidget {
                               ),
                               child: Text(
                                 env.reason == 'not_deployed' ? 'Coming soon' : 'Unavailable',
-                                style: const TextStyle(color: AppColors.textFaint, fontSize: 10.5, fontWeight: FontWeight.w600),
+                                style: TextStyle(color: AppColors.textFaint, fontSize: 10.5, fontWeight: FontWeight.w600),
                               ),
                             ),
                           ],
@@ -353,7 +353,7 @@ class _EnvOption extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         env.detail,
-                        style: const TextStyle(color: AppColors.textMuted, fontSize: 12, height: 1.35),
+                        style: TextStyle(color: AppColors.textMuted, fontSize: 12, height: 1.35),
                       ),
                     ],
                   ),

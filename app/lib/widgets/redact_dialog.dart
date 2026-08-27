@@ -40,9 +40,9 @@ class _RedactDialogState extends State<_RedactDialog> {
       backgroundColor: AppColors.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
-      title: const Row(
+      title: Row(
         children: [
           BrandIcon('redact', color: AppColors.bad, size: 20),
           SizedBox(width: 8),
@@ -62,7 +62,7 @@ class _RedactDialogState extends State<_RedactDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'This permanently removes the message content for everyone and '
               'cannot be undone. The message becomes a "redacted" tombstone, and '
               'the action — who, when, and why — is recorded in the audit trail.',
@@ -74,7 +74,7 @@ class _RedactDialogState extends State<_RedactDialog> {
               autofocus: true,
               minLines: 1,
               maxLines: 2,
-              style: const TextStyle(color: AppColors.text, fontSize: 14),
+              style: TextStyle(color: AppColors.text, fontSize: 14),
               decoration: const InputDecoration(
                 hintText: 'Reason (required) — e.g. CUI spillage, wrong channel',
               ),

@@ -158,7 +158,7 @@ class _CallScreenState extends State<CallScreen> {
                   Text(
                     title,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w700,
                       color: AppColors.text,
@@ -172,16 +172,16 @@ class _CallScreenState extends State<CallScreen> {
                         Container(
                           width: 10,
                           height: 10,
-                          decoration: const BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
+                          decoration: BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
                         ),
                         const SizedBox(width: 6),
-                        const Text(
+                        Text(
                           'REC',
                           style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.bad),
                         ),
                         const SizedBox(width: 12),
                       ],
-                      Text(statusText, style: const TextStyle(fontSize: 14, color: AppColors.textMuted)),
+                      Text(statusText, style: TextStyle(fontSize: 14, color: AppColors.textMuted)),
                     ],
                   ),
                   if (elapsed != null) ...[
@@ -289,7 +289,7 @@ class _ParticipantGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     if (participants.isEmpty) {
       // I've started/joined the call but nobody else is on it yet.
-      return const Text(
+      return Text(
         'Waiting for others to join…',
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: 14, color: AppColors.textMuted),
@@ -345,23 +345,23 @@ class _ParticipantTile extends StatelessWidget {
               width: 56,
               height: 56,
               alignment: Alignment.center,
-              decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+              decoration: BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
               child: Text(
                 initialsFor(label),
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.accent),
               ),
             ),
           const SizedBox(height: 6),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.mic, size: 11, color: AppColors.textMuted),
+              Icon(Icons.mic, size: 11, color: AppColors.textMuted),
               const SizedBox(width: 3),
               Flexible(
                 child: Text(
                   label,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                  style: TextStyle(fontSize: 12, color: AppColors.textMuted),
                 ),
               ),
             ],
@@ -410,12 +410,12 @@ class _SoloVisual extends StatelessWidget {
       width: 96,
       height: 96,
       alignment: Alignment.center,
-      decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+      decoration: BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
       child: isMemo
-          ? const Icon(Icons.mic, size: 40, color: AppColors.accent)
+          ? Icon(Icons.mic, size: 40, color: AppColors.accent)
           : Text(
               initialsFor(peer),
-              style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700, color: AppColors.accent),
+              style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700, color: AppColors.accent),
             ),
     );
   }
@@ -462,7 +462,7 @@ class _ScreenShareStage extends StatelessWidget {
                 color: AppColors.overlay,
                 borderRadius: BorderRadius.circular(AppRadius.sm),
               ),
-              child: Text(label, style: const TextStyle(fontSize: 11, color: AppColors.text)),
+              child: Text(label, style: TextStyle(fontSize: 11, color: AppColors.text)),
             ),
           ),
         ],
@@ -495,9 +495,9 @@ class MicLevelMeter extends StatelessWidget {
       children: [
         Row(
           children: [
-            const Icon(Icons.graphic_eq, size: 14, color: AppColors.textMuted),
+            Icon(Icons.graphic_eq, size: 14, color: AppColors.textMuted),
             const SizedBox(width: 6),
-            const Text('Mic', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
+            Text('Mic', style: TextStyle(fontSize: 12, color: AppColors.textMuted)),
           ],
         ),
         const SizedBox(height: 8),
@@ -567,11 +567,11 @@ class _EndedView extends StatelessWidget {
                 width: 96,
                 height: 96,
                 alignment: Alignment.center,
-                decoration: const BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
-                child: const Icon(Icons.call_end, size: 40, color: AppColors.textMuted),
+                decoration: BoxDecoration(color: AppColors.surfaceRaised, shape: BoxShape.circle),
+                child: Icon(Icons.call_end, size: 40, color: AppColors.textMuted),
               ),
               const SizedBox(height: 20),
-              const Text(
+              Text(
                 'Call Ended',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.text),
@@ -580,7 +580,7 @@ class _EndedView extends StatelessWidget {
               Text(
                 _subtitle,
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 14, color: AppColors.textMuted),
+                style: TextStyle(fontSize: 14, color: AppColors.textMuted),
               ),
               const Spacer(flex: 3),
               _BigControlButton(
@@ -664,7 +664,7 @@ class _BigControlButtonState extends State<_BigControlButton> {
                 ),
               ),
               const SizedBox(height: 8),
-              Text(widget.label, style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+              Text(widget.label, style: TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
             ],
           ),
         ),
@@ -692,10 +692,10 @@ class _Notice extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.mic_off, size: 13, color: AppColors.warn),
+            Icon(Icons.mic_off, size: 13, color: AppColors.warn),
             const SizedBox(width: 6),
             Flexible(
-              child: Text(text, style: const TextStyle(fontSize: 11.5, color: AppColors.warn)),
+              child: Text(text, style: TextStyle(fontSize: 11.5, color: AppColors.warn)),
             ),
           ],
         ),
@@ -795,7 +795,7 @@ class _TabItem extends StatelessWidget {
                   child: Container(
                     width: 8,
                     height: 8,
-                    decoration: const BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
+                    decoration: BoxDecoration(color: AppColors.bad, shape: BoxShape.circle),
                   ),
                 ),
             ],

@@ -52,7 +52,7 @@ class _WebhooksTabsDialog extends StatelessWidget {
       insetPadding: const EdgeInsets.all(16),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: AppColors.border),
       ),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: dialogWidth(context, 600), maxHeight: 640),
@@ -66,9 +66,9 @@ class _WebhooksTabsDialog extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(22, 18, 14, 4),
                 child: Row(
                   children: [
-                    const Icon(Icons.webhook, size: 18, color: AppColors.accent),
+                    Icon(Icons.webhook, size: 18, color: AppColors.accent),
                     const SizedBox(width: 10),
-                    const Expanded(
+                    Expanded(
                       child: Text('Webhooks', style: TextStyle(color: AppColors.text, fontSize: 16, fontWeight: FontWeight.w600)),
                     ),
                     IconButton(
@@ -80,7 +80,7 @@ class _WebhooksTabsDialog extends StatelessWidget {
                   ],
                 ),
               ),
-              const TabBar(
+              TabBar(
                 labelColor: AppColors.accent,
                 unselectedLabelColor: AppColors.textMuted,
                 indicatorColor: AppColors.accent,
@@ -193,8 +193,8 @@ class _InboundWebhooksPanelState extends State<InboundWebhooksPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(22, 12, 22, 0),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
           child: Text(
             'An external system POSTs {"text": "…"} to a webhook URL to post into this channel as a '
             'bot. Treat each URL like a password.',
@@ -204,15 +204,15 @@ class _InboundWebhooksPanelState extends State<InboundWebhooksPanel> {
         if (_error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
-            child: Text(_error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
+            child: Text(_error!, style: TextStyle(color: AppColors.bad, fontSize: 12.5)),
           ),
         const SizedBox(height: 12),
         Expanded(
           child: webhooks == null
-              ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
+              ? Center(child: CircularProgressIndicator(color: AppColors.accent))
               : webhooks.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 30, horizontal: 22),
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 22),
                   child: Align(alignment: Alignment.topLeft, child: Text('No webhooks yet.', style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic))),
                 )
               : ListView.separated(
@@ -330,15 +330,15 @@ class _GlobalInboundWebhooksPanelState extends State<GlobalInboundWebhooksPanel>
         if (_error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
-            child: Text(_error!, style: const TextStyle(color: AppColors.bad, fontSize: 12.5)),
+            child: Text(_error!, style: TextStyle(color: AppColors.bad, fontSize: 12.5)),
           ),
         const SizedBox(height: 12),
         Expanded(
           child: webhooks == null
-              ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
+              ? Center(child: CircularProgressIndicator(color: AppColors.accent))
               : byChannel.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 30, horizontal: 22),
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 22),
                   child: Align(alignment: Alignment.topLeft, child: Text('No webhooks yet.', style: TextStyle(color: AppColors.textFaint, fontStyle: FontStyle.italic))),
                 )
               : ListView(
@@ -347,7 +347,7 @@ class _GlobalInboundWebhooksPanelState extends State<GlobalInboundWebhooksPanel>
                     for (final entry in byChannel.entries) ...[
                       Padding(
                         padding: const EdgeInsets.only(top: 6, bottom: 8),
-                        child: Text(entry.key, style: const TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w700)),
+                        child: Text(entry.key, style: TextStyle(color: AppColors.textMuted, fontSize: 12.5, fontWeight: FontWeight.w700)),
                       ),
                       for (final w in entry.value) ...[
                         _WebhookTile(webhook: w, origin: widget.api.origin, onRevoke: _busy ? null : () => _revoke(w)),
@@ -357,11 +357,11 @@ class _GlobalInboundWebhooksPanelState extends State<GlobalInboundWebhooksPanel>
                   ],
                 ),
         ),
-        const Divider(height: 1, color: AppColors.border),
+        Divider(height: 1, color: AppColors.border),
         Padding(
           padding: const EdgeInsets.fromLTRB(22, 14, 22, 20),
           child: targets.isEmpty
-              ? const Text('No channels to add a webhook to.', style: TextStyle(color: AppColors.textFaint, fontSize: 12.5))
+              ? Text('No channels to add a webhook to.', style: TextStyle(color: AppColors.textFaint, fontSize: 12.5))
               : _ChannelPicker(
                   channels: targets,
                   value: _createChannelId,
@@ -380,11 +380,11 @@ Future<bool> _confirmRevoke(BuildContext context, String detail) async {
     context: context,
     builder: (_) => AlertDialog(
       backgroundColor: AppColors.surface,
-      title: const Text('Revoke webhook?', style: TextStyle(color: AppColors.text, fontSize: 16)),
-      content: Text('$detail Any external system using it will start getting 401s.', style: const TextStyle(color: AppColors.textMuted, fontSize: 13)),
+      title: Text('Revoke webhook?', style: TextStyle(color: AppColors.text, fontSize: 16)),
+      content: Text('$detail Any external system using it will start getting 401s.', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
       actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
-        TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Revoke', style: TextStyle(color: AppColors.bad))),
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+        TextButton(onPressed: () => Navigator.of(context).pop(true), child: Text('Revoke', style: TextStyle(color: AppColors.bad))),
       ],
     ),
   );
@@ -418,7 +418,7 @@ class _FooterButton extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          if (busy) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent)),
+          if (busy) SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent)),
         ],
       ),
     );
@@ -473,7 +473,7 @@ class _WebhookTile extends StatelessWidget {
           const SizedBox(height: 2),
           Text(
             'Created by ${webhook.createdBy}${webhook.createdAt.isEmpty ? '' : ' · ${shortId(webhook.id)}'}',
-            style: const TextStyle(color: AppColors.textFaint, fontSize: 11),
+            style: TextStyle(color: AppColors.textFaint, fontSize: 11),
           ),
         ],
       ),
@@ -509,8 +509,8 @@ class _ChannelPicker extends StatelessWidget {
                 isExpanded: true,
                 isDense: true,
                 dropdownColor: AppColors.surfaceAlt,
-                style: const TextStyle(color: AppColors.text, fontSize: 13),
-                icon: const Icon(Icons.arrow_drop_down, color: AppColors.textMuted),
+                style: TextStyle(color: AppColors.text, fontSize: 13),
+                icon: Icon(Icons.arrow_drop_down, color: AppColors.textMuted),
                 onChanged: onChanged,
                 items: [
                   for (final c in channels) DropdownMenuItem(value: c.id, child: Text(c.name.isEmpty ? c.id : c.name, overflow: TextOverflow.ellipsis)),
