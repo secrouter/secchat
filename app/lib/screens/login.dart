@@ -24,6 +24,8 @@ class LoginScreen extends StatefulWidget {
     this.onSsoLogin,
     this.ssoAvailable = false,
     this.ssoError,
+    this.onSetServer,
+    this.serverLabel,
   });
 
   /// Called with the trimmed username and the admin checkbox state.
@@ -51,6 +53,18 @@ class LoginScreen extends StatefulWidget {
   /// proof SSO is configured and reachable -- there's no world where this
   /// value is set and SSO *isn't* usable.
   final String? ssoError;
+
+  /// Mobile/desktop "Change server": called with the raw URL the user typed
+  /// (empty to reset to the build's default). Returns an error message to
+  /// display, or `null` on success (the app re-probes the new server and
+  /// rebuilds this screen). `null` on web, where the server is always the
+  /// page origin and the control is hidden entirely.
+  final Future<String?> Function(String url)? onSetServer;
+
+  /// The origin currently in effect, for display next to the "Change server"
+  /// control. `null` means the build has no server configured (the dev
+  /// same-origin fallback).
+  final String? serverLabel;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -215,6 +229,10 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 12),
             _ErrorBanner(_error!),
           ],
+          if (widget.onSetServer != null) ...[
+            const SizedBox(height: 16),
+            _buildServerRow(),
+          ],
           const SizedBox(height: 22),
           Container(
             padding: const EdgeInsets.only(top: 18),
@@ -249,6 +267,63 @@ class _LoginScreenState extends State<LoginScreen> {
         ],
       ),
     );
+  }
+
+  /// The server the app talks to, with a "Change" affordance (mobile/desktop
+  /// only -- [LoginScreen.onSetServer] is null on web and this row never
+  /// renders). Kept visually quiet: it matters once per device, not per
+  /// sign-in.
+  Widget _buildServerRow() {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            'Server: ${widget.serverLabel ?? 'same origin'}',
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+          ),
+        ),
+        TextButton(
+          onPressed: _submitting ? null : _changeServer,
+          child: const Text('Change', style: TextStyle(fontSize: 12)),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _changeServer() async {
+    final controller = TextEditingController(text: widget.serverLabel ?? '');
+    final url = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Text('Server', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          style: TextStyle(color: AppColors.text, fontSize: 14),
+          decoration: const InputDecoration(hintText: 'https://secchat.example.com'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (url == null || !mounted) return; // cancelled
+    final error = await widget.onSetServer!(url);
+    if (!mounted) return;
+    setState(() => _error = error);
   }
 
   /// The primary SecSSO button, its error banner (if the last attempt
