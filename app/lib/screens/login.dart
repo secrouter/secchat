@@ -292,34 +292,10 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _changeServer() async {
-    final controller = TextEditingController(text: widget.serverLabel ?? '');
     final url = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text('Server', style: TextStyle(color: AppColors.text, fontSize: 16)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          style: TextStyle(color: AppColors.text, fontSize: 14),
-          decoration: const InputDecoration(hintText: 'https://secchat.example.com'),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (context) => _ServerDialog(initial: widget.serverLabel ?? ''),
     );
-    controller.dispose();
     if (url == null || !mounted) return; // cancelled
     final error = await widget.onSetServer!(url);
     if (!mounted) return;
@@ -350,6 +326,59 @@ class _LoginScreenState extends State<LoginScreen> {
       const _SectionDivider(label: 'Developer sign-in'),
       const SizedBox(height: 20),
     ];
+  }
+}
+
+/// The "Change server" dialog. A dedicated StatefulWidget so the
+/// [TextEditingController] is owned by the dialog's own State and disposed in
+/// its [State.dispose] — i.e. only after the route (including its exit
+/// animation, which still renders the TextField) is fully torn down.
+/// Disposing it from the caller right after `showDialog` returns trips
+/// framework assertion `_dependents.isEmpty` while the route animates out.
+class _ServerDialog extends StatefulWidget {
+  const _ServerDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_ServerDialog> createState() => _ServerDialogState();
+}
+
+class _ServerDialogState extends State<_ServerDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: Text('Server', style: TextStyle(color: AppColors.text, fontSize: 16)),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        keyboardType: TextInputType.url,
+        autocorrect: false,
+        style: TextStyle(color: AppColors.text, fontSize: 14),
+        decoration: const InputDecoration(hintText: 'https://secchat.example.com'),
+        onSubmitted: (value) => Navigator.of(context).pop(value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+    );
   }
 }
 
