@@ -7,6 +7,7 @@ import 'api.dart';
 import 'models.dart';
 import 'platform/browser_redirect.dart';
 import 'platform/native_sso.dart';
+import 'platform/server_prefs.dart';
 import 'platform/session_store.dart';
 import 'platform/theme_prefs.dart';
 import 'screens/chat.dart';
@@ -22,8 +23,15 @@ import 'theme.dart';
 /// `/me`, and every API/agent call against `file://…` and they all fail — the
 /// login screen degrades to the dev form and the assistant/agent pages 404.
 const String _secchatOrigin = String.fromEnvironment('SECCHAT_ORIGIN');
+
+/// User-chosen server from the login screen, overriding the compile-time
+/// default above (see [ServerPrefs]). Loaded once at boot; never set on web,
+/// which always inherits the page origin.
+Uri? _serverOverride;
+
 Uri? get backendOrigin =>
-    _secchatOrigin.isEmpty ? null : Uri.parse(_secchatOrigin);
+    _serverOverride ??
+    (_secchatOrigin.isEmpty ? null : Uri.parse(_secchatOrigin));
 
 /// App root: an auth gate between [LoginScreen] and [ChatScreen], holding
 /// the signed-in [ApiClient] + [Principal] in memory only (nothing is
@@ -100,6 +108,10 @@ class _SecChatAppState extends State<SecChatApp> {
   /// [LoginScreen] instead of hanging or crashing.
   Future<void> _boot() async {
     final ssoError = Uri.base.queryParameters['auth_error'];
+    // A server the user set on a previous launch beats the compile-time
+    // default. Web always talks to the origin that served the app, so the
+    // override is never even loaded there.
+    if (!kIsWeb) _serverOverride = await ServerPrefs.load();
     // Restore a persisted desktop session first (secure storage), so a relaunch skips the SSO
     // login. On web there's no stored token — the browser's same-origin cookie carries the session
     // instead, so the cookie-mode probe below still works.
@@ -198,6 +210,32 @@ class _SecChatAppState extends State<SecChatApp> {
     unawaited(_performSignOut());
   }
 
+  /// Login-screen "Change server": validates and persists the new origin,
+  /// then re-runs the boot probe against it (SSO availability and any live
+  /// session are per-server, so neither carries over). An empty [input]
+  /// clears the override back to the compile-time default. Returns an error
+  /// message to display, or `null` on success.
+  Future<String?> _handleSetServer(String input) async {
+    final trimmed = input.trim();
+    Uri? origin;
+    if (trimmed.isNotEmpty) {
+      // A bare host is the common thing to type; default it to https rather
+      // than rejecting it.
+      origin = Uri.tryParse(trimmed.contains('://') ? trimmed : 'https://$trimmed');
+      if (origin == null ||
+          (origin.scheme != 'http' && origin.scheme != 'https') ||
+          origin.host.isEmpty) {
+        return 'Enter a valid http(s) server URL, e.g. https://secchat.example.com';
+      }
+    }
+    await ServerPrefs.save(origin);
+    _serverOverride = origin;
+    if (!mounted) return null;
+    setState(() => _booting = true);
+    await _boot();
+    return null;
+  }
+
   /// Best-effort `POST /auth/logout` (clears the session cookie
   /// server-side; a harmless no-op round trip in dev/bearer mode), awaited
   /// *before* disposing the client -- so the request has actually gone out
@@ -275,6 +313,10 @@ class _SecChatAppState extends State<SecChatApp> {
       onSsoLogin: kIsWeb ? null : _handleSsoLogin,
       ssoAvailable: _ssoAvailable,
       ssoError: _ssoError,
+      // Web inherits the page origin; only mobile/desktop can point at a
+      // different server.
+      onSetServer: kIsWeb ? null : _handleSetServer,
+      serverLabel: kIsWeb ? null : backendOrigin?.toString(),
     );
   }
 }
